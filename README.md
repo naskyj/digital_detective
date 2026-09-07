@@ -30,7 +30,12 @@ Start with **[docs/README.md](docs/README.md)** — it indexes the doc set:
 
 ## Quick start
 
+Needs [`uv`](https://docs.astral.sh/uv/) and **Python 3.12 or 3.13** (not 3.14 —
+a C-extension dependency has no 3.14 wheel yet; the repo pins 3.13 via
+`.python-version`).
+
 ```bash
+uv python install 3.13
 uv sync --all-packages --extra chromium
 uv run dd-lab                 # the investigator app (add --extra desktop for a native window)
 uv run dd-collect --list      # the portable collector

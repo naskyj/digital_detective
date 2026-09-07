@@ -25,18 +25,24 @@ Run it:
 - `dd-collect.exe --list` → enumerate Electron apps
 - `dd-collect.exe --app Discord --output E:\evidence --memory --operator "Det. Smith"`
 
-### Bundling memory tools (optional)
+### Bundling memory-*acquisition* tools (optional)
+
+RAM is volatile — it can only be captured live on the examined machine, and
+Windows needs a kernel driver to read physical memory. These tools do that
+capture; they are **not** analysis tools (Volatility runs later, on the
+investigator machine — see step 2). They are separate from Volatility and
+serve the opposite end of the workflow.
 
 Put the executables in `packaging/tools/` before building and they are embedded
 next to `dd-collect.exe`:
 
-| Tool | Purpose | Get it |
+| Tool | Captures → | Get it |
 |---|---|---|
-| `winpmem.exe` | full physical RAM capture | https://github.com/Velocidex/WinPmem/releases |
-| `procdump.exe` | per-process memory dump | https://learn.microsoft.com/sysinternals/downloads/procdump |
+| `winpmem.exe` | full physical RAM → `physmem.raw` | https://github.com/Velocidex/WinPmem/releases |
+| `procdump.exe` | one process → `pid_<n>.dmp` | https://learn.microsoft.com/sysinternals/downloads/procdump |
 
-Without them, `--memory` still collects disk artifacts and records that memory
-capture was skipped.
+Without them, `--memory` still collects all disk artifacts and records that
+memory capture was skipped. For a disk-only collection you don't need either.
 
 ## 2. Investigator app — `dist/dd-lab/` (one directory)
 
@@ -54,10 +60,15 @@ local server and opens the window (falls back to the default browser at
 ### Heavy optional extras
 
 `transformers` / `torch` (zero-shot classifier), `onnxruntime` (trained model)
-and `volatility3` (full-image memory analysis) are **excluded** from the bundle
-to keep it small. If you need them baked in, remove the matching name from
+and `volatility3` (memory *analysis* — reads the dumps the collector captured;
+the counterpart to winpmem/procdump above) are **excluded** from the bundle to
+keep it small. If you need them baked in, remove the matching name from
 `excludes` in `packaging/lab.spec`, `uv sync … --extra zeroshot --extra memory`,
 and rebuild — expect the bundle to grow by 1–3 GB.
+
+> Without `volatility3`, the lab still runs **string carving** on any dump
+> (tokens, chat text, URLs — no dependency). Volatility adds the structured OS
+> view (processes, connections) and only for a full physical-memory image.
 
 For most deployments, keep them out and let the machine that needs them install
 them into a normal Python environment instead.

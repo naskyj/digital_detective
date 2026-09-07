@@ -2,7 +2,7 @@
 name = "dd-collector"
 version = "0.1.0"
 description = "Portable evidence acquisition tool for Electron applications (Windows)"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "dd-core",
     "psutil>=6.0",

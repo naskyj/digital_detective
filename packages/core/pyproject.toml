@@ -2,7 +2,7 @@
 name = "dd-core"
 version = "0.1.0"
 description = "Shared core: artifact schema, hashing, manifest, chain-of-custody, signing"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "pydantic>=2.9",
     "cryptography>=43.0",

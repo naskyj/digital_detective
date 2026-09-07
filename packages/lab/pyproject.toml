@@ -2,7 +2,7 @@
 name = "dd-lab"
 version = "0.1.0"
 description = "Digital Detective investigator application: agent, parsers, ETL, classifier, report"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "dd-core",
     "dd-collector",
