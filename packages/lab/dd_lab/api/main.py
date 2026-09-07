@@ -258,15 +258,21 @@ def run_case(case_id: str) -> dict:
 
 @app.get("/api/cases/{case_id}/artifacts")
 def case_artifacts(
-    case_id: str, category: str | None = None, q: str | None = None, limit: int = 100
+    case_id: str,
+    category: str | None = None,
+    app: str | None = None,
+    source_type: str | None = None,
+    q: str | None = None,
+    limit: int = 200,
 ) -> dict:
     deps = InvestigationDeps(cases_root=Path(_settings.cases_root), case_id=case_id)
     if not deps.layout.warehouse.is_file():
         raise HTTPException(409, "case not processed yet")
     where, params = [], []
-    if category:
-        where.append("category = ?")
-        params.append(category)
+    for col, val in (("category", category), ("app", app), ("source_type", source_type)):
+        if val:
+            where.append(f"{col} = ?")
+            params.append(val)
     if q:
         where.append("(key ILIKE ? OR value ILIKE ?)")
         params += [f"%{q}%", f"%{q}%"]
@@ -275,15 +281,23 @@ def case_artifacts(
 
     wh = Warehouse(deps.layout.warehouse)
     try:
+        total = wh.query(f"SELECT count(*) AS n FROM artifacts {clause}", list(params))[0]["n"]
         rows = wh.query(
             f"SELECT app, source_type, category, confidence, key, substr(value,1,300) AS value, "
             f"record_ts, source_file FROM artifacts {clause} "
-            f"ORDER BY (category != 'GENERAL') DESC, confidence DESC LIMIT {int(limit)}",
-            params,
+            f"ORDER BY (category != 'GENERAL') DESC, confidence DESC NULLS LAST, key "
+            f"LIMIT {int(limit)}",
+            list(params),
         )
+        facets = {
+            "apps": [r["app"] for r in wh.query(
+                "SELECT DISTINCT app FROM artifacts ORDER BY app")],
+            "source_types": [r["source_type"] for r in wh.query(
+                "SELECT DISTINCT source_type FROM artifacts ORDER BY source_type")],
+        }
     finally:
         wh.close()
-    return {"rows": rows}
+    return {"rows": rows, "total": total, "shown": len(rows), "facets": facets}
 
 
 @app.post("/api/cases/{case_id}/query")

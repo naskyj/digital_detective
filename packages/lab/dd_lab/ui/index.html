@@ -339,12 +339,29 @@ async function vCase(m){
 function browser(id,cats){
   const wrap=el('div',{class:'panel'});
   const cat=el('select',{}, el('option',{value:''},'all categories'), ...cats.map(c=>el('option',{value:c},c)));
-  const q=el('input',{placeholder:'search key / value',style:'flex:1'});
+  const appSel=el('select',{}, el('option',{value:''},'all apps'));
+  const srcSel=el('select',{}, el('option',{value:''},'all sources'));
+  const q=el('input',{placeholder:'search key or value',style:'flex:1;min-width:180px'});
+  const count=el('div',{class:'hint'});
   const out=el('div',{class:'scroll',style:'margin-top:10px'});
+  let facetsLoaded=false;
   async function load(){
     out.innerHTML='<div class="muted" style="padding:10px">loading…</div>';
-    const p=new URLSearchParams(); if(cat.value)p.set('category',cat.value); if(q.value)p.set('q',q.value); p.set('limit','200');
+    const p=new URLSearchParams();
+    if(cat.value)p.set('category',cat.value);
+    if(appSel.value)p.set('app',appSel.value);
+    if(srcSel.value)p.set('source_type',srcSel.value);
+    if(q.value)p.set('q',q.value);
+    p.set('limit','300');
     const d=await api('/cases/'+id+'/artifacts?'+p);
+    if(!facetsLoaded && d.facets){
+      d.facets.apps.forEach(a=>appSel.append(el('option',{value:a},a)));
+      d.facets.source_types.forEach(s=>srcSel.append(el('option',{value:s},s)));
+      facetsLoaded=true;
+    }
+    count.textContent = d.total>d.shown
+      ? `showing ${d.shown} of ${d.total.toLocaleString()} matching — narrow the filters to see more`
+      : `${d.total.toLocaleString()} matching`;
     const t=el('table',{},el('thead',{},el('tr',{},...['Category','Conf','App','Source','Key','Value'].map(h=>el('th',{},h)))));
     const tb=el('tbody',{});
     d.rows.forEach(r=>tb.append(el('tr',{},
@@ -354,8 +371,10 @@ function browser(id,cats){
       el('td',{class:'mono'},r.key), el('td',{},r.value))));
     t.append(tb); out.innerHTML=''; out.append(t);
   }
-  cat.onchange=load; let tmo; q.oninput=()=>{clearTimeout(tmo);tmo=setTimeout(load,300);};
-  wrap.append(el('h2',{},'Artifact browser'), el('div',{class:'row'},cat,q), out);
+  cat.onchange=appSel.onchange=srcSel.onchange=load;
+  let tmo; q.oninput=()=>{clearTimeout(tmo);tmo=setTimeout(load,300);};
+  wrap.append(el('h2',{style:'margin-top:0'},'Artifact browser'),
+    el('div',{class:'row'},cat,appSel,srcSel,q), count, out);
   load();
   return wrap;
 }

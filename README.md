@@ -14,7 +14,8 @@ required. An optional local or hosted LLM can orchestrate the investigation.
 
 ## Documentation
 
-Start with **[docs/README.md](docs/README.md)** — it indexes the doc set:
+In a hurry: **[docs/CHEATSHEET.md](docs/CHEATSHEET.md)**. Otherwise start with
+**[docs/README.md](docs/README.md)** — it indexes the doc set:
 
 | | |
 |---|---|
