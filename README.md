@@ -21,6 +21,7 @@ Start with **[docs/README.md](docs/README.md)** — it indexes the doc set:
 | [docs/OVERVIEW.md](docs/OVERVIEW.md) | what it is, the shape of the system |
 | [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) | one investigation traced end to end |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | every component, data structure, schema |
+| [docs/AGENT.md](docs/AGENT.md) | the deterministic runner vs. the LLM agent — what, why, how |
 | [docs/HOW_TO_RUN.md](docs/HOW_TO_RUN.md) | install, collect, run a case, read the report |
 | [docs/FIELD_GUIDE.md](docs/FIELD_GUIDE.md) | examine a Windows PC from a Mac — concrete steps |
 | [docs/LLM_SETUP.md](docs/LLM_SETUP.md) | configure the agent's model (Ollama / API) |
