@@ -210,8 +210,13 @@ def get_case(case_id: str) -> dict:
         },
         "warehouse": summary,
         "reports": [r.name for r in reports],
-        "active_job": _jobs.active_for(case_id),
+        "active_job": _jobs.active_for(case_id) or _last_job(case_id),
     }
+
+
+def _last_job(case_id: str) -> dict | None:
+    recent = _jobs.list(case_id, limit=1)
+    return _jobs.get(recent[0]["id"]) if recent else None
 
 
 @app.post("/api/cases/{case_id}/run")

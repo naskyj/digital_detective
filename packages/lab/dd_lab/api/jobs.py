@@ -37,7 +37,18 @@ class JobManager:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._lock = threading.Lock()
-        self._con().executescript(_SCHEMA)
+        con = self._con()
+        con.executescript(_SCHEMA)
+        # Jobs run on worker threads that do not survive a process restart, so
+        # anything still 'queued'/'running' at startup is orphaned. Mark it so
+        # the case isn't stuck with a phantom active job (which disables "Run").
+        con.execute(
+            "UPDATE jobs SET status = 'error', "
+            "error = 'interrupted — the app was restarted while this job was running', "
+            "updated_ts = ? WHERE status IN ('queued', 'running')",
+            (_now(),),
+        )
+        con.commit()
 
     def _con(self) -> sqlite3.Connection:
         con = getattr(self._local, "con", None)

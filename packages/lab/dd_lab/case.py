@@ -71,6 +71,13 @@ def create_case(
 
 
 def list_cases(cases_root: str | Path) -> list[CaseMeta]:
+    """Every case folder under the root.
+
+    A folder is listed if it has a signed manifest (a real case) OR a `case.json`.
+    A folder that looks like an aborted acquisition — it has `evidence/` or a
+    custody log but no `manifest.json` — is also listed, flagged ERROR, so the
+    investigator can see it exists and why it can't be analysed.
+    """
     root = Path(cases_root)
     if not root.is_dir():
         return []
@@ -80,8 +87,16 @@ def list_cases(cases_root: str | Path) -> list[CaseMeta]:
             continue
         layout = CaseLayout(root, d.name)
         meta = CaseMeta.load_or_none(layout)
-        if meta is None and layout.manifest.is_file():
-            meta = CaseMeta(case_id=d.name, name=d.name)
         if meta is not None:
             out.append(meta)
+            continue
+        if layout.manifest.is_file():
+            out.append(CaseMeta(case_id=d.name, name=d.name))
+            continue
+        if (layout.evidence.is_dir() or layout.custody_log.is_file()):
+            out.append(CaseMeta(
+                case_id=d.name, name=d.name, status=CaseStatus.ERROR,
+                last_message="incomplete acquisition — no signed manifest.json; "
+                             "re-run the collector for this case",
+            ))
     return out

@@ -160,18 +160,31 @@ async function vCase(m){
       el('span',{class:'pill '+(iv.ok?'ok':'bad')}, iv.ok?'integrity verified':'INTEGRITY FAILED'),
       el('span',{class:'muted'},`${iv.files} files · ${d.evidence.apps.join(', ')} · ${(d.evidence.bytes/1e6).toFixed(1)} MB · host ${d.evidence.host}`)),
     d.meta.keywords.length?el('div',{class:'muted',style:'margin-top:6px'},'keywords: '+d.meta.keywords.join(', ')):'',
-    el('div',{class:'row',style:'margin-top:12px'},
-      el('button',{disabled:!!d.active_job,onclick:async()=>{
-        const log=$('#runlog'); log.style.display='block'; log.textContent='';
-        try{ const {job_id}=await api('/cases/'+id+'/run',{method:'POST'});
-          await pollJob(job_id,log,()=>go('case',id)); }catch(e){log.textContent='ERROR: '+e.message;}
-      }}, d.warehouse?'Re-run analysis':'Run analysis'),
-      d.reports.length?el('button',{class:'sec',onclick:()=>window.open('/api/cases/'+id+'/report','_blank')},'View report'):'',
-      el('button',{class:'ghost',onclick:()=>showAudit(id)},'Audit trail')),
+    (function(){
+      const running = d.active_job && (d.active_job.status==='queued'||d.active_job.status==='running');
+      const runBtn = el('button',{onclick:async(e)=>{
+        e.target.disabled=true;
+        const log=$('#runlog'); log.style.display='block'; log.textContent='requesting run…';
+        try{
+          const r=await api('/cases/'+id+'/run',{method:'POST'});
+          await pollJob(r.job_id,log,()=>go('case',id));
+        }catch(err){ log.textContent='ERROR: '+err.message; e.target.disabled=false; }
+      }}, d.warehouse?'Re-run analysis':'Run analysis');
+      if(running) runBtn.disabled=true;
+      return el('div',{class:'row',style:'margin-top:12px'},
+        runBtn,
+        d.reports.length?el('button',{class:'sec',onclick:()=>window.open('/api/cases/'+id+'/report','_blank')},'View report'):'',
+        el('button',{class:'ghost',onclick:()=>showAudit(id)},'Audit trail'),
+        running?el('span',{class:'muted'},`a ${d.active_job.status} job is holding this case`):'');
+    })(),
     el('div',{id:'runlog',class:'log',style:'display:none;margin-top:10px'},
-      d.active_job?d.active_job.log.map(l=>l.msg).join('\n'):'')));
+      d.active_job?(d.active_job.log||[]).map(l=>l.msg).join('\n')+
+        (d.active_job.status==='error'?'\n\n'+(d.active_job.error||'previous run failed'):''):'')));
 
-  if(d.active_job) pollJob(d.active_job.id,$('#runlog'),()=>go('case',id));
+  if(d.active_job){
+    if(d.active_job.status==='error') $('#runlog').style.display='block';
+    else if(d.active_job.status!=='done') pollJob(d.active_job.id,$('#runlog'),()=>go('case',id));
+  }
 
   if(d.warehouse){
     const w=d.warehouse, max=Math.max(...w.by_category.map(c=>c.artifacts),1);
