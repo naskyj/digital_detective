@@ -78,3 +78,27 @@ def test_source_is_not_modified(tmp_path):
     acquire([ElectronApp(name="t", profile_dir=profile)], tmp_path, operator="op")
     after = prefs.stat().st_mtime if prefs.is_file() else None
     assert before == after
+
+
+def test_locked_file_is_skipped_not_fatal(tmp_path):
+    """A single unreadable file (as a running app's LevelDB WAL would be) must
+    not abort the acquisition — it's recorded and the rest proceeds."""
+    import os
+
+    from dd_core.evidence import CopySpec, execute_copy
+
+    src = tmp_path / "leveldb"
+    src.mkdir()
+    (src / "000005.ldb").write_bytes(b"committed")
+    locked = src / "000006.log"
+    locked.write_bytes(b"wal")
+    os.chmod(locked, 0)
+    try:
+        report = execute_copy(
+            [CopySpec(source=src, dest_rel="local_storage/leveldb", is_dir=True)],
+            tmp_path / "out",
+        )
+        assert any("000005" in p.name for p in report.written)
+        assert report.skipped and "000006.log" in report.skipped[0][0]
+    finally:
+        os.chmod(locked, 0o644)

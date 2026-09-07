@@ -121,18 +121,39 @@ def acquire(
         dest_name = _safe_name(app.name)
         app_evidence = layout.evidence / dest_name
         app_evidence.mkdir(parents=True, exist_ok=True)
+
+        if app.running:
+            msg = (f"{app.name} is RUNNING (pids {', '.join(map(str, app.pids))}) — "
+                   f"its databases may be partially locked; close it for a clean copy")
+            warnings.append(msg)
+            say(f"[{app.name}] WARNING: {msg}")
+
         say(f"[{app.name}] copying profile from {app.profile_dir}")
         specs = plan_profile_copy(app.profile_dir)
         if not specs:
             warnings.append(f"{app.name}: no recognisable Chromium data at {app.profile_dir}")
             say(f"[{app.name}] WARNING: nothing to copy")
             continue
-        written = execute_copy(specs, app_evidence)
-        say(f"[{app.name}] copied {len(written)} files")
+
+        try:
+            report = execute_copy(specs, app_evidence)
+        except Exception as e:  # noqa: BLE001 - one bad app must not kill the case
+            warnings.append(f"{app.name}: copy failed ({e}); skipped")
+            say(f"[{app.name}] ERROR: copy failed: {e}")
+            custody.append(CustodyEvent.NOTE, operator or "collector",
+                           f"{app.name}: copy failed - {e}")
+            continue
+
+        say(f"[{app.name}] copied {len(report.written)} files"
+            + (f", skipped {len(report.skipped)} locked/unreadable" if report.skipped else ""))
+        for src, reason in report.skipped[:20]:
+            warnings.append(f"{app.name}: could not copy {src} ({reason})")
         custody.append(
             CustodyEvent.ARTIFACT_ACQUIRED, operator or "collector",
-            f"{app.name}: {len(written)} files from {app.profile_dir}",
-            data={"sources": [s.dest_rel for s in specs]},
+            f"{app.name}: {len(report.written)} files copied, {len(report.skipped)} skipped, "
+            f"from {app.profile_dir}",
+            data={"sources": [s.dest_rel for s in specs],
+                  "skipped": [s for s, _ in report.skipped[:50]]},
         )
 
         procs = [ProcessRef(pid=pid, name=app.name) for pid in app.pids]

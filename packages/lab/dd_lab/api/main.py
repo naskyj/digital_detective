@@ -16,13 +16,14 @@ from pydantic import BaseModel
 
 from dd_core.casedir import CaseLayout
 from dd_core.custody import CustodyLog
-from dd_core.manifest import Manifest, verify_case
+from dd_core.manifest import Manifest
 from dd_lab.agent.audit import AuditLog
 from dd_lab.agent.runner import run_agent, run_pipeline
 from dd_lab.agent.tools import InvestigationDeps, query_warehouse, search_keyword
 from dd_lab.api.jobs import JobManager
 from dd_lab.api.settings import AppSettings, describe_llm
 from dd_lab.case import CaseMeta, CaseStatus, create_case, list_cases, parse_keywords
+from dd_lab.verification import verify_cached
 
 log = logging.getLogger("dd_lab.api")
 
@@ -179,7 +180,7 @@ def get_case(case_id: str) -> dict:
         raise HTTPException(404, "case not found")
     meta = CaseMeta.load_or_none(layout) or CaseMeta(case_id=case_id, name=case_id)
     manifest = Manifest.read(layout.dir)
-    v = verify_case(layout.dir)
+    v, verified_ts = verify_cached(_settings.cases_root, case_id)
 
     summary = None
     if layout.warehouse.is_file():
@@ -201,7 +202,8 @@ def get_case(case_id: str) -> dict:
     return {
         "meta": meta.model_dump(mode="json"),
         "integrity": {"ok": v.ok, "signature_valid": v.signature_valid, "files": v.checked,
-                      "issues": [i.model_dump() for i in v.issues[:20]]},
+                      "issues": [i.model_dump() for i in v.issues[:20]],
+                      "verified_ts": verified_ts.isoformat()},
         "evidence": {
             "apps": [t.name for t in manifest.target_apps],
             "files": manifest.entry_count, "bytes": manifest.total_bytes,
@@ -217,6 +219,16 @@ def get_case(case_id: str) -> dict:
 def _last_job(case_id: str) -> dict | None:
     recent = _jobs.list(case_id, limit=1)
     return _jobs.get(recent[0]["id"]) if recent else None
+
+
+@app.post("/api/cases/{case_id}/verify")
+def reverify_case(case_id: str) -> dict:
+    layout = _layout(case_id)
+    if not layout.manifest.is_file():
+        raise HTTPException(404, "case not found")
+    v, ts = verify_cached(_settings.cases_root, case_id, force=True)
+    return {"ok": v.ok, "signature_valid": v.signature_valid, "files": v.checked,
+            "issues": [i.model_dump() for i in v.issues[:50]], "verified_ts": ts.isoformat()}
 
 
 @app.post("/api/cases/{case_id}/run")

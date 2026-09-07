@@ -20,9 +20,18 @@
   .card .n{font-size:26px;font-weight:700}.card .l{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
   .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  button{background:var(--accent2);color:#fff;border:0;border-radius:7px;padding:7px 13px;font-size:13px;cursor:pointer}
-  button.sec{background:#e4e4e7;color:#27272a}button.ghost{background:transparent;color:var(--accent2)}
-  button:disabled{opacity:.5;cursor:default}
+  button{background:var(--accent2);color:#fff;border:0;border-radius:7px;padding:8px 14px;font-size:13px;cursor:pointer;font-weight:500;transition:filter .1s}
+  button:hover:not(:disabled){filter:brightness(1.08)}
+  button.primary{padding:10px 20px;font-size:14px;box-shadow:0 1px 3px rgba(0,0,0,.12)}
+  button.sec{background:#e8e8ea;color:#27272a}
+  button.ghost{background:transparent;color:var(--accent2);padding:8px 8px}
+  button.danger{background:var(--bad)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .hint{font-size:12px;color:var(--muted);margin-top:6px}
+  .spin{display:inline-block;width:12px;height:12px;border:2px solid #fff6;border-top-color:#fff;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px;margin-right:6px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .statusdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:1px}
+  .sd-completed{background:var(--ok)}.sd-running{background:#d97706}.sd-error{background:var(--bad)}.sd-new{background:#9ca3af}
   input,select,textarea{border:1px solid var(--line);border-radius:7px;padding:7px 9px;font:inherit;background:#fff}
   input,select{height:34px}textarea{width:100%;min-height:64px}
   label{font-size:12px;color:var(--muted);display:block;margin:8px 0 3px}
@@ -75,17 +84,21 @@ async function vDashboard(m){
     ...[['Total',c.total],['Running',c.running],['Completed',c.completed],['Stopped',c.stopped]]
       .map(([l,n])=>el('div',{class:'card'},el('div',{class:'n'},String(n)),el('div',{class:'l'},l)))));
   m.append(el('h2',{},'Cases'));
-  if(!d.cases.length) m.append(el('div',{class:'panel muted'},'No cases yet. Collect evidence, then create a case.'));
+  if(!d.cases.length) m.append(el('div',{class:'panel muted'},
+    'No cases yet. Go to Collect to acquire evidence, then Cases to open it.'));
   d.cases.forEach(cs=>{
+    const incomplete = cs.status==='error' && (cs.last_message||'').includes('incomplete acquisition');
     m.append(el('div',{class:'panel'},
       el('div',{class:'row'},
-        el('b',{},cs.name),
-        el('span',{class:'pill '+(cs.status==='completed'?'ok':cs.status==='error'?'bad':'')},cs.status),
+        el('span',{class:'statusdot sd-'+cs.status}), el('b',{},cs.name),
         el('span',{class:'muted mono'},cs.case_id),
         el('span',{style:'flex:1'}),
-        el('button',{class:'sec',onclick:()=>go('case',cs.case_id)},'Open')),
+        incomplete
+          ? el('span',{class:'pill bad'},'incomplete — re-collect')
+          : el('button',{class:'sec',onclick:()=>go('case',cs.case_id)},
+              cs.status==='completed'?'Open':'Open')),
       cs.keywords?.length?el('div',{class:'muted',style:'margin-top:6px'},'keywords: '+cs.keywords.join(', ')):'',
-      cs.last_message?el('div',{class:'muted',style:'margin-top:4px'},cs.last_message):''));
+      cs.last_message?el('div',{class:'hint'},cs.last_message):''));
   });
 }
 
@@ -93,39 +106,71 @@ async function vCollect(m){
   const d=await api('/apps');
   m.innerHTML=''; m.append(el('h1',{},'Collect Evidence'));
   const box=el('div',{class:'panel'});
-  box.append(el('div',{class:'muted'},'Select applications detected on this machine. Evidence is copied read-only and hash-signed.'));
+  box.append(el('div',{class:'hint',style:'margin-bottom:6px'},
+    'Copies the selected apps’ profiles read-only, hashes every file, and writes a '+
+    'signed evidence package into the cases directory. Quit an app before selecting '+
+    'it — a running app locks its database and some files will be skipped.'));
   const checks=[];
+  const anyRunning=d.apps.some(a=>a.running);
   d.apps.forEach(a=>{
     const cb=el('input',{type:'checkbox'}); checks.push([cb,a]);
     box.append(el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:8px'},
-      cb, el('span',{},el('b',{},a.name), a.version?' v'+a.version:'', a.running?el('span',{class:'pill'},' running'):''),
+      cb, el('span',{},el('b',{},a.name), a.version?' v'+a.version:'',
+        a.running?el('span',{class:'pill bad',style:'margin-left:6px'},'running — quit it first'):''),
       el('span',{class:'muted mono',style:'flex:1;text-align:right'},a.profile_dir)));
   });
-  box.append(el('label',{},'Operator'), el('input',{id:'op',placeholder:'e.g. Det. A. Smith',style:'width:280px'}));
+  if(anyRunning) box.append(el('div',{class:'hint',style:'color:var(--bad);margin-top:8px'},
+    'Some apps are running. Quit them (tray icon → Quit) and click Rescan for a clean copy.'));
+  box.append(el('div',{class:'row',style:'margin-top:8px'},
+    el('button',{class:'ghost',onclick:()=>render()},'↻ Rescan')));
+
+  box.append(el('label',{},'Operator name (recorded in the chain of custody)'),
+    el('input',{id:'op',placeholder:'e.g. Det. A. Smith',style:'width:300px'}));
   const mem=el('input',{type:'checkbox',id:'mem'});
-  box.append(el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:10px'},mem,'Capture memory (needs WinPmem / procdump on Windows)'));
-  box.append(el('label',{},'Case ID (optional — generated if blank)'), el('input',{id:'cid',placeholder:'20250622_204657',style:'width:280px'}));
+  box.append(el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:10px'},
+    mem,'Also capture memory (needs winpmem.exe / procdump.exe bundled with the collector)'));
+  box.append(el('label',{},'Case ID (optional — generated from the timestamp if blank)'),
+    el('input',{id:'cid',placeholder:'auto',style:'width:300px'}));
+
   const log=el('div',{class:'log',style:'display:none;margin-top:12px'});
-  const btn=el('button',{style:'margin-top:14px',onclick:async()=>{
-    const profiles=checks.filter(([c])=>c.checked).map(([,a])=>a.profile_dir);
-    if(!profiles.length)return alert('Select at least one app.');
-    btn.disabled=true; log.style.display='block'; log.textContent='';
+  const done=el('div',{style:'display:none;margin-top:12px'});
+  const btn=el('button',{class:'primary',style:'margin-top:16px',onclick:async()=>{
+    const chosen=checks.filter(([c])=>c.checked).map(([,a])=>a);
+    if(!chosen.length)return alert('Select at least one application.');
+    btn.disabled=true; btn.innerHTML='<span class="spin"></span>collecting…';
+    log.style.display='block'; log.textContent=''; done.style.display='none';
     try{
-      const {job_id}=await api('/collect',{method:'POST',body:JSON.stringify({profiles,operator:$('#op').value,memory:mem.checked,case_id:$('#cid').value||null})});
-      await pollJob(job_id,log);
-    }catch(e){log.textContent+='\nERROR: '+e.message;}
-    btn.disabled=false;
+      const r=await api('/collect',{method:'POST',body:JSON.stringify({
+        profiles:chosen.map(a=>a.profile_dir), operator:$('#op').value,
+        memory:mem.checked, case_id:$('#cid').value||null})});
+      const j=await pollJob(r.job_id,log);
+      if(j && j.status==='done' && j.result){
+        done.style.display='block'; done.innerHTML='';
+        done.append(
+          el('b',{},`✓ Collected case ${j.result.case_id}`),
+          el('div',{class:'hint'},`${j.result.files} files · ${(j.result.bytes/1e6).toFixed(1)} MB · `+
+            `key ${j.result.fingerprint}` + (j.result.warnings?.length?` · ${j.result.warnings.length} warning(s)`:'')),
+          el('button',{style:'margin-top:8px',onclick:()=>{state.newCaseId=j.result.case_id;go('cases');}},
+            'Create a case from this →'));
+      }
+    }catch(e){ log.textContent+='\nCould not start: '+e.message; }
+    btn.disabled=false; btn.textContent='Start Collection';
   }},'Start Collection');
-  box.append(btn, log);
+  box.append(btn, log, done);
   m.append(box);
 }
 
 async function pollJob(id,logEl,onDone){
   while(true){
-    const j=await api('/jobs/'+id);
+    let j; try{ j=await api('/jobs/'+id); }catch(e){ logEl.textContent+='\n(lost contact with the job)'; return; }
     logEl.textContent=j.log.map(l=>l.msg).join('\n');
+    if(j.status==='error') logEl.textContent+='\n\n✗ FAILED: '+((j.error||'').split('\n')[0]);
+    if(j.status==='done')  logEl.textContent+='\n\n✓ done';
     logEl.scrollTop=logEl.scrollHeight;
-    if(j.status==='done'||j.status==='error'){ if(onDone)onDone(j); return j; }
+    if(j.status==='done'||j.status==='error'){
+      if(onDone) setTimeout(()=>onDone(j), 900);   // let the user see the final line
+      return j;
+    }
     await new Promise(r=>setTimeout(r,700));
   }
 }
@@ -133,71 +178,161 @@ async function pollJob(id,logEl,onDone){
 async function vCases(m){
   const d=await api('/cases');
   m.innerHTML=''; m.append(el('h1',{},'Cases'));
+  const pre = state.newCaseId; state.newCaseId=null;
+  const cidI=el('input',{id:'ncid',placeholder:'from the collector',style:'width:300px',value:pre||''});
+  const createBtn=el('button',{class:'primary',style:'margin-top:14px',onclick:async(e)=>{
+    const cid=cidI.value.trim(), name=$('#nname').value.trim();
+    if(!cid||!name) return alert('Case ID and name are required.');
+    e.target.disabled=true;
+    try{
+      await api('/cases',{method:'POST',body:JSON.stringify({case_id:cid,name,
+        keywords:$('#nkw').value,description:$('#ndesc').value})});
+      go('case',cid);
+    }catch(err){ alert(err.message); e.target.disabled=false; }
+  }},'Create case');
   m.append(el('div',{class:'panel'},
-    el('div',{class:'muted'},'Create a case from a collected evidence set (its case ID comes from the collector).'),
-    el('label',{},'Case ID'), el('input',{id:'ncid',placeholder:'20250622_204657',style:'width:280px'}),
-    el('label',{},'Case name'), el('input',{id:'nname',placeholder:'e.g. Data breach investigation',style:'width:380px'}),
-    el('label',{},'Investigation keywords (comma or newline separated)'), el('textarea',{id:'nkw'}),
-    el('label',{},'Description'), el('textarea',{id:'ndesc'}),
-    el('button',{style:'margin-top:12px',onclick:async()=>{
-      try{ const r=await api('/cases',{method:'POST',body:JSON.stringify({case_id:$('#ncid').value.trim(),name:$('#nname').value.trim(),keywords:$('#nkw').value,description:$('#ndesc').value})});
-        go('case',r.case_id);
-      }catch(e){alert(e.message);}
-    }},'Create Case')));
-  m.append(el('h2',{},'Existing'));
-  d.cases.forEach(cs=>m.append(el('div',{class:'panel row'},
-    el('b',{},cs.name), el('span',{class:'pill '+(cs.status==='completed'?'ok':'')},cs.status),
-    el('span',{class:'muted mono'},cs.case_id), el('span',{style:'flex:1'}),
-    el('button',{class:'sec',onclick:()=>go('case',cs.case_id)},'Open'))));
+    el('b',{},'New case'),
+    el('div',{class:'hint'},'A case wraps a collected evidence folder with a name and the keywords you want investigated. The Case ID must match a folder in the cases directory (Settings).'),
+    el('label',{},'Case ID'), cidI,
+    el('label',{},'Case name'), el('input',{id:'nname',placeholder:'e.g. Discord DM review',style:'width:420px'}),
+    el('label',{},'Investigation keywords (comma or newline separated)'),
+    el('textarea',{id:'nkw',placeholder:'gift card, payment, username_of_interest'}),
+    el('label',{},'Description (optional)'), el('textarea',{id:'ndesc'}),
+    createBtn));
+  m.append(el('h2',{},'All cases'));
+  if(!d.cases.length) m.append(el('div',{class:'panel hint'},'None yet.'));
+  d.cases.forEach(cs=>{
+    const incomplete = cs.status==='error' && (cs.last_message||'').includes('incomplete acquisition');
+    m.append(el('div',{class:'panel'},
+      el('div',{class:'row'},
+        el('span',{class:'statusdot sd-'+cs.status}), el('b',{},cs.name),
+        el('span',{class:'muted mono'},cs.case_id), el('span',{style:'flex:1'}),
+        incomplete
+          ? el('span',{class:'pill bad'},'incomplete — re-collect')
+          : el('button',{class:'sec',onclick:()=>go('case',cs.case_id)},'Open')),
+      cs.last_message?el('div',{class:'hint'},cs.last_message):''));
+  });
+}
+
+function ago(iso){
+  if(!iso) return '';
+  const s=Math.max(0,(Date.now()-new Date(iso))/1000);
+  if(s<60) return 'just now';
+  if(s<3600) return Math.round(s/60)+' min ago';
+  if(s<86400) return Math.round(s/3600)+' h ago';
+  return Math.round(s/86400)+' d ago';
 }
 
 async function vCase(m){
-  const id=state.arg; const d=await api('/cases/'+encodeURIComponent(id));
-  m.innerHTML=''; m.append(el('h1',{},d.meta.name+' '), el('span',{class:'muted mono'},id));
-  const iv=d.integrity;
-  m.append(el('div',{class:'panel'},
-    el('div',{class:'row'},
-      el('span',{class:'pill '+(iv.ok?'ok':'bad')}, iv.ok?'integrity verified':'INTEGRITY FAILED'),
-      el('span',{class:'muted'},`${iv.files} files · ${d.evidence.apps.join(', ')} · ${(d.evidence.bytes/1e6).toFixed(1)} MB · host ${d.evidence.host}`)),
-    d.meta.keywords.length?el('div',{class:'muted',style:'margin-top:6px'},'keywords: '+d.meta.keywords.join(', ')):'',
-    (function(){
-      const running = d.active_job && (d.active_job.status==='queued'||d.active_job.status==='running');
-      const runBtn = el('button',{onclick:async(e)=>{
-        e.target.disabled=true;
-        const log=$('#runlog'); log.style.display='block'; log.textContent='requesting run…';
-        try{
-          const r=await api('/cases/'+id+'/run',{method:'POST'});
-          await pollJob(r.job_id,log,()=>go('case',id));
-        }catch(err){ log.textContent='ERROR: '+err.message; e.target.disabled=false; }
-      }}, d.warehouse?'Re-run analysis':'Run analysis');
-      if(running) runBtn.disabled=true;
-      return el('div',{class:'row',style:'margin-top:12px'},
-        runBtn,
-        d.reports.length?el('button',{class:'sec',onclick:()=>window.open('/api/cases/'+id+'/report','_blank')},'View report'):'',
-        el('button',{class:'ghost',onclick:()=>showAudit(id)},'Audit trail'),
-        running?el('span',{class:'muted'},`a ${d.active_job.status} job is holding this case`):'');
-    })(),
-    el('div',{id:'runlog',class:'log',style:'display:none;margin-top:10px'},
-      d.active_job?(d.active_job.log||[]).map(l=>l.msg).join('\n')+
-        (d.active_job.status==='error'?'\n\n'+(d.active_job.error||'previous run failed'):''):'')));
-
-  if(d.active_job){
-    if(d.active_job.status==='error') $('#runlog').style.display='block';
-    else if(d.active_job.status!=='done') pollJob(d.active_job.id,$('#runlog'),()=>go('case',id));
+  const id=state.arg;
+  let d;
+  try{ d=await api('/cases/'+encodeURIComponent(id)); }
+  catch(e){
+    m.innerHTML='';
+    m.append(el('h1',{},id));
+    m.append(el('div',{class:'panel'},
+      el('b',{},'This case can’t be opened.'),
+      el('div',{class:'hint'},e.message.includes('not found')
+        ? 'There is no signed manifest.json in this folder — the acquisition did not finish. Re-run the collector for this case (close the target apps first so their databases aren’t locked).'
+        : e.message),
+      el('div',{class:'row',style:'margin-top:10px'},
+        el('button',{class:'sec',onclick:()=>go('collect')},'Go to Collect'),
+        el('button',{class:'ghost',onclick:()=>go('cases')},'Back to Cases'))));
+    return;
   }
 
-  if(d.warehouse){
-    const w=d.warehouse, max=Math.max(...w.by_category.map(c=>c.artifacts),1);
-    m.append(el('h2',{},`Artifacts — ${w.artifacts.toLocaleString()} total, ${w.high_priority} high-priority`));
+  const iv=d.integrity, w=d.warehouse;
+  const job=d.active_job;
+  const running = job && (job.status==='queued'||job.status==='running');
+  const processed = !!w;
+
+  m.innerHTML='';
+  m.append(el('div',{class:'row'},
+    el('h1',{style:'margin:0'},d.meta.name),
+    el('span',{class:'muted mono'},id)));
+
+  // --- evidence + integrity -------------------------------------------------
+  const integ = el('div',{class:'row',style:'margin-top:10px'});
+  if(iv.ok){
+    integ.append(el('span',{class:'pill ok'},'✓ integrity verified'),
+      el('span',{class:'muted'},'checked '+ago(iv.verified_ts)),
+      el('button',{class:'ghost',onclick:async(e)=>{
+        e.target.textContent='checking…'; e.target.disabled=true;
+        try{ await api('/cases/'+id+'/verify',{method:'POST'}); go('case',id); }
+        catch(x){ alert(x.message); e.target.disabled=false; e.target.textContent='re-check'; }
+      }},'re-check'));
+  } else {
+    integ.append(el('span',{class:'pill bad'},'⚠ INTEGRITY FAILED'),
+      el('span',{class:'muted'},`${iv.issues.length} issue(s) — signature valid: ${iv.signature_valid}`));
+  }
+  m.append(el('div',{class:'panel'},
+    integ,
+    el('div',{class:'hint'},
+      `${iv.files} files · ${d.evidence.apps.join(', ')} · `+
+      `${(d.evidence.bytes/1e6).toFixed(1)} MB · acquired on ${d.evidence.host}`),
+    d.meta.keywords.length?el('div',{class:'hint'},'keywords: '+d.meta.keywords.join(', ')):'',
+    !iv.ok?el('div',{class:'scroll',style:'margin-top:8px'},
+      tbl(iv.issues,['kind','path','expected','actual'])):''));
+
+  // --- the primary action panel ------------------------------------------
+  const actions=el('div',{class:'panel'});
+  const runlog=el('div',{id:'runlog',class:'log',style:'display:none;margin-top:10px'});
+
+  async function startRun(btn){
+    btn.disabled=true; btn.innerHTML='<span class="spin"></span>starting…';
+    runlog.style.display='block'; runlog.textContent='';
+    try{
+      const r=await api('/cases/'+id+'/run',{method:'POST'});
+      await pollJob(r.job_id,runlog,()=>go('case',id));
+    }catch(err){
+      runlog.textContent='Could not start: '+err.message;
+      btn.disabled=false; btn.textContent='Run analysis';
+    }
+  }
+
+  if(running){
+    actions.append(
+      el('div',{class:'row'},
+        el('span',{class:'spin',style:'border-color:#0003;border-top-color:#333'}),
+        el('b',{},'Analysis running…'),
+        el('span',{class:'muted'},'this can take a minute for a large cache')),
+      runlog);
+    pollJob(job.id,runlog,()=>go('case',id));
+  } else if(!processed){
+    const b=el('button',{class:'primary',onclick:e=>startRun(e.target)},'▶  Run analysis');
+    actions.append(b,
+      el('div',{class:'hint'},'Verifies every file against the signed manifest, then parses, '+
+        'classifies, analyses any memory dumps, and builds the report.'),
+      job&&job.status==='error'?el('div',{class:'hint',style:'color:var(--bad)'},
+        'Previous run failed — '+(job.error||'').split('\n')[0]):'',
+      runlog);
+  } else {
+    actions.append(el('div',{class:'row'},
+      d.reports.length?el('button',{class:'primary',onclick:()=>
+        window.open('/api/cases/'+id+'/report','_blank')},'📄  Open report'):'',
+      el('button',{class:'sec',onclick:e=>startRun(e.target)},'↻  Re-run analysis'),
+      el('button',{class:'sec',onclick:()=>document.getElementById('browser')
+        ?.scrollIntoView({behavior:'smooth'})},'🔍  Browse artifacts'),
+      el('button',{class:'ghost',onclick:()=>showAudit(id)},'📋  Audit trail')),
+      el('div',{class:'hint'},
+        `${w.artifacts.toLocaleString()} artifacts · ${w.high_priority} high-priority · `+
+        (job&&job.updated_ts?'analysed '+ago(job.updated_ts):'')),
+      runlog);
+  }
+  m.append(actions);
+
+  // --- results ----------------------------------------------------------
+  if(processed){
+    const max=Math.max(...w.by_category.map(c=>c.artifacts),1);
     const bars=el('div',{class:'panel'});
-    w.by_category.forEach(c=>bars.append(el('div',{class:'barrow'},
+    bars.append(el('h2',{style:'margin-top:0'},'Artifact categories'));
+    w.by_category.filter(c=>c.category).forEach(c=>bars.append(el('div',{class:'barrow'},
       el('span',{class:'pill cat'},c.category),
       el('div',{class:'bar',style:`width:${100*c.artifacts/max}%`}),
       el('span',{class:'muted'},c.artifacts.toLocaleString()))));
     m.append(bars);
-    m.append(browser(id, w.by_category.map(c=>c.category)));
-  } else {
-    m.append(el('div',{class:'panel muted'},'Not processed yet — run the analysis.'));
+    const br=browser(id, w.by_category.map(c=>c.category).filter(Boolean));
+    br.id='browser'; m.append(br);
   }
 }
 

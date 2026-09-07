@@ -11,6 +11,7 @@ from dd_core.enums import (
     ValueType,
 )
 from dd_core.evidence import (
+    CopyReport,
     CopySpec,
     execute_copy,
     plan_profile_copy,
@@ -37,6 +38,7 @@ __all__ = [
     "ArtifactCategory",
     "CaseLayout",
     "ClassificationResult",
+    "CopyReport",
     "CopySpec",
     "CustodyEvent",
     "CustodyLog",

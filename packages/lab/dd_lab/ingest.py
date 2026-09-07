@@ -15,7 +15,7 @@ from pathlib import Path
 from dd_core.casedir import CaseLayout
 from dd_core.custody import CustodyLog
 from dd_core.enums import CustodyEvent
-from dd_core.manifest import Manifest, verify_case
+from dd_core.manifest import Manifest
 from dd_lab.classify import Classifier, classify_stream
 from dd_lab.classify.pipeline import ClassifyResult
 from dd_lab.etl.warehouse import Warehouse
@@ -54,7 +54,9 @@ def ingest_case(
     custody = CustodyLog(layout.dir)
 
     # 1. integrity ----------------------------------------------------------
-    verification = verify_case(layout.dir)
+    from dd_lab.verification import verify_cached
+
+    verification, _ = verify_cached(case_root, case_id, force=True)
     if not verification.ok:
         custody.append(
             CustodyEvent.INTEGRITY_FAILED, actor,

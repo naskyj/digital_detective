@@ -111,17 +111,47 @@ def source_type_for_path(evidence_relative_path: str) -> str:
     return "preferences"
 
 
-def execute_copy(specs: list[CopySpec], app_evidence_dir: str | Path) -> list[Path]:
-    """Copy each spec into <app_evidence_dir>. Returns the list of files written."""
+@dataclass
+class CopyReport:
+    written: list[Path]
+    skipped: list[tuple[str, str]]  # (source path, reason)
+
+
+def _copy_tree_resilient(src: Path, dst: Path, report: CopyReport) -> None:
+    """Recursively copy, skipping files that can't be read (e.g. a LevelDB .log
+    locked by a running app) instead of aborting the whole copy."""
+    dst.mkdir(parents=True, exist_ok=True)
+    for entry in sorted(src.iterdir()):
+        target = dst / entry.name
+        try:
+            if entry.is_dir():
+                _copy_tree_resilient(entry, target, report)
+            else:
+                shutil.copy2(entry, target)
+                report.written.append(target)
+        except (PermissionError, OSError) as e:
+            report.skipped.append((str(entry), str(e)))
+
+
+def execute_copy(specs: list[CopySpec], app_evidence_dir: str | Path) -> CopyReport:
+    """Copy each spec into <app_evidence_dir>.
+
+    Never aborts on a single unreadable file — a locked file is recorded in
+    `skipped` and the rest of the acquisition proceeds. The collector surfaces
+    the skip list; a LevelDB with a locked write-ahead log usually still yields
+    its committed .ldb data.
+    """
     app_dir = Path(app_evidence_dir)
-    written: list[Path] = []
+    report = CopyReport(written=[], skipped=[])
     for spec in specs:
         dest = app_dir / spec.dest_rel
         if spec.is_dir:
-            shutil.copytree(spec.source, dest, dirs_exist_ok=True)
-            written.extend(p for p in dest.rglob("*") if p.is_file())
+            _copy_tree_resilient(spec.source, dest, report)
         else:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(spec.source, dest)
-            written.append(dest)
-    return written
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(spec.source, dest)
+                report.written.append(dest)
+            except (PermissionError, OSError) as e:
+                report.skipped.append((str(spec.source), str(e)))
+    return report

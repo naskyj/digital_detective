@@ -55,7 +55,7 @@ def build_sample_case(
     specs = plan_profile_copy(profile_dir, include)
     if not specs:
         raise RuntimeError(f"no recognisable Chromium profile data in {profile_dir}")
-    written = execute_copy(specs, app_evidence)
+    written = execute_copy(specs, app_evidence).written
 
     for fname, content in (memory_dumps or {}).items():
         mem_path = app_evidence / "memory" / fname
