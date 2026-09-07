@@ -84,7 +84,10 @@ def acquire(
     collect_memory: bool = False,
     signing_key_pem: bytes | None = None,
     progress: ProgressFn | None = None,
+    sources: frozenset[str] | None = None,
 ) -> AcquisitionResult:
+    """`sources` restricts which profile stores are copied (default: the whole
+    profile). Mainly for tests — real acquisitions image everything."""
     say = progress or (lambda _m: None)
     case_id = case_id or _new_case_id()
     layout = CaseLayout(output_root, case_id)
@@ -115,7 +118,31 @@ def acquire(
         write_keypair(layout.dir / "keys", private_pem, public_pem)
         say("Generated acquisition signing key (keys/collector_key.pem)")
 
-    # per-app copy ------------------------------------------------------
+    # volatile first: memory before disk (system as found) ----------------
+    if collect_memory:
+        say("Capturing full physical memory (this can take several minutes)")
+        sys_mem = layout.evidence / "_system" / MEMORY
+        r = capture_full_memory(sys_mem)
+        custody.append(
+            CustodyEvent.ARTIFACT_ACQUIRED, operator or "collector",
+            f"full memory: {'ok' if r.ok else 'skipped'} - {r.detail}",
+        )
+        (say if r.ok else warnings.append)(f"full memory: {r.detail}")
+
+        for app in apps:
+            if not app.pids:
+                continue
+            mem_dir = layout.evidence / _safe_name(app.name) / MEMORY
+            for pid in app.pids:
+                say(f"[{app.name}] dumping process {pid}")
+                pr = capture_process_memory(pid, app.name, mem_dir)
+                (say if pr.ok else warnings.append)(f"[{app.name}] pid {pid}: {pr.detail}")
+                custody.append(
+                    CustodyEvent.ARTIFACT_ACQUIRED, operator or "collector",
+                    f"{app.name} process {pid} memory: {'ok' if pr.ok else 'skipped'} - {pr.detail}",
+                )
+
+    # per-app disk copy --------------------------------------------------
     target_apps: list[TargetApp] = []
     for app in apps:
         dest_name = _safe_name(app.name)
@@ -124,12 +151,13 @@ def acquire(
 
         if app.running:
             msg = (f"{app.name} is RUNNING (pids {', '.join(map(str, app.pids))}) — "
-                   f"its databases may be partially locked; close it for a clean copy")
+                   f"its LevelDB write-ahead logs are locked; committed data still copies, "
+                   f"quit the app for a fully consistent snapshot")
             warnings.append(msg)
-            say(f"[{app.name}] WARNING: {msg}")
+            say(f"[{app.name}] NOTE: {msg}")
 
         say(f"[{app.name}] copying profile from {app.profile_dir}")
-        specs = plan_profile_copy(app.profile_dir)
+        specs = plan_profile_copy(app.profile_dir, sources)
         if not specs:
             warnings.append(f"{app.name}: no recognisable Chromium data at {app.profile_dir}")
             say(f"[{app.name}] WARNING: nothing to copy")
@@ -156,41 +184,15 @@ def acquire(
                   "skipped": [s for s, _ in report.skipped[:50]]},
         )
 
-        procs = [ProcessRef(pid=pid, name=app.name) for pid in app.pids]
-        if collect_memory and app.pids:
-            mem_dir = app_evidence / MEMORY
-            for pid in app.pids:
-                say(f"[{app.name}] dumping process {pid}")
-                r = capture_process_memory(pid, app.name, mem_dir)
-                if r.ok:
-                    say(f"[{app.name}] pid {pid}: {r.detail}")
-                else:
-                    warnings.append(f"{app.name} pid {pid}: {r.detail}")
-                custody.append(
-                    CustodyEvent.ARTIFACT_ACQUIRED, operator or "collector",
-                    f"{app.name} process {pid} memory: {'ok' if r.ok else 'skipped'} - {r.detail}",
-                )
-
         target_apps.append(
-            TargetApp(name=dest_name, user_data_dir=str(app.profile_dir),
-                      version=app.version, processes=procs)
+            TargetApp(
+                name=dest_name, user_data_dir=str(app.profile_dir), version=app.version,
+                processes=[ProcessRef(pid=pid, name=app.name) for pid in app.pids],
+            )
         )
 
-    # full memory -----------------------------------------------------
-    if collect_memory:
-        say("Capturing full system memory")
-        sys_mem = layout.evidence / "_system" / MEMORY
-        r = capture_full_memory(sys_mem)
-        custody.append(
-            CustodyEvent.ARTIFACT_ACQUIRED, operator or "collector",
-            f"full memory: {'ok' if r.ok else 'skipped'} - {r.detail}",
-        )
-        if r.ok:
-            say(f"Full memory: {r.detail}")
-            target_apps.append(TargetApp(name="_system", user_data_dir="(physical memory)"))
-        else:
-            warnings.append(f"full memory: {r.detail}")
-            say(f"WARNING: {r.detail}")
+    if collect_memory and (layout.evidence / "_system" / MEMORY).is_dir():
+        target_apps.append(TargetApp(name="_system", user_data_dir="(physical memory)"))
 
     # manifest --------------------------------------------------------
     say("Hashing evidence and building the manifest")

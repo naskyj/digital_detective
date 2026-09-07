@@ -46,11 +46,15 @@ def test_find_app_by_path():
     assert app.profile_dir == profile
 
 
+_FAST = frozenset({"local_storage", "session_storage", "preferences", "local_state", "cookies"})
+
+
 def test_acquisition_produces_verifiable_case(tmp_path):
     profile = _a_profile()
     app = ElectronApp(name="target", profile_dir=profile)
     logs: list[str] = []
-    result = acquire([app], tmp_path, operator="Test Operator", progress=logs.append)
+    result = acquire([app], tmp_path, operator="Test Operator", progress=logs.append,
+                     sources=_FAST)
 
     assert result.file_count > 0
     assert (result.case_dir / "manifest.json").is_file()
@@ -75,7 +79,7 @@ def test_source_is_not_modified(tmp_path):
     profile = _a_profile()
     prefs = profile / "Preferences"
     before = prefs.stat().st_mtime if prefs.is_file() else None
-    acquire([ElectronApp(name="t", profile_dir=profile)], tmp_path, operator="op")
+    acquire([ElectronApp(name="t", profile_dir=profile)], tmp_path, operator="op", sources=_FAST)
     after = prefs.stat().st_mtime if prefs.is_file() else None
     assert before == after
 

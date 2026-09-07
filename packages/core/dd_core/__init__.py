@@ -15,6 +15,7 @@ from dd_core.evidence import (
     CopySpec,
     execute_copy,
     plan_profile_copy,
+    source_type_for_path,
 )
 from dd_core.manifest import (
     AcquisitionHost,
@@ -45,6 +46,7 @@ __all__ = [
     "CustodyRecord",
     "execute_copy",
     "plan_profile_copy",
+    "source_type_for_path",
     "Manifest",
     "ManifestEntry",
     "NormalizedArtifact",

@@ -17,12 +17,15 @@ from pathlib import Path
 from dd_core.enums import SourceType, ValueType
 from dd_core.evidence import (
     CACHE,
+    CODE_CACHE,
     COOKIES,
+    COOKIES_LEGACY,
     INDEXEDDB,
     LOCAL_STATE,
     LOCAL_STORAGE,
     MEMORY,
     PREFERENCES,
+    SERVICE_WORKER_CACHE,
     SESSION_STORAGE,
 )
 from dd_core.schema import NormalizedArtifact
@@ -31,8 +34,9 @@ from dd_lab.parsers.jsonflat import iter_leaves, try_parse_json
 log = logging.getLogger("dd_lab.parsers")
 
 __all__ = [
-    "CACHE", "COOKIES", "INDEXEDDB", "LOCAL_STATE", "LOCAL_STORAGE", "MEMORY",
-    "PREFERENCES", "SESSION_STORAGE", "ParseContext", "emit_value", "make_artifact",
+    "CACHE", "CODE_CACHE", "COOKIES", "COOKIES_LEGACY", "INDEXEDDB", "LOCAL_STATE",
+    "LOCAL_STORAGE", "MEMORY", "PREFERENCES", "SERVICE_WORKER_CACHE", "SESSION_STORAGE",
+    "ParseContext", "emit_value", "make_artifact",
 ]
 
 # Values longer than this are truncated in the `value` column (full hash is kept).

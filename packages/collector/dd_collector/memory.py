@@ -1,19 +1,26 @@
 """Memory acquisition.
 
-Full-system capture uses WinPmem (open-source, https://github.com/Velocidex/WinPmem)
-which must be present next to the collector as `winpmem.exe`. Per-process capture
-uses the OS's own facilities. Everything here degrades gracefully: if a tool or
-privilege is missing, the acquisition records that and continues — a missing
-memory dump must never abort collection of the disk artifacts.
+Full physical-RAM capture uses WinPmem or DumpIt (Comae) — whichever is found
+next to the collector. A full image captures *all* of physical memory: the
+target app does not need to be running for the capture to work, though its
+in-memory data will only be present if it was running at (or recently before)
+capture time. Per-process capture (procdump) does need the app running.
+
+Everything here degrades gracefully: if a tool or privilege is missing, the
+acquisition records that and continues — a missing memory dump must never abort
+collection of the disk artifacts.
 """
 
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+_TOOL_DIRS_ENV = "DD_TOOLS_DIR"
 
 
 @dataclass
@@ -25,33 +32,72 @@ class MemoryResult:
     pid: int | None = None
 
 
-def _winpmem_path() -> Path | None:
-    here = Path(__file__).resolve().parent
-    for cand in (here / "winpmem.exe", here.parent / "winpmem.exe", Path("winpmem.exe")):
-        if cand.is_file():
-            return cand
-    found = shutil.which("winpmem")
-    return Path(found) if found else None
+def _find_tool(*names: str) -> Path | None:
+    """Look for a bundled acquisition tool next to the collector, in DD_TOOLS_DIR,
+    in a sibling `tools/` folder, or on PATH."""
+    dirs = [Path(__file__).resolve().parent, Path(__file__).resolve().parent.parent, Path.cwd()]
+    if os.environ.get(_TOOL_DIRS_ENV):
+        dirs.insert(0, Path(os.environ[_TOOL_DIRS_ENV]))
+    dirs += [d / "tools" for d in list(dirs)]
+    for name in names:
+        for d in dirs:
+            cand = d / name
+            if cand.is_file():
+                return cand
+        found = shutil.which(name.removesuffix(".exe"))
+        if found:
+            return Path(found)
+    return None
 
 
 def capture_full_memory(out_dir: Path) -> MemoryResult:
     if platform.system() != "Windows":
-        return MemoryResult(False, "full", None, f"full memory capture unsupported on {platform.system()}")
-    winpmem = _winpmem_path()
-    if winpmem is None:
-        return MemoryResult(False, "full", None, "winpmem.exe not found next to the collector")
+        return MemoryResult(
+            False, "full", None, f"full memory capture unsupported on {platform.system()}"
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / "physmem.raw"
-    try:
-        proc = subprocess.run(
-            [str(winpmem), "--output", str(target), "--format", "raw"],
-            capture_output=True, text=True, timeout=3600, check=False,
+
+    winpmem = _find_tool("winpmem.exe", "winpmem_mini_x64_rc2.exe", "winpmem")
+    if winpmem:
+        try:
+            proc = subprocess.run(
+                [str(winpmem), "--output", str(target), "--format", "raw"],
+                capture_output=True, text=True, timeout=7200, check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            return MemoryResult(False, "full", None, f"winpmem failed: {e}")
+        if proc.returncode == 0 and target.is_file():
+            return MemoryResult(True, "full", target,
+                                f"{target.stat().st_size:,} bytes via {winpmem.name}")
+        # fall through to DumpIt on failure
+
+    dumpit = _find_tool("DumpIt.exe", "dumpit.exe", "DumpIt")
+    if dumpit:
+        try:
+            # Comae DumpIt: /OUTPUT <file> /QUIET ; MoonSols DumpIt: interactive Y/N
+            proc = subprocess.run(
+                [str(dumpit), "/OUTPUT", str(target), "/QUIET"],
+                capture_output=True, text=True, timeout=7200, check=False, input="y\n",
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            return MemoryResult(False, "full", None, f"DumpIt failed: {e}")
+        produced = target if target.is_file() else next(
+            iter(sorted(out_dir.glob("*.raw")) + sorted(out_dir.glob("*.dmp"))), None
         )
-    except (subprocess.TimeoutExpired, OSError) as e:
-        return MemoryResult(False, "full", None, f"winpmem failed: {e}")
-    if proc.returncode != 0 or not target.is_file():
-        return MemoryResult(False, "full", None, f"winpmem exit {proc.returncode}: {proc.stderr[:400]}")
-    return MemoryResult(True, "full", target, f"{target.stat().st_size:,} bytes via {winpmem.name}")
+        if produced:
+            if produced != target:
+                produced.rename(target)
+            return MemoryResult(True, "full", target,
+                                f"{target.stat().st_size:,} bytes via {dumpit.name}")
+        return MemoryResult(False, "full", None,
+                            f"DumpIt exit {proc.returncode}: {(proc.stderr or proc.stdout)[:400]}")
+
+    return MemoryResult(
+        False, "full", None,
+        "no memory-capture tool found — bundle winpmem.exe or DumpIt.exe with the collector "
+        "(or set DD_TOOLS_DIR)",
+    )
 
 
 def capture_process_memory(pid: int, name: str, out_dir: Path) -> MemoryResult:
@@ -60,17 +106,18 @@ def capture_process_memory(pid: int, name: str, out_dir: Path) -> MemoryResult:
     target = out_dir / f"pid_{pid}_{_safe(name)}.dmp"
 
     if system == "Windows":
-        # Prefer a full user-mode minidump via a bundled procdump if present.
-        procdump = shutil.which("procdump")
+        procdump = _find_tool("procdump64.exe", "procdump.exe", "procdump")
         if procdump:
             proc = subprocess.run(
-                [procdump, "-accepteula", "-ma", str(pid), str(target)],
+                [str(procdump), "-accepteula", "-ma", str(pid), str(target)],
                 capture_output=True, text=True, timeout=600, check=False,
             )
             if target.is_file():
                 return MemoryResult(True, "process", target, "procdump -ma", pid)
-            return MemoryResult(False, "process", None, f"procdump failed: {proc.stderr[:300]}", pid)
-        return MemoryResult(False, "process", None, "procdump not found (bundle it for process dumps)", pid)
+            return MemoryResult(False, "process", None,
+                                f"procdump failed: {(proc.stderr or proc.stdout)[:300]}", pid)
+        return MemoryResult(False, "process", None,
+                            "procdump not found (bundle it for per-process dumps)", pid)
 
     # macOS / Linux: best-effort for development only.
     tool = shutil.which("gcore")

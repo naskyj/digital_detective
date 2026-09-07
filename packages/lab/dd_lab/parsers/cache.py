@@ -1,8 +1,11 @@
-"""Chromium disk cache (`<app>/cache`, block-file or simple-file format).
+"""Chromium caches — the HTTP disk cache plus the Service Worker CacheStorage
+(the Cache API) and the compiled-code cache.
 
-The cache stores HTTP responses the app fetched — for chat apps this is where
-message payloads, user directories, and API JSON end up, so JSON bodies are
-flattened leaf-by-leaf.
+Chat apps fetch message payloads, user directories and API JSON here — the disk
+cache holds ordinary responses, and the Cache API (`caches.open(...)`) holds
+what the app deliberately caches for offline use, which for Discord/Slack is a
+lot. All three are Chromium simple/block-file caches, so one reader handles them.
+JSON bodies are flattened leaf-by-leaf.
 """
 
 from __future__ import annotations
@@ -12,10 +15,17 @@ import logging
 import zlib
 from collections.abc import Iterator
 from datetime import datetime
+from pathlib import Path
 
 from dd_core.enums import SourceType, ValueType
 from dd_core.schema import NormalizedArtifact
-from dd_lab.parsers.base import CACHE, ParseContext, emit_value, make_artifact
+from dd_lab.parsers.base import (
+    CACHE,
+    SERVICE_WORKER_CACHE,
+    ParseContext,
+    emit_value,
+    make_artifact,
+)
 
 log = logging.getLogger("dd_lab.parsers.cache")
 
@@ -45,37 +55,50 @@ def _decompress(data: bytes, content_encoding: str) -> bytes:
     return data
 
 
-def _cache_dir(ctx: ParseContext):
+def _iter_cache_dirs(ctx: ParseContext) -> Iterator[Path]:
+    """Every directory under the app's evidence that is a Chromium HTTP cache.
+
+    The compiled-code cache (`Code Cache/`) is preserved but not parsed — it
+    holds V8 bytecode, no user data, and its metadata format trips up readers.
+    """
     root = ctx.path(CACHE)
-    if (root / "Cache_Data").is_dir():
-        return root / "Cache_Data"
-    return root
+    if root.is_dir():
+        yield (root / "Cache_Data") if (root / "Cache_Data").is_dir() else root
+    # Service Worker CacheStorage — the Cache API. <origin>/<cache-name>/ leaves.
+    sw = ctx.path(SERVICE_WORKER_CACHE)
+    if sw.is_dir():
+        for leaf in sorted(sw.rglob("*")):
+            if leaf.is_dir() and (leaf / "index").is_file():
+                yield leaf
 
 
 def parse(ctx: ParseContext) -> Iterator[NormalizedArtifact]:
-    if not ctx.has(CACHE):
-        return
     from ccl_chromium_reader import ccl_chromium_cache as cc
 
-    cache_dir = _cache_dir(ctx)
-    source_file = ctx.rel(cache_dir)
-    klass = cc.guess_cache_class(cache_dir)
-    if klass is None:
-        log.warning("unrecognised cache format at %s", cache_dir)
-        return
-    try:
-        cache = klass(cache_dir)
-    except Exception:
-        log.exception("could not open cache at %s", cache_dir)
-        return
-    try:
-        for key in cache.keys():  # noqa: SIM118  (ChromiumCache, not a dict)
-            try:
-                yield from _emit_entry(ctx, cache, key, source_file)
-            except Exception:
-                log.exception("bad cache entry %r", key)
-    finally:
-        cache.close()
+    seen: set[str] = set()
+    for cache_dir in _iter_cache_dirs(ctx):
+        rp = str(cache_dir.resolve())
+        if rp in seen:
+            continue
+        seen.add(rp)
+        source_file = ctx.rel(cache_dir)
+        klass = cc.guess_cache_class(cache_dir)
+        if klass is None:
+            log.debug("not a recognised cache: %s", cache_dir)
+            continue
+        try:
+            cache = klass(cache_dir)
+        except Exception:
+            log.exception("could not open cache at %s", cache_dir)
+            continue
+        try:
+            for key in cache.keys():  # noqa: SIM118  (ChromiumCache, not a dict)
+                try:
+                    yield from _emit_entry(ctx, cache, key, source_file)
+                except Exception:
+                    log.debug("skipped unreadable cache entry %r in %s", key, cache_dir)
+        finally:
+            cache.close()
 
 
 def _first(gen) -> str | None:

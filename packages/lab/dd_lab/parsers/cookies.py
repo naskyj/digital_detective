@@ -34,9 +34,13 @@ def _chrome_time(micros: int | None) -> datetime | None:
 
 
 def parse(ctx: ParseContext) -> Iterator[NormalizedArtifact]:
-    if not ctx.has(COOKIES):
+    from dd_lab.parsers.base import COOKIES_LEGACY
+
+    db_path = next(
+        (ctx.path(p) for p in (COOKIES, COOKIES_LEGACY) if ctx.has(p)), None
+    )
+    if db_path is None:
         return
-    db_path = ctx.path(COOKIES)
     source_file = ctx.rel(db_path)
     try:
         con = sqlite3.connect(f"file:{db_path}?immutable=1", uri=True)

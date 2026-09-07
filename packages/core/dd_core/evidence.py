@@ -1,33 +1,74 @@
-"""Canonical evidence layout for one Electron app, shared by collector and lab.
+"""Evidence layout — the collector images the whole Electron profile.
 
-Under <case>/evidence/<app>/ the collector writes a fixed structure so the lab
-parsers always know where to look, regardless of the source OS or app:
+The evidence under `<case>/evidence/<app>/` mirrors the source profile's own
+Chromium directory structure exactly, so nothing is lost and the copy looks
+like the original. A small denylist skips pure GPU/shader/ML caches that carry
+no user data and can be large.
 
-    local_storage/leveldb/      <- <profile>/Local Storage/leveldb
-    session_storage/            <- <profile>/Session Storage
-    indexeddb/                  <- <profile>/IndexedDB/*   (leveldb + blob dirs)
-    cache/                      <- <profile>/Cache  (or Cache/Cache_Data)
-    cookies                     <- <profile>/Cookies  (or Network/Cookies)
-    preferences.json            <- <profile>/Preferences
-    local_state.json            <- <profile-parent>/Local State
-    memory/                     <- process / full memory dumps
+Paths the lab parsers rely on (Chromium-native, under `<app>/`):
+
+    Local Storage/leveldb/       key/value store — tokens, settings
+    Session Storage/             per-session key/value store
+    IndexedDB/*.leveldb          structured store — messages, users, channels
+    Cache/  (or Cache/Cache_Data/)   HTTP disk cache
+    Service Worker/CacheStorage/ Cache API storage (chat apps cache API JSON here)
+    Code Cache/                  compiled-script cache
+    Network/Cookies  or  Cookies SQLite cookie store
+    Preferences                  per-profile settings (JSON)
+    Local State                  browser-wide state incl. the crypt key (JSON)
+    blob_storage/                Blob data (attachments in some apps)
+    Sessions/, Current Tabs, ... open-tab / navigation state
+    memory/                      process / full memory dumps (collector-added)
 """
 
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-# relative destinations under <case>/evidence/<app>/
-LOCAL_STORAGE = "local_storage/leveldb"
-SESSION_STORAGE = "session_storage"
-INDEXEDDB = "indexeddb"
-CACHE = "cache"
-COOKIES = "cookies"
-PREFERENCES = "preferences.json"
-LOCAL_STATE = "local_state.json"
+# Chromium-native relative paths under <case>/evidence/<app>/
+LOCAL_STORAGE = "Local Storage/leveldb"
+SESSION_STORAGE = "Session Storage"
+INDEXEDDB = "IndexedDB"
+CACHE = "Cache"
+SERVICE_WORKER_CACHE = "Service Worker/CacheStorage"
+CODE_CACHE = "Code Cache"
+COOKIES = "Network/Cookies"
+COOKIES_LEGACY = "Cookies"
+PREFERENCES = "Preferences"
+LOCAL_STATE = "Local State"
 MEMORY = "memory"
+
+# Directories with no user-relevant content that can be large — never copied.
+DENYLIST = frozenset({
+    # GPU / shader / graphics caches
+    "GPUCache", "GrShaderCache", "ShaderCache", "GraphiteDawnCache",
+    "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache",
+    # component / model / ML stores shipped by Chromium
+    "component_crx_cache", "extensions_crx_cache",
+    "optimization_guide_model_store", "optimization_guide_hint_cache_store",
+    "OptimizationGuidePredictionModels", "segmentation_platform",
+    "PrivacySandboxAttestationsPreloaded", "FirstPartySetsPreloaded",
+    "TrustTokenKeyCommitments", "MEIPreload", "WidevineCdm",
+    "CertificateRevocation", "SafetyTips", "Subresource Filter",
+    "Safe Browsing", "AutofillStates", "hyphen-data", "OnDeviceHeadSuggestModel",
+    # crash / telemetry
+    "Crashpad", "Crash Reports", "crashDumps", "BrowserMetrics",
+    # VS Code / large-editor bloat (compiled data / editor UI state, not comms data)
+    "CachedData", "CachedExtensions", "CachedExtensionVSIXs", "CachedProfilesData",
+    "Dictionaries", "logs", "clp", "workspaceStorage",
+    # compiled scripts — bytecode, no user data
+    "ScriptCache",
+})
+
+# Friendly aliases accepted in `include` (so callers/tests need not know the
+# exact Chromium path).
+_ALIASES = {
+    "local_storage": LOCAL_STORAGE, "session_storage": SESSION_STORAGE,
+    "indexeddb": INDEXEDDB, "cache": CACHE, "cookies": COOKIES,
+    "preferences": PREFERENCES, "local_state": LOCAL_STATE,
+}
 
 
 @dataclass
@@ -37,72 +78,81 @@ class CopySpec:
     source: Path
     dest_rel: str
     is_dir: bool
-
-
-ALL_SOURCES = frozenset(
-    {"local_storage", "session_storage", "indexeddb", "cache", "cookies", "preferences", "local_state"}
-)
+    exclude_names: frozenset[str] = field(default_factory=frozenset)
 
 
 def plan_profile_copy(
     profile_dir: str | Path, include: frozenset[str] | None = None
 ) -> list[CopySpec]:
-    """Given a live Chromium/Electron profile directory, return the copies to make.
+    """Return the copies to make for a live Electron profile directory.
 
-    Only entries whose source exists are returned. `include` restricts which
-    sources are copied (default: all). `Local State` lives one level above the
-    profile in a real Chromium install but sits inside it for many Electron
-    apps, so both locations are checked.
+    Default: image the entire profile (recursively) minus `DENYLIST`, preserving
+    structure. `include` (a set of the path constants above) restricts to a
+    named subset — used by the tests.
     """
     profile = Path(profile_dir)
-    want = ALL_SOURCES if include is None else include
     specs: list[CopySpec] = []
 
-    def add(src: Path, dest_rel: str, is_dir: bool, source: str) -> None:
-        if source in want and src.exists():
-            specs.append(CopySpec(src, dest_rel, is_dir))
+    if include is None:
+        if profile.is_dir():
+            specs.append(CopySpec(profile, ".", True, exclude_names=DENYLIST))
+        # Local State usually sits inside the profile; in a real Chromium install
+        # it's one level up. Grab that copy too if present.
+        parent_state = profile.parent / "Local State"
+        if parent_state.is_file() and not (profile / "Local State").is_file():
+            specs.append(CopySpec(parent_state, "Local State", False))
+        return specs
 
-    add(profile / "Local Storage" / "leveldb", LOCAL_STORAGE, True, "local_storage")
-    add(profile / "Session Storage", SESSION_STORAGE, True, "session_storage")
-    add(profile / "IndexedDB", INDEXEDDB, True, "indexeddb")
+    # subset mode (tests) — accept friendly aliases or exact paths
+    include = frozenset(_ALIASES.get(x, x) for x in include)
+    def add_file(rel: str) -> None:
+        src = profile / rel
+        if src.is_file():
+            specs.append(CopySpec(src, rel, False))
 
-    cache_src = profile / "Cache" / "Cache_Data"
-    if not cache_src.is_dir():
-        cache_src = profile / "Cache"
-    add(cache_src, CACHE, True, "cache")
+    def add_dir(rel: str) -> None:
+        src = profile / rel
+        if src.is_dir():
+            specs.append(CopySpec(src, rel, True))
 
-    cookies_src = profile / "Network" / "Cookies"
-    if not cookies_src.is_file():
-        cookies_src = profile / "Cookies"
-    add(cookies_src, COOKIES, False, "cookies")
-
-    add(profile / "Preferences", PREFERENCES, False, "preferences")
-
-    local_state = profile / "Local State"
-    if not local_state.is_file():
-        local_state = profile.parent / "Local State"
-    add(local_state, LOCAL_STATE, False, "local_state")
-
+    if LOCAL_STORAGE in include:
+        add_dir(LOCAL_STORAGE)
+    if SESSION_STORAGE in include:
+        add_dir(SESSION_STORAGE)
+    if INDEXEDDB in include:
+        add_dir(INDEXEDDB)
+    if CACHE in include:
+        add_dir(CACHE)
+    if PREFERENCES in include:
+        add_file(PREFERENCES)
+    if LOCAL_STATE in include:
+        add_file(LOCAL_STATE)
+        if not (profile / LOCAL_STATE).is_file() and (profile.parent / "Local State").is_file():
+            specs.append(CopySpec(profile.parent / "Local State", LOCAL_STATE, False))
+    if COOKIES in include or COOKIES_LEGACY in include:
+        for rel in (COOKIES, COOKIES_LEGACY):
+            add_file(rel)
     return specs
 
 
+# path prefix (under <app>/) -> SourceType string
 _SOURCE_TYPE_PREFIXES = (
-    ("local_storage", "local_storage"),
-    ("session_storage", "session_storage"),
-    ("indexeddb", "indexeddb"),
-    ("cache", "cache"),
-    ("cookies", "cookies"),
-    ("preferences.json", "preferences"),
-    ("local_state.json", "local_state"),
+    ("Local Storage/leveldb", "local_storage"),
+    ("Session Storage", "session_storage"),
+    ("IndexedDB", "indexeddb"),
+    ("Service Worker/CacheStorage", "cache"),
+    ("Code Cache", "cache"),
+    ("Cache", "cache"),
+    ("Network/Cookies", "cookies"),
+    ("Cookies", "cookies"),
+    ("Preferences", "preferences"),
+    ("Local State", "local_state"),
     ("memory", "memory_process"),
 )
 
 
 def source_type_for_path(evidence_relative_path: str) -> str:
-    """Map an evidence path like 'slack/cache/Cache_Data/f_00001' to a SourceType value.
-
-    Returns the string form (e.g. 'cache'); callers can pass it to SourceType(...).
-    """
+    """Map an evidence path like 'Slack/Cache/Cache_Data/f_00001' to a SourceType string."""
     parts = evidence_relative_path.replace("\\", "/").split("/")
     tail = "/".join(parts[1:]) if len(parts) > 1 else evidence_relative_path
     for prefix, source_type in _SOURCE_TYPE_PREFIXES:
@@ -117,19 +167,28 @@ class CopyReport:
     skipped: list[tuple[str, str]]  # (source path, reason)
 
 
-def _copy_tree_resilient(src: Path, dst: Path, report: CopyReport) -> None:
-    """Recursively copy, skipping files that can't be read (e.g. a LevelDB .log
-    locked by a running app) instead of aborting the whole copy."""
+def _copy_tree_resilient(
+    src: Path, dst: Path, report: CopyReport, exclude: frozenset[str] = frozenset()
+) -> None:
+    """Recursively copy, skipping unreadable files (e.g. a LevelDB .log locked by
+    a running app) and any directory named in `exclude`, instead of aborting."""
+    try:
+        entries = sorted(src.iterdir())
+    except (PermissionError, OSError) as e:
+        report.skipped.append((str(src), str(e)))
+        return
     dst.mkdir(parents=True, exist_ok=True)
-    for entry in sorted(src.iterdir()):
+    for entry in entries:
+        if entry.name in exclude:
+            continue
         target = dst / entry.name
         try:
             if entry.is_dir():
-                _copy_tree_resilient(entry, target, report)
-            else:
+                _copy_tree_resilient(entry, target, report, exclude)
+            elif entry.is_file():
                 shutil.copy2(entry, target)
                 report.written.append(target)
-        except (PermissionError, OSError) as e:
+        except (PermissionError, OSError, shutil.SameFileError) as e:
             report.skipped.append((str(entry), str(e)))
 
 
@@ -137,21 +196,19 @@ def execute_copy(specs: list[CopySpec], app_evidence_dir: str | Path) -> CopyRep
     """Copy each spec into <app_evidence_dir>.
 
     Never aborts on a single unreadable file — a locked file is recorded in
-    `skipped` and the rest of the acquisition proceeds. The collector surfaces
-    the skip list; a LevelDB with a locked write-ahead log usually still yields
-    its committed .ldb data.
+    `skipped` and the rest of the acquisition proceeds.
     """
     app_dir = Path(app_evidence_dir)
     report = CopyReport(written=[], skipped=[])
     for spec in specs:
-        dest = app_dir / spec.dest_rel
+        dest = app_dir if spec.dest_rel == "." else app_dir / spec.dest_rel
         if spec.is_dir:
-            _copy_tree_resilient(spec.source, dest, report)
+            _copy_tree_resilient(spec.source, dest, report, spec.exclude_names)
         else:
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(spec.source, dest)
                 report.written.append(dest)
-            except (PermissionError, OSError) as e:
+            except (PermissionError, OSError, shutil.SameFileError) as e:
                 report.skipped.append((str(spec.source), str(e)))
     return report

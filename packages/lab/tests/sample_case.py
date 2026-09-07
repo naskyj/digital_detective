@@ -14,28 +14,14 @@ from pathlib import Path
 from dd_core.casedir import CaseLayout
 from dd_core.custody import CustodyLog
 from dd_core.enums import CustodyEvent, SourceType
-from dd_core.evidence import execute_copy, plan_profile_copy
+from dd_core.evidence import execute_copy, plan_profile_copy, source_type_for_path
 from dd_core.manifest import AcquisitionHost, Manifest, build_entry
 from dd_core.schema import TargetApp
 from dd_core.signing import generate_keypair
 
-_SOURCE_TYPE_BY_PREFIX = {
-    "local_storage": SourceType.LOCAL_STORAGE,
-    "session_storage": SourceType.SESSION_STORAGE,
-    "indexeddb": SourceType.INDEXEDDB,
-    "cache": SourceType.CACHE,
-    "cookies": SourceType.COOKIES,
-    "preferences.json": SourceType.PREFERENCES,
-    "local_state.json": SourceType.LOCAL_STATE,
-}
-
 
 def _source_type_for(rel_path: str) -> SourceType:
-    tail = rel_path.split("/", 1)[1] if "/" in rel_path else rel_path
-    for prefix, st in _SOURCE_TYPE_BY_PREFIX.items():
-        if tail.startswith(prefix):
-            return st
-    return SourceType.PREFERENCES
+    return SourceType(source_type_for_path(rel_path))
 
 
 def build_sample_case(
