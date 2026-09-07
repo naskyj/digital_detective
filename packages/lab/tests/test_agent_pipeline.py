@@ -1,0 +1,85 @@
+"""Deterministic pipeline runner + tool behaviour (no LLM)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from dd_lab.agent import run_pipeline
+from dd_lab.agent.audit import AuditLog
+from dd_lab.agent.tools import InvestigationDeps, query_warehouse
+from dd_lab.case import CaseMeta, CaseStatus
+
+from tests.sample_case import build_sample_case
+
+_CANDIDATES = {
+    "vscode": Path.home() / "Library/Application Support/Code",
+    "postman": Path.home() / "Library/Application Support/Postman",
+}
+_FAST = frozenset({"local_storage", "session_storage", "preferences", "cookies", "local_state"})
+
+
+def _available():
+    for app, path in _CANDIDATES.items():
+        if (path / "Local Storage" / "leveldb").is_dir() or (path / "Preferences").is_file():
+            return app, path
+    return None
+
+
+pytestmark = pytest.mark.skipif(_available() is None, reason="no Electron profile available")
+
+
+@pytest.fixture(scope="module")
+def case(tmp_path_factory):
+    app, profile = _available()
+    root = tmp_path_factory.mktemp("cases")
+    cid = "case_agent_001"
+    build_sample_case(root, cid, app, profile, include=_FAST)
+    meta = CaseMeta(case_id=cid, name="Test Investigation", keywords=["token", "user"])
+    from dd_core.casedir import CaseLayout
+
+    meta.save(CaseLayout(root, cid))
+    return root, cid
+
+
+def test_deterministic_pipeline_completes(case):
+    root, cid = case
+    outcome = run_pipeline(root, cid)
+    assert outcome.ok
+    assert outcome.report_path and Path(outcome.report_path).is_file()
+
+    html = Path(outcome.report_path).read_text("utf-8")
+    assert "Forensic Analysis Report" in html
+    assert "Chain of Custody" in html
+    assert "Investigation Keyword Hits" in html
+
+    from dd_core.casedir import CaseLayout
+
+    layout = CaseLayout(root, cid)
+    meta = CaseMeta.load(layout)
+    assert meta.status == CaseStatus.COMPLETED
+
+    kinds = {r.kind for r in AuditLog(layout.audit_log).records()}
+    assert {"run_start", "decision", "run_end"} <= kinds
+
+
+def test_pipeline_is_resumable_state(case):
+    root, cid = case
+    from dd_core.casedir import CaseLayout
+    from dd_lab.agent.state import PipelineState
+
+    st = PipelineState.load(CaseLayout(root, cid).dir / "logs" / "pipeline_state.json", cid)
+    assert st.integrity_verified
+    assert st.classified
+    assert st.finished
+
+
+def test_query_warehouse_rejects_writes(case):
+    root, cid = case
+    deps = InvestigationDeps(cases_root=root, case_id=cid)
+    assert query_warehouse(deps, "DELETE FROM artifacts")["ok"] is False
+    assert query_warehouse(deps, "DROP TABLE artifacts")["ok"] is False
+    good = query_warehouse(deps, "SELECT category, count(*) c FROM artifacts GROUP BY 1")
+    assert good["ok"] is True
+    assert good["row_count"] >= 1

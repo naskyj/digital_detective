@@ -1,0 +1,40 @@
+[project]
+name = "digital-detective"
+version = "0.1.0"
+description = "Local agentic digital-forensics toolkit for Electron applications"
+readme = "README.md"
+requires-python = ">=3.12"
+
+[tool.uv.workspace]
+members = ["packages/core", "packages/collector", "packages/lab"]
+
+[tool.uv.sources]
+dd-core = { workspace = true }
+dd-collector = { workspace = true }
+dd-lab = { workspace = true }
+ccl-chromium-reader = { git = "https://github.com/cclgroupltd/ccl_chromium_reader.git", tag = "0.3.18" }
+ccl-simplesnappy = { git = "https://github.com/cclgroupltd/ccl_simplesnappy.git" }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["dd_core", "dd_collector", "dd_lab"]
+known-local-folder = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# HTML-string-heavy report templating; long lines are more readable inline.
+"packages/lab/dd_lab/report/builder.py" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["packages"]

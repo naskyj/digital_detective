@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+/dist/
+/build/
+packaging/tools/
+.pytest_cache/
+.ruff_cache/
+
+# Node / frontend
+node_modules/
+packages/lab/dd_lab/ui/dist/
+
+# Models / data / evidence — never commit
+model/corpus/data/
+model/**/*.onnx
+model/**/*.safetensors
+model/**/*.bin
+evidence_samples/
+cases/
+*.duckdb
+*.dmp
+*.raw
+
+# Large reference media
+docs/reference/*.mov
+docs/reference/*.mp4
+
+# Secrets / local config
+.env
+*.key
+config.local.*
+gcs.json

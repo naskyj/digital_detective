@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Digital Detective</title>
+<style>
+  :root{--bg:#f6f6f7;--panel:#fff;--fg:#1c1c1e;--muted:#6b7280;--line:#e4e4e7;--accent:#7c1d1d;--accent2:#1d4ed8;--ok:#15803d;--bad:#b91c1c}
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:var(--fg);background:var(--bg);display:flex;height:100vh;overflow:hidden}
+  nav{width:190px;background:#17171a;color:#d4d4d8;padding:18px 0;flex-shrink:0;display:flex;flex-direction:column;gap:2px}
+  nav .brand{font-weight:700;font-size:15px;color:#fff;padding:0 20px 16px}
+  nav a{padding:9px 20px;cursor:pointer;color:#a1a1aa;text-decoration:none;font-size:13px}
+  nav a.active,nav a:hover{background:#27272a;color:#fff}
+  nav .foot{margin-top:auto;padding:12px 20px;font-size:11px;color:#71717a}
+  main{flex:1;overflow:auto;padding:26px 34px}
+  h1{font-size:20px;margin:0 0 18px}h2{font-size:15px;margin:24px 0 10px}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;text-align:center}
+  .card .n{font-size:26px;font-weight:700}.card .l{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  button{background:var(--accent2);color:#fff;border:0;border-radius:7px;padding:7px 13px;font-size:13px;cursor:pointer}
+  button.sec{background:#e4e4e7;color:#27272a}button.ghost{background:transparent;color:var(--accent2)}
+  button:disabled{opacity:.5;cursor:default}
+  input,select,textarea{border:1px solid var(--line);border-radius:7px;padding:7px 9px;font:inherit;background:#fff}
+  input,select{height:34px}textarea{width:100%;min-height:64px}
+  label{font-size:12px;color:var(--muted);display:block;margin:8px 0 3px}
+  table{border-collapse:collapse;width:100%;font-size:12.5px}
+  th,td{text-align:left;padding:6px 9px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#f4f4f5;position:sticky;top:0}
+  .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;background:#e4e4e7}
+  .pill.ok{background:#dcfce7;color:var(--ok)}.pill.bad{background:#fee2e2;color:var(--bad)}
+  .pill.cat{background:#eef2ff;color:#3730a3}
+  .bar{height:16px;background:var(--accent2);border-radius:3px;min-width:2px}
+  .barrow{display:grid;grid-template-columns:140px 1fr 60px;gap:8px;align-items:center;margin:3px 0;font-size:12px}
+  .log{background:#0b0b0d;color:#c7f5c7;font:11px/1.45 ui-monospace,Menlo,monospace;padding:10px;border-radius:7px;max-height:230px;overflow:auto;white-space:pre-wrap}
+  .muted{color:var(--muted)}.mono{font-family:ui-monospace,Menlo,monospace;font-size:11px;word-break:break-all}
+  .scroll{max-height:52vh;overflow:auto;border:1px solid var(--line);border-radius:8px}
+  a.link{color:var(--accent2);cursor:pointer}
+</style>
+</head>
+<body>
+<nav>
+  <div class="brand">🔍 Digital Detective</div>
+  <a data-view="dashboard">Dashboard</a>
+  <a data-view="collect">Collect</a>
+  <a data-view="cases">Cases</a>
+  <a data-view="settings">Settings</a>
+  <div class="foot" id="conn">connecting…</div>
+</nav>
+<main id="main">loading…</main>
+
+<script>
+const $ = (s,r=document)=>r.querySelector(s);
+const el = (t,a={},...k)=>{const e=document.createElement(t);for(const[x,v]of Object.entries(a)){if(x==='class')e.className=v;else if(x==='html')e.innerHTML=v;else if(x.startsWith('on'))e.addEventListener(x.slice(2),v);else e.setAttribute(x,v);}k.flat().forEach(c=>e.append(c?.nodeType?c:document.createTextNode(c??'')));return e;};
+const api = async (p,opt)=>{const r=await fetch('/api'+p,opt&&{...opt,headers:{'Content-Type':'application/json',...(opt.headers||{})}});if(!r.ok)throw new Error((await r.json().catch(()=>({detail:r.statusText}))).detail);return r.headers.get('content-type')?.includes('json')?r.json():r.text();};
+const state = {view:'dashboard', arg:null};
+
+function nav(){document.querySelectorAll('nav a').forEach(a=>{a.classList.toggle('active',a.dataset.view===state.view);a.onclick=()=>go(a.dataset.view);});}
+function go(view,arg){state.view=view;state.arg=arg||null;location.hash=view+(arg?'/'+arg:'');nav();render();}
+window.addEventListener('hashchange',()=>{const[v,a]=location.hash.slice(1).split('/');if(v&&v!==state.view||a!==state.arg){state.view=v||'dashboard';state.arg=a||null;nav();render();}});
+
+async function render(){
+  const m=$('#main'); m.innerHTML='<span class="muted">loading…</span>';
+  try{ await ({dashboard:vDashboard,collect:vCollect,cases:vCases,case:vCase,settings:vSettings}[state.view]||vDashboard)(m); }
+  catch(e){ m.innerHTML=''; m.append(el('div',{class:'panel'},'Error: '+e.message)); }
+}
+
+async function vDashboard(m){
+  const d=await api('/cases');
+  m.innerHTML=''; m.append(el('h1',{},'Dashboard'));
+  const c=d.counts;
+  m.append(el('div',{class:'cards'},
+    ...[['Total',c.total],['Running',c.running],['Completed',c.completed],['Stopped',c.stopped]]
+      .map(([l,n])=>el('div',{class:'card'},el('div',{class:'n'},String(n)),el('div',{class:'l'},l)))));
+  m.append(el('h2',{},'Cases'));
+  if(!d.cases.length) m.append(el('div',{class:'panel muted'},'No cases yet. Collect evidence, then create a case.'));
+  d.cases.forEach(cs=>{
+    m.append(el('div',{class:'panel'},
+      el('div',{class:'row'},
+        el('b',{},cs.name),
+        el('span',{class:'pill '+(cs.status==='completed'?'ok':cs.status==='error'?'bad':'')},cs.status),
+        el('span',{class:'muted mono'},cs.case_id),
+        el('span',{style:'flex:1'}),
+        el('button',{class:'sec',onclick:()=>go('case',cs.case_id)},'Open')),
+      cs.keywords?.length?el('div',{class:'muted',style:'margin-top:6px'},'keywords: '+cs.keywords.join(', ')):'',
+      cs.last_message?el('div',{class:'muted',style:'margin-top:4px'},cs.last_message):''));
+  });
+}
+
+async function vCollect(m){
+  const d=await api('/apps');
+  m.innerHTML=''; m.append(el('h1',{},'Collect Evidence'));
+  const box=el('div',{class:'panel'});
+  box.append(el('div',{class:'muted'},'Select applications detected on this machine. Evidence is copied read-only and hash-signed.'));
+  const checks=[];
+  d.apps.forEach(a=>{
+    const cb=el('input',{type:'checkbox'}); checks.push([cb,a]);
+    box.append(el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:8px'},
+      cb, el('span',{},el('b',{},a.name), a.version?' v'+a.version:'', a.running?el('span',{class:'pill'},' running'):''),
+      el('span',{class:'muted mono',style:'flex:1;text-align:right'},a.profile_dir)));
+  });
+  box.append(el('label',{},'Operator'), el('input',{id:'op',placeholder:'e.g. Det. A. Smith',style:'width:280px'}));
+  const mem=el('input',{type:'checkbox',id:'mem'});
+  box.append(el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:10px'},mem,'Capture memory (needs WinPmem / procdump on Windows)'));
+  box.append(el('label',{},'Case ID (optional — generated if blank)'), el('input',{id:'cid',placeholder:'20250622_204657',style:'width:280px'}));
+  const log=el('div',{class:'log',style:'display:none;margin-top:12px'});
+  const btn=el('button',{style:'margin-top:14px',onclick:async()=>{
+    const profiles=checks.filter(([c])=>c.checked).map(([,a])=>a.profile_dir);
+    if(!profiles.length)return alert('Select at least one app.');
+    btn.disabled=true; log.style.display='block'; log.textContent='';
+    try{
+      const {job_id}=await api('/collect',{method:'POST',body:JSON.stringify({profiles,operator:$('#op').value,memory:mem.checked,case_id:$('#cid').value||null})});
+      await pollJob(job_id,log);
+    }catch(e){log.textContent+='\nERROR: '+e.message;}
+    btn.disabled=false;
+  }},'Start Collection');
+  box.append(btn, log);
+  m.append(box);
+}
+
+async function pollJob(id,logEl,onDone){
+  while(true){
+    const j=await api('/jobs/'+id);
+    logEl.textContent=j.log.map(l=>l.msg).join('\n');
+    logEl.scrollTop=logEl.scrollHeight;
+    if(j.status==='done'||j.status==='error'){ if(onDone)onDone(j); return j; }
+    await new Promise(r=>setTimeout(r,700));
+  }
+}
+
+async function vCases(m){
+  const d=await api('/cases');
+  m.innerHTML=''; m.append(el('h1',{},'Cases'));
+  m.append(el('div',{class:'panel'},
+    el('div',{class:'muted'},'Create a case from a collected evidence set (its case ID comes from the collector).'),
+    el('label',{},'Case ID'), el('input',{id:'ncid',placeholder:'20250622_204657',style:'width:280px'}),
+    el('label',{},'Case name'), el('input',{id:'nname',placeholder:'e.g. Data breach investigation',style:'width:380px'}),
+    el('label',{},'Investigation keywords (comma or newline separated)'), el('textarea',{id:'nkw'}),
+    el('label',{},'Description'), el('textarea',{id:'ndesc'}),
+    el('button',{style:'margin-top:12px',onclick:async()=>{
+      try{ const r=await api('/cases',{method:'POST',body:JSON.stringify({case_id:$('#ncid').value.trim(),name:$('#nname').value.trim(),keywords:$('#nkw').value,description:$('#ndesc').value})});
+        go('case',r.case_id);
+      }catch(e){alert(e.message);}
+    }},'Create Case')));
+  m.append(el('h2',{},'Existing'));
+  d.cases.forEach(cs=>m.append(el('div',{class:'panel row'},
+    el('b',{},cs.name), el('span',{class:'pill '+(cs.status==='completed'?'ok':'')},cs.status),
+    el('span',{class:'muted mono'},cs.case_id), el('span',{style:'flex:1'}),
+    el('button',{class:'sec',onclick:()=>go('case',cs.case_id)},'Open'))));
+}
+
+async function vCase(m){
+  const id=state.arg; const d=await api('/cases/'+encodeURIComponent(id));
+  m.innerHTML=''; m.append(el('h1',{},d.meta.name+' '), el('span',{class:'muted mono'},id));
+  const iv=d.integrity;
+  m.append(el('div',{class:'panel'},
+    el('div',{class:'row'},
+      el('span',{class:'pill '+(iv.ok?'ok':'bad')}, iv.ok?'integrity verified':'INTEGRITY FAILED'),
+      el('span',{class:'muted'},`${iv.files} files · ${d.evidence.apps.join(', ')} · ${(d.evidence.bytes/1e6).toFixed(1)} MB · host ${d.evidence.host}`)),
+    d.meta.keywords.length?el('div',{class:'muted',style:'margin-top:6px'},'keywords: '+d.meta.keywords.join(', ')):'',
+    el('div',{class:'row',style:'margin-top:12px'},
+      el('button',{disabled:!!d.active_job,onclick:async()=>{
+        const log=$('#runlog'); log.style.display='block'; log.textContent='';
+        try{ const {job_id}=await api('/cases/'+id+'/run',{method:'POST'});
+          await pollJob(job_id,log,()=>go('case',id)); }catch(e){log.textContent='ERROR: '+e.message;}
+      }}, d.warehouse?'Re-run analysis':'Run analysis'),
+      d.reports.length?el('button',{class:'sec',onclick:()=>window.open('/api/cases/'+id+'/report','_blank')},'View report'):'',
+      el('button',{class:'ghost',onclick:()=>showAudit(id)},'Audit trail')),
+    el('div',{id:'runlog',class:'log',style:'display:none;margin-top:10px'},
+      d.active_job?d.active_job.log.map(l=>l.msg).join('\n'):'')));
+
+  if(d.active_job) pollJob(d.active_job.id,$('#runlog'),()=>go('case',id));
+
+  if(d.warehouse){
+    const w=d.warehouse, max=Math.max(...w.by_category.map(c=>c.artifacts),1);
+    m.append(el('h2',{},`Artifacts — ${w.artifacts.toLocaleString()} total, ${w.high_priority} high-priority`));
+    const bars=el('div',{class:'panel'});
+    w.by_category.forEach(c=>bars.append(el('div',{class:'barrow'},
+      el('span',{class:'pill cat'},c.category),
+      el('div',{class:'bar',style:`width:${100*c.artifacts/max}%`}),
+      el('span',{class:'muted'},c.artifacts.toLocaleString()))));
+    m.append(bars);
+    m.append(browser(id, w.by_category.map(c=>c.category)));
+  } else {
+    m.append(el('div',{class:'panel muted'},'Not processed yet — run the analysis.'));
+  }
+}
+
+function browser(id,cats){
+  const wrap=el('div',{class:'panel'});
+  const cat=el('select',{}, el('option',{value:''},'all categories'), ...cats.map(c=>el('option',{value:c},c)));
+  const q=el('input',{placeholder:'search key / value',style:'flex:1'});
+  const out=el('div',{class:'scroll',style:'margin-top:10px'});
+  async function load(){
+    out.innerHTML='<div class="muted" style="padding:10px">loading…</div>';
+    const p=new URLSearchParams(); if(cat.value)p.set('category',cat.value); if(q.value)p.set('q',q.value); p.set('limit','200');
+    const d=await api('/cases/'+id+'/artifacts?'+p);
+    const t=el('table',{},el('thead',{},el('tr',{},...['Category','Conf','App','Source','Key','Value'].map(h=>el('th',{},h)))));
+    const tb=el('tbody',{});
+    d.rows.forEach(r=>tb.append(el('tr',{},
+      el('td',{},el('span',{class:'pill cat'},r.category||'')),
+      el('td',{},r.confidence!=null?r.confidence.toFixed(2):''),
+      el('td',{},r.app), el('td',{},r.source_type),
+      el('td',{class:'mono'},r.key), el('td',{},r.value))));
+    t.append(tb); out.innerHTML=''; out.append(t);
+  }
+  cat.onchange=load; let tmo; q.oninput=()=>{clearTimeout(tmo);tmo=setTimeout(load,300);};
+  wrap.append(el('h2',{},'Artifact browser'), el('div',{class:'row'},cat,q), out);
+  load();
+  return wrap;
+}
+
+async function showAudit(id){
+  const d=await api('/cases/'+id+'/audit');
+  const m=$('#main'); m.append(el('h2',{},'Chain of custody'));
+  m.append(el('div',{class:'panel scroll'}, tbl(d.custody,['seq','ts','event','actor','detail'])));
+  m.append(el('h2',{},'Analysis audit'));
+  m.append(el('div',{class:'panel scroll'}, tbl(d.audit,['seq','ts','kind','name','detail'])));
+  window.scrollTo(0,document.body.scrollHeight);
+}
+function tbl(rows,cols){
+  const t=el('table',{},el('thead',{},el('tr',{},...cols.map(c=>el('th',{},c)))));
+  const tb=el('tbody',{}); rows.forEach(r=>tb.append(el('tr',{},...cols.map(c=>el('td',{class:c==='detail'?'':'mono'},String(r[c]??''))))));
+  t.append(tb); return t;
+}
+
+async function vSettings(m){
+  const s=await api('/settings');
+  m.innerHTML=''; m.append(el('h1',{},'Settings'));
+  const box=el('div',{class:'panel'});
+  const cr=el('input',{value:s.cases_root,style:'width:480px'});
+  const prov=el('select',{}, ...['ollama','openai','anthropic'].map(p=>el('option',{value:p,...(p===s.llm.provider?{selected:''}:{})},p)));
+  const mdl=el('input',{value:s.llm.model,style:'width:280px'});
+  const url=el('input',{value:s.llm.base_url||'',placeholder:'http://localhost:11434/v1',style:'width:320px'});
+  const key=el('input',{type:'password',placeholder:s.llm.api_key_set?'•••••• (set)':'API key',style:'width:280px'});
+  const ag=el('input',{type:'checkbox',...(s.use_agent?{checked:''}:{})});
+  const zs=el('input',{type:'checkbox',...(s.use_zeroshot?{checked:''}:{})});
+  const md=el('input',{value:s.classifier_model_dir||'',placeholder:'(none — rules only)',style:'width:360px'});
+  box.append(
+    el('label',{},'Cases directory'), cr,
+    el('label',{},'LLM provider'), prov,
+    el('label',{},'Model'), mdl,
+    el('label',{},'Base URL (Ollama / OpenAI-compatible)'), url,
+    el('label',{},'API key (OpenAI / Anthropic / Google)'), key,
+    el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:12px'}, ag, 'Use the LLM agent to orchestrate (otherwise a fixed deterministic pipeline runs)'),
+    el('div',{class:'muted',style:'margin-top:6px'},'Installing Ollama and pulling a model is a separate setup step; this only selects which model to use. See docs/LLM_SETUP.md.'),
+    el('label',{},'Trained classifier model directory (optional)'), md,
+    el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:10px'}, zs, 'Use the pretrained zero-shot classifier as a stopgap 4th voter (needs the "zeroshot" extra)'),
+    el('div',{class:'muted',style:'margin-top:6px'},'Classification runs on rules by default. Point this at a trained model when the training track produces one.'),
+    el('div',{class:'row',style:'margin-top:14px'},
+      el('button',{onclick:async()=>{
+        const body={cases_root:cr.value,llm_provider:prov.value,llm_model:mdl.value,llm_base_url:url.value,use_agent:ag.checked,use_zeroshot:zs.checked,classifier_model_dir:md.value};
+        if(key.value)body.llm_api_key=key.value;
+        await api('/settings',{method:'PUT',body:JSON.stringify(body)});
+        alert('Saved.');
+      }},'Save Settings'),
+      el('button',{class:'sec',onclick:async(e)=>{
+        e.target.disabled=true; e.target.textContent='Testing…';
+        try{ const r=await api('/settings/test-llm',{method:'POST'});
+          alert(r.ok?`OK — ${r.provider}/${r.model}\n${r.sample||''}`:`Failed: ${r.error}`);
+        }catch(x){alert('Error: '+x.message);}
+        e.target.disabled=false; e.target.textContent='Test connection';
+      }},'Test connection')));
+  m.append(box);
+}
+
+(async()=>{
+  try{ const h=await api('/settings'); $('#conn').textContent='● connected'; }
+  catch{ $('#conn').textContent='● offline'; }
+  const [v,a]=location.hash.slice(1).split('/'); state.view=v||'dashboard'; state.arg=a||null;
+  nav(); render();
+})();
+</script>
+</body>
+</html>

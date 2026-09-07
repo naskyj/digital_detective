@@ -1,0 +1,71 @@
+# Packaging
+
+Two build targets. Build each **on the OS you will run it on** (PyInstaller does
+not cross-compile) — for real use that means building on Windows.
+
+## Prerequisites
+
+```bash
+uv sync --all-packages --extra chromium        # + --extra desktop for the lab window
+uv pip install pyinstaller
+```
+
+## 1. Collector — `dist/dd-collect.exe` (one file)
+
+Minimal: `dd_core` + `dd_collector` + `psutil` + stdlib Tkinter. No LLM, no
+DuckDB, no parsers.
+
+```bash
+uv run pyinstaller packaging/collector.spec
+```
+
+Run it:
+
+- double-click → GUI
+- `dd-collect.exe --list` → enumerate Electron apps
+- `dd-collect.exe --app Discord --output E:\evidence --memory --operator "Det. Smith"`
+
+### Bundling memory tools (optional)
+
+Put the executables in `packaging/tools/` before building and they are embedded
+next to `dd-collect.exe`:
+
+| Tool | Purpose | Get it |
+|---|---|---|
+| `winpmem.exe` | full physical RAM capture | https://github.com/Velocidex/WinPmem/releases |
+| `procdump.exe` | per-process memory dump | https://learn.microsoft.com/sysinternals/downloads/procdump |
+
+Without them, `--memory` still collects disk artifacts and records that memory
+capture was skipped.
+
+## 2. Investigator app — `dist/dd-lab/` (one directory)
+
+The full thing: collector + parsers + DuckDB warehouse + classifier + agent +
+report + web UI in a pywebview window.
+
+```bash
+uv run pyinstaller packaging/lab.spec
+```
+
+Ship the whole `dist/dd-lab/` folder. Launch `dd-lab/dd-lab.exe` — it starts the
+local server and opens the window (falls back to the default browser at
+`http://127.0.0.1:8765`).
+
+### Heavy optional extras
+
+`transformers` / `torch` (zero-shot classifier), `onnxruntime` (trained model)
+and `volatility3` (full-image memory analysis) are **excluded** from the bundle
+to keep it small. If you need them baked in, remove the matching name from
+`excludes` in `packaging/lab.spec`, `uv sync … --extra zeroshot --extra memory`,
+and rebuild — expect the bundle to grow by 1–3 GB.
+
+For most deployments, keep them out and let the machine that needs them install
+them into a normal Python environment instead.
+
+## Notes
+
+- Antivirus / SmartScreen may flag a fresh unsigned PyInstaller exe. Code-sign
+  the binaries for distribution.
+- The lab app writes cases and settings under the per-user config dir
+  (`%APPDATA%\DigitalDetective` on Windows); the exe location doesn't matter.
+- `uv run pyinstaller` uses the workspace venv, so all three packages resolve.
