@@ -37,20 +37,31 @@ Fetch them into `packaging/tools/` with the helper script — **run it on this
 build machine, never on the evidence laptop** — then build:
 
 ```bash
-python scripts/fetch_collector_tools.py        # WinPmem + ProcDump → packaging/tools/
-uv run pyinstaller packaging/collector.spec    # embeds them next to dd-collect.exe
+python scripts/fetch_collector_tools.py                       # WinPmem + ProcDump
+python scripts/fetch_collector_tools.py --dumpit ~/Downloads/Magnet_DumpIt.zip   # + DumpIt
+uv run pyinstaller packaging/collector.spec                   # embeds them next to the exe
 ```
 
 | Tool | Captures → | Source | License |
 |---|---|---|---|
-| `winpmem.exe` | full physical RAM → `physmem.raw` | github.com/Velocidex/WinPmem | Apache-2.0 (vendorable) |
+| `DumpIt.exe` | full physical RAM → `physmem.raw` (**preferred**) | magnetforensics.com (form-gated → `--dumpit <path>`) | Magnet EULA (don't commit) |
+| `winpmem.exe` | full physical RAM (fallback if no DumpIt) | github.com/Velocidex/WinPmem | Apache-2.0 (vendorable) |
 | `procdump.exe` | one process → `pid_<n>.dmp` | download.sysinternals.com | Sysinternals EULA (don't commit) |
-| `DumpIt.exe` | full RAM (WinPmem fallback) | Magnet/Comae (manual download) | — |
+
+The collector runs **DumpIt first** and only falls back to WinPmem if `DumpIt.exe`
+isn't bundled. DumpIt's download is behind a Magnet signup form, so the script
+can't fetch it — download it yourself and import the `.zip` (or a bare
+`DumpIt.exe`) with `--dumpit`. It's recorded in `TOOLS.md` with its SHA-256.
 
 `packaging/tools/` is git-ignored so build binaries never bloat the repo. WinPmem
-is Apache-2.0 — if you want a fully offline checkout, `git add -f
-packaging/tools/winpmem.exe` after fetching. Keep ProcDump/DumpIt out (their
-licenses restrict redistribution); each build box re-runs the script.
+is Apache-2.0 — for a fully offline checkout, `git add -f
+packaging/tools/winpmem.exe`. Keep ProcDump/DumpIt out (licenses restrict
+redistribution); each build box re-runs the script.
+
+**TLS errors** (`CERTIFICATE_VERIFY_FAILED`): the script uses `certifi` if it's
+installed (`uv sync` pulls it into the dev group) — otherwise `pip install
+certifi`, or run the python.org "Install Certificates.command", or pass
+`--insecure` (it still prints each SHA-256 for out-of-band verification).
 
 Without any of these, `--memory` still collects all disk artifacts and records
 that memory capture was skipped. For a disk-only collection you don't need them.

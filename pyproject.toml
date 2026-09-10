@@ -19,6 +19,7 @@ ccl-simplesnappy = { git = "https://github.com/cclgroupltd/ccl_simplesnappy.git"
 dev = [
     "pytest>=8.3",
     "ruff>=0.8",
+    "certifi",          # scripts/fetch_collector_tools.py TLS trust store
 ]
 
 [tool.ruff]

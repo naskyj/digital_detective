@@ -2,10 +2,11 @@
 # Build:  pyinstaller packaging/collector.spec
 # Output: dist/dd-collect(.exe)
 
-# A bundled winpmem.exe / procdump.exe placed in packaging/tools/ is picked up
-# automatically (see the binaries list). Populate that dir first with:
-#     python scripts/fetch_collector_tools.py
-# Without them the collector still acquires disk artifacts.
+# A bundled DumpIt.exe / winpmem.exe / procdump.exe placed in packaging/tools/ is
+# picked up automatically (see the binaries list). Populate that dir first with:
+#     python scripts/fetch_collector_tools.py [--dumpit <magnet-dumpit.zip>]
+# The collector prefers DumpIt for full-RAM capture, WinPmem as fallback.
+# Without any of them the collector still acquires disk artifacts.
 
 import os
 
