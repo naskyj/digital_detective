@@ -6,7 +6,12 @@ venv/
 *.egg-info/
 /dist/
 /build/
-packaging/tools/
+packaging/tools/*
+# WinPmem is Apache-2.0 and may be vendored for a fully offline build.
+# Run scripts/fetch_collector_tools.py first, then `git add -f` it if you want that.
+!packaging/tools/TOOLS.md
+# ProcDump / DumpIt: Sysinternals / Comae licenses restrict redistribution —
+# keep them out of the repo; each build box fetches them with the script.
 .pytest_cache/
 .ruff_cache/
 

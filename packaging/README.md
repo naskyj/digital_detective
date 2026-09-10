@@ -33,16 +33,27 @@ capture; they are **not** analysis tools (Volatility runs later, on the
 investigator machine — see step 2). They are separate from Volatility and
 serve the opposite end of the workflow.
 
-Put the executables in `packaging/tools/` before building and they are embedded
-next to `dd-collect.exe`:
+Fetch them into `packaging/tools/` with the helper script — **run it on this
+build machine, never on the evidence laptop** — then build:
 
-| Tool | Captures → | Get it |
-|---|---|---|
-| `winpmem.exe` | full physical RAM → `physmem.raw` | https://github.com/Velocidex/WinPmem/releases |
-| `procdump.exe` | one process → `pid_<n>.dmp` | https://learn.microsoft.com/sysinternals/downloads/procdump |
+```bash
+python scripts/fetch_collector_tools.py        # WinPmem + ProcDump → packaging/tools/
+uv run pyinstaller packaging/collector.spec    # embeds them next to dd-collect.exe
+```
 
-Without them, `--memory` still collects all disk artifacts and records that
-memory capture was skipped. For a disk-only collection you don't need either.
+| Tool | Captures → | Source | License |
+|---|---|---|---|
+| `winpmem.exe` | full physical RAM → `physmem.raw` | github.com/Velocidex/WinPmem | Apache-2.0 (vendorable) |
+| `procdump.exe` | one process → `pid_<n>.dmp` | download.sysinternals.com | Sysinternals EULA (don't commit) |
+| `DumpIt.exe` | full RAM (WinPmem fallback) | Magnet/Comae (manual download) | — |
+
+`packaging/tools/` is git-ignored so build binaries never bloat the repo. WinPmem
+is Apache-2.0 — if you want a fully offline checkout, `git add -f
+packaging/tools/winpmem.exe` after fetching. Keep ProcDump/DumpIt out (their
+licenses restrict redistribution); each build box re-runs the script.
+
+Without any of these, `--memory` still collects all disk artifacts and records
+that memory capture was skipped. For a disk-only collection you don't need them.
 
 ## 2. Investigator app — `dist/dd-lab/` (one directory)
 

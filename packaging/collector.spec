@@ -3,8 +3,9 @@
 # Output: dist/dd-collect(.exe)
 
 # A bundled winpmem.exe / procdump.exe placed in packaging/tools/ is picked up
-# automatically (see the binaries list). Without them the collector still
-# acquires disk artifacts.
+# automatically (see the binaries list). Populate that dir first with:
+#     python scripts/fetch_collector_tools.py
+# Without them the collector still acquires disk artifacts.
 
 import os
 
