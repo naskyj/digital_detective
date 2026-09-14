@@ -17,6 +17,8 @@ import platform
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dd_core.evidence import looks_like_profile
+
 _WINDOWS_ROOTS = ("APPDATA", "LOCALAPPDATA")
 
 
@@ -54,12 +56,9 @@ def _candidate_roots() -> list[Path]:
     return [r for r in dict.fromkeys(roots) if r.is_dir()]
 
 
-def _looks_like_profile(d: Path) -> bool:
-    if (d / "Local State").is_file():
-        return True
-    has_ls = (d / "Local Storage" / "leveldb").is_dir()
-    has_cache = (d / "Cache").is_dir() or (d / "Cache" / "Cache_Data").is_dir()
-    return has_ls or has_cache
+# Shared with image-based extraction (dd_lab.imaging.discover) so both agree
+# on what counts as a profile.
+_looks_like_profile = looks_like_profile
 
 
 def _guess_version(profile_dir: Path) -> str | None:

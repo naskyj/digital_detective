@@ -23,6 +23,7 @@ Paths the lab parsers rely on (Chromium-native, under `<app>/`):
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,6 +63,18 @@ DENYLIST = frozenset({
     "ScriptCache",
 })
 
+def looks_like_profile(d: Path) -> bool:
+    """Does `d` look like a Chromium/Electron profile directory? Shared by the
+    live collector (`dd_collector.discover`) and image-based extraction
+    (`dd_lab.imaging.discover`) — same signature files, whether `d` is a real
+    directory or a path into an opened disk image."""
+    if (d / "Local State").is_file():
+        return True
+    has_ls = (d / "Local Storage" / "leveldb").is_dir()
+    has_cache = (d / "Cache").is_dir() or (d / "Cache" / "Cache_Data").is_dir()
+    return has_ls or has_cache
+
+
 # Friendly aliases accepted in `include` (so callers/tests need not know the
 # exact Chromium path).
 _ALIASES = {
@@ -89,8 +102,15 @@ def plan_profile_copy(
     Default: image the entire profile (recursively) minus `DENYLIST`, preserving
     structure. `include` (a set of the path constants above) restricts to a
     named subset — used by the tests.
+
+    `profile_dir` may be a plain `pathlib.Path` (live collection) or any other
+    `Path` subclass backed by a different filesystem — e.g. `dissect`'s
+    `TargetPath`, reading straight out of a disk image (see `dd_lab.imaging`).
+    Only a plain `str` gets wrapped; an already-Path-like object is used as-is,
+    since re-wrapping it in `Path(...)` would discard whatever non-local
+    filesystem it's actually backed by.
     """
-    profile = Path(profile_dir)
+    profile = profile_dir if isinstance(profile_dir, Path) else Path(profile_dir)
     specs: list[CopySpec] = []
 
     if include is None:
@@ -170,6 +190,22 @@ class CopyReport:
 _MAX_COPY_DEPTH = 64  # defense in depth against a pathologically deep tree
 
 
+def _stream_copy(src: Path, dst: Path) -> None:
+    """Copy `src` to `dst` by reading/writing through the `Path` API rather
+    than `shutil.copy2` (which opens the source by its OS path string via the
+    `open()` builtin) — this is the only way that also works when `src` is a
+    non-local `Path` subclass such as `dissect`'s `TargetPath`, reading out of
+    a disk image rather than the real filesystem. Behaviourally identical to
+    `copy2` for a plain local path: content plus, best-effort, mtime."""
+    with src.open("rb") as fsrc, open(dst, "wb") as fdst:
+        shutil.copyfileobj(fsrc, fdst)
+    try:
+        st = src.stat()
+        os.utime(dst, (st.st_atime, st.st_mtime))
+    except (OSError, NotImplementedError, AttributeError):
+        pass  # best-effort metadata; content is what matters forensically
+
+
 def _copy_tree_resilient(
     src: Path, dst: Path, report: CopyReport, exclude: frozenset[str] = frozenset(), depth: int = 0,
 ) -> None:
@@ -202,7 +238,7 @@ def _copy_tree_resilient(
             elif entry.is_dir():
                 _copy_tree_resilient(entry, target, report, exclude, depth + 1)
             elif entry.is_file():
-                shutil.copy2(entry, target)
+                _stream_copy(entry, target)
                 report.written.append(target)
         except (PermissionError, OSError, shutil.SameFileError) as e:
             report.skipped.append((str(entry), str(e)))
@@ -225,7 +261,7 @@ def execute_copy(specs: list[CopySpec], app_evidence_dir: str | Path) -> CopyRep
         else:
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(spec.source, dest)
+                _stream_copy(spec.source, dest)
                 report.written.append(dest)
             except (PermissionError, OSError, shutil.SameFileError) as e:
                 report.skipped.append((str(spec.source), str(e)))
