@@ -4,6 +4,9 @@
 #
 # Heavy optional extras (transformers/torch, volatility3, onnxruntime) are NOT
 # bundled; install them into the environment before building if you need them.
+# `dissect.target` (image-based acquisition, `--extra image`) is pure Python
+# and modest in size — it IS bundled automatically if it was installed
+# (`uv sync --package dd-lab --extra image`) before this build.
 
 import os
 

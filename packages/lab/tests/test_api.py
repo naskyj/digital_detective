@@ -32,8 +32,10 @@ pytestmark = pytest.mark.skipif(_profile() is None, reason="no Electron profile 
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    # point the app at a throwaway cases root before importing the module state
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    # point the app at a throwaway cases root before importing the module state.
+    # DD_CONFIG_DIR (not XDG_CONFIG_HOME) is what actually isolates this on
+    # macOS — settings.py's config dir ignores XDG_CONFIG_HOME there.
+    monkeypatch.setenv("DD_CONFIG_DIR", str(tmp_path / "cfg"))
     import importlib
 
     from dd_lab.api import settings as settings_mod

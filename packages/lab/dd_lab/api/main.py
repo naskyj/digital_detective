@@ -70,6 +70,18 @@ class CollectIn(BaseModel):
     case_id: str | None = None
 
 
+class ImageListIn(BaseModel):
+    image_path: str
+
+
+class ImageExtractIn(BaseModel):
+    image_path: str
+    apps: list[str] | None = None  # None = every profile found
+    memory_image_path: str | None = None
+    operator: str = ""
+    case_id: str | None = None
+
+
 class QueryIn(BaseModel):
     sql: str
 
@@ -141,6 +153,48 @@ def collect(body: CollectIn) -> dict:
         }
 
     job_id = _jobs.submit("collect", work, case_id=body.case_id)
+    return {"job_id": job_id}
+
+
+# ------------------------------------------------------------ image acquisition
+
+
+@app.post("/api/image/list")
+def image_list(body: ImageListIn) -> dict:
+    """Open a disk image and list the Electron/Chromium app profiles found on
+    it — no extraction yet. Fails cleanly (400, not a crash) if the `image`
+    extra isn't installed or the file isn't a recognisable image."""
+    from dd_lab.imaging import ImageUnavailable, discover_apps, open_image
+
+    try:
+        target = open_image(body.image_path)
+        apps = discover_apps(target)
+    except ImageUnavailable as e:
+        raise HTTPException(400, str(e)) from e
+    return {
+        "apps": [{"name": a.name, "profile_dir": str(a.profile_dir), "version": a.version} for a in apps],
+    }
+
+
+@app.post("/api/image/extract")
+def image_extract(body: ImageExtractIn) -> dict:
+    from dd_lab.imaging import acquire_from_image
+
+    def work(progress) -> dict:
+        # ImageUnavailable (and anything else) is caught by JobManager and
+        # surfaced on the job record — no crash, just a failed job the UI shows.
+        result = acquire_from_image(
+            body.image_path, _settings.cases_root,
+            apps=body.apps, memory_image_path=body.memory_image_path,
+            case_id=body.case_id, operator=body.operator, progress=progress,
+        )
+        return {
+            "case_id": result.case_id, "files": result.file_count,
+            "bytes": result.total_bytes, "fingerprint": result.public_key_fingerprint,
+            "image_sha256": result.image_sha256, "apps": result.apps, "warnings": result.warnings,
+        }
+
+    job_id = _jobs.submit("image_extract", work, case_id=body.case_id)
     return {"job_id": job_id}
 
 

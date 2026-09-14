@@ -18,13 +18,22 @@ from dd_lab.agent.config import AgentConfig
 
 
 def _config_dir() -> Path:
-    if os.name == "nt":
+    # Explicit override wins on every platform — this is what tests use to
+    # isolate from the real per-user config; on macOS in particular the
+    # platform branch below ignores XDG_CONFIG_HOME entirely, so setting that
+    # alone silently does nothing there and a test run ends up overwriting the
+    # developer's real settings.json (found by actually running the app).
+    if override := os.environ.get("DD_CONFIG_DIR"):
+        d = Path(override) / "DigitalDetective"
+    elif os.name == "nt":
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData/Roaming"))
+        d = base / "DigitalDetective"
     elif os.uname().sysname == "Darwin":
         base = Path.home() / "Library/Application Support"
+        d = base / "DigitalDetective"
     else:
         base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    d = base / "DigitalDetective"
+        d = base / "DigitalDetective"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

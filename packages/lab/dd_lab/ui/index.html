@@ -158,6 +158,81 @@ async function vCollect(m){
   }},'Start Collection');
   box.append(btn, log, done);
   m.append(box);
+
+  m.append(imageImportPanel());
+}
+
+function imageImportPanel(){
+  const box=el('div',{class:'panel'});
+  box.append(el('h2',{style:'margin-top:0'},'Import from a Disk Image'),
+    el('div',{class:'hint',style:'margin-bottom:10px'},
+      'Already have a disk image (raw/.dd/.001, VMDK/VHD, or E01) instead of a live machine? '+
+      'Point the lab at it directly — no mounting, no admin rights needed. See docs/IMAGE_ACQUISITION.md.'));
+
+  const path=el('input',{placeholder:'/path/to/image.raw or E:\\case.E01',style:'width:420px'});
+  const scanLog=el('div',{class:'hint'});
+  const appsBox=el('div',{style:'display:none;margin-top:10px'});
+  const checks=[];
+
+  const scanBtn=el('button',{class:'sec',onclick:async()=>{
+    if(!path.value.trim()) return alert('Enter an image path first.');
+    scanBtn.disabled=true; scanBtn.innerHTML='<span class="spin" style="border-color:#0003;border-top-color:#333"></span>scanning…';
+    scanLog.textContent=''; appsBox.style.display='none'; appsBox.innerHTML=''; checks.length=0;
+    try{
+      const d=await api('/image/list',{method:'POST',body:JSON.stringify({image_path:path.value.trim()})});
+      if(!d.apps.length){ scanLog.textContent='No Electron/Chromium app profiles found on this image.'; }
+      else{
+        appsBox.style.display='block';
+        d.apps.forEach(a=>{
+          const cb=el('input',{type:'checkbox',checked:''}); checks.push([cb,a]);
+          appsBox.append(el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:6px'},
+            cb, el('span',{},el('b',{},a.name), a.version?' v'+a.version:''),
+            el('span',{class:'muted mono',style:'flex:1;text-align:right'},a.profile_dir)));
+        });
+      }
+    }catch(e){ scanLog.textContent='Could not open image: '+e.message; }
+    scanBtn.disabled=false; scanBtn.textContent='Scan Image';
+  }},'Scan Image');
+
+  box.append(el('label',{},'Image path (readable by this machine)'), path,
+    el('div',{class:'row',style:'margin-top:8px'}, scanBtn), scanLog, appsBox);
+
+  const op=el('input',{placeholder:'e.g. Det. A. Smith',style:'width:300px'});
+  const memImg=el('input',{placeholder:'optional — a separately acquired physmem.raw',style:'width:420px'});
+  const cid=el('input',{placeholder:'auto',style:'width:300px'});
+  box.append(
+    el('label',{},'Operator name (recorded in the chain of custody)'), op,
+    el('label',{},'Memory image (optional — a full-RAM capture acquired separately)'), memImg,
+    el('label',{},'Case ID (optional — generated from the timestamp if blank)'), cid);
+
+  const log=el('div',{class:'log',style:'display:none;margin-top:12px'});
+  const done=el('div',{style:'display:none;margin-top:12px'});
+  const btn=el('button',{class:'primary',style:'margin-top:16px',onclick:async()=>{
+    if(!path.value.trim()) return alert('Enter an image path first.');
+    const chosen = checks.length ? checks.filter(([c])=>c.checked).map(([,a])=>a.name) : null;
+    if(checks.length && !chosen.length) return alert('Select at least one application, or scan first.');
+    btn.disabled=true; btn.innerHTML='<span class="spin"></span>extracting…';
+    log.style.display='block'; log.textContent=''; done.style.display='none';
+    try{
+      const r=await api('/image/extract',{method:'POST',body:JSON.stringify({
+        image_path:path.value.trim(), apps:chosen, operator:op.value,
+        memory_image_path:memImg.value||null, case_id:cid.value||null})});
+      const j=await pollJob(r.job_id,log);
+      if(j && j.status==='done' && j.result){
+        done.style.display='block'; done.innerHTML='';
+        done.append(
+          el('b',{},`✓ Extracted case ${j.result.case_id}`),
+          el('div',{class:'hint'},`${j.result.files} files · ${(j.result.bytes/1e6).toFixed(1)} MB · `+
+            `image sha256 ${j.result.image_sha256.slice(0,16)}… · key ${j.result.fingerprint}` +
+            (j.result.warnings?.length?` · ${j.result.warnings.length} warning(s)`:'')),
+          el('button',{style:'margin-top:8px',onclick:()=>{state.newCaseId=j.result.case_id;go('cases');}},
+            'Create a case from this →'));
+      }
+    }catch(e){ log.textContent+='\nCould not start: '+e.message; }
+    btn.disabled=false; btn.textContent='Extract from Image';
+  }},'Extract from Image');
+  box.append(btn, log, done);
+  return box;
 }
 
 async function pollJob(id,logEl,onDone){

@@ -18,6 +18,11 @@ dependencies = [
 # ccl_chromium_reader is git-only (MIT); pinned via [tool.uv.sources] in the root.
 chromium = ["ccl-chromium-reader", "ccl-simplesnappy"]
 memory = ["volatility3>=2.7"]
+# Pure-Python: reads raw/dd/.001-split images, VMDK/VHD(X) VM disks, and E01
+# (EWF) containers directly — NTFS/FAT/exFAT — with no mounting and no admin
+# rights. Lets the lab extract evidence from an image instead of needing a
+# live collection. See dd_lab/imaging/.
+image = ["dissect.target>=3.20,<4", "dissect.fat>=3.10,<4"]
 classify = ["gliner>=0.2", "onnxruntime>=1.19"]
 zeroshot = ["transformers>=4.44", "torch>=2.2"]
 anthropic = ["pydantic-ai-slim[anthropic]>=1.0"]
@@ -26,6 +31,7 @@ desktop = ["pywebview>=5.0"]
 
 [project.scripts]
 dd-lab = "dd_lab.api.main:run"
+dd-lab-image = "dd_lab.imaging.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8.3", "httpx>=0.27"]
