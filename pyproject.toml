@@ -38,4 +38,4 @@ known-local-folder = ["tests"]
 "packages/lab/dd_lab/report/builder.py" = ["E501"]
 
 [tool.pytest.ini_options]
-testpaths = ["packages"]
+testpaths = ["packages", "scripts"]

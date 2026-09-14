@@ -167,11 +167,25 @@ class CopyReport:
     skipped: list[tuple[str, str]]  # (source path, reason)
 
 
+_MAX_COPY_DEPTH = 64  # defense in depth against a pathologically deep tree
+
+
 def _copy_tree_resilient(
-    src: Path, dst: Path, report: CopyReport, exclude: frozenset[str] = frozenset()
+    src: Path, dst: Path, report: CopyReport, exclude: frozenset[str] = frozenset(), depth: int = 0,
 ) -> None:
     """Recursively copy, skipping unreadable files (e.g. a LevelDB .log locked by
-    a running app) and any directory named in `exclude`, instead of aborting."""
+    a running app) and any directory named in `exclude`, instead of aborting.
+
+    We are copying from a machine under examination, which may be compromised
+    or simply hostile: a symlink is never followed (it is recorded and
+    skipped, not resolved and copied) so a symlink loop or a link out of the
+    profile (to `/dev/zero`, another user's files, ...) can't turn a copy into
+    a hang or an unbounded read. Recursion depth is capped as a second layer of
+    defense against a pathologically deep directory tree.
+    """
+    if depth > _MAX_COPY_DEPTH:
+        report.skipped.append((str(src), f"max copy depth ({_MAX_COPY_DEPTH}) exceeded"))
+        return
     try:
         entries = sorted(src.iterdir())
     except (PermissionError, OSError) as e:
@@ -183,8 +197,10 @@ def _copy_tree_resilient(
             continue
         target = dst / entry.name
         try:
-            if entry.is_dir():
-                _copy_tree_resilient(entry, target, report, exclude)
+            if entry.is_symlink():
+                report.skipped.append((str(entry), "symlink (not followed)"))
+            elif entry.is_dir():
+                _copy_tree_resilient(entry, target, report, exclude, depth + 1)
             elif entry.is_file():
                 shutil.copy2(entry, target)
                 report.written.append(target)
@@ -204,6 +220,8 @@ def execute_copy(specs: list[CopySpec], app_evidence_dir: str | Path) -> CopyRep
         dest = app_dir if spec.dest_rel == "." else app_dir / spec.dest_rel
         if spec.is_dir:
             _copy_tree_resilient(spec.source, dest, report, spec.exclude_names)
+        elif spec.source.is_symlink():
+            report.skipped.append((str(spec.source), "symlink (not followed)"))
         else:
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)

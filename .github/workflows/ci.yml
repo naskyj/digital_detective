@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Sync workspace (all packages, chromium + image extras)
+        run: uv sync --all-packages --extra chromium --extra image
+
+      - name: Lint (ruff)
+        run: uv run --package dd-collector ruff check packages scripts
+
+      - name: Test — core
+        run: uv run --package dd-core python -m pytest packages/core -q
+
+      - name: Test — collector
+        run: uv run --package dd-collector python -m pytest packages/collector -q
+
+      - name: Test — lab (fast only; slow full-cache test needs real evidence)
+        working-directory: packages/lab
+        run: uv run --package dd-lab python -m pytest -q -m "not slow"
+
+      - name: Test — build scripts (fetch_collector_tools.py)
+        run: uv run python -m pytest scripts -q
