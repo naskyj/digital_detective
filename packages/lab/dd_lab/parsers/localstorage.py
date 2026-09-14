@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from collections.abc import Iterator
 
 from dd_core.enums import SourceType
 from dd_core.schema import NormalizedArtifact
-from dd_lab.parsers.base import LOCAL_STORAGE, ParseContext, emit_value
+from dd_lab.parsers.base import LOCAL_STORAGE, ParseContext, emit_value, open_leveldb_resilient
 
 log = logging.getLogger("dd_lab.parsers.localstorage")
 
@@ -19,10 +20,8 @@ def parse(ctx: ParseContext) -> Iterator[NormalizedArtifact]:
 
     leveldb_dir = ctx.path(LOCAL_STORAGE)
     source_file = ctx.rel(leveldb_dir)
-    try:
-        db = LocalStoreDb(leveldb_dir)
-    except Exception:
-        log.exception("could not open Local Storage leveldb at %s", leveldb_dir)
+    db, cleanup_dir = open_leveldb_resilient(leveldb_dir, LocalStoreDb)
+    if db is None:
         return
     try:
         for rec in db.iter_all_records(include_deletions=True):
@@ -41,3 +40,5 @@ def parse(ctx: ParseContext) -> Iterator[NormalizedArtifact]:
                 log.exception("bad Local Storage record in %s", leveldb_dir)
     finally:
         db.close()
+        if cleanup_dir is not None:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)

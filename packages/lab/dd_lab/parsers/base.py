@@ -9,7 +9,9 @@ input is routinely partial or corrupt.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+import shutil
+import tempfile
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,7 +38,7 @@ log = logging.getLogger("dd_lab.parsers")
 __all__ = [
     "CACHE", "CODE_CACHE", "COOKIES", "COOKIES_LEGACY", "INDEXEDDB", "LOCAL_STATE",
     "LOCAL_STORAGE", "MEMORY", "PREFERENCES", "SERVICE_WORKER_CACHE", "SESSION_STORAGE",
-    "ParseContext", "emit_value", "make_artifact",
+    "ParseContext", "emit_value", "make_artifact", "open_leveldb_resilient",
 ]
 
 # Values longer than this are truncated in the `value` column (full hash is kept).
@@ -133,3 +135,49 @@ def emit_value(
             ctx, source_type=source_type, source_file=source_file, locator=locator,
             key=key, value=raw_value, value_type=ValueType.JSON, record_ts=record_ts,
         )
+
+
+def open_leveldb_resilient[T](
+    leveldb_dir: Path, opener: Callable[[Path], T]
+) -> tuple[T | None, Path | None]:
+    """Open a LevelDB directory with `opener(leveldb_dir)`; on failure, retry
+    against a copy with the `.log` (write-ahead log) file(s) dropped.
+
+    Confirmed on real evidence (a live-acquired disk image), not hypothetical:
+    a `.log` can end mid-write, or — very commonly — end with zero-byte block
+    padding, and `ccl_chromium_reader`'s log-block reader treats an
+    unrecognised block type as fatal (`ccl_leveldb.py::LogFile._get_batches`,
+    `raise ValueError()  # Cannot happen` — it can, and did) which aborts
+    opening the WHOLE store, not just the log. Retrying without the `.log`
+    recovers everything already compacted into `.ldb`/`.sst` files — real data
+    loss is then limited to whatever was still only in the WAL, instead of
+    losing the entire store over one bad log file.
+
+    Returns `(obj_or_None, cleanup_dir_or_None)` — the caller must
+    `shutil.rmtree(cleanup_dir, ignore_errors=True)` after it's done with the
+    object (once `cleanup_dir` is not None, the object's files live there, not
+    at `leveldb_dir`).
+    """
+    try:
+        return opener(leveldb_dir), None
+    except Exception:
+        log.warning(
+            "could not open leveldb at %s; retrying without its .log file(s) "
+            "(compacted data only)", leveldb_dir, exc_info=True,
+        )
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="dd_leveldb_"))
+    copied_any = False
+    for f in leveldb_dir.iterdir():
+        if f.is_file() and f.suffix.lower() != ".log":
+            shutil.copy2(f, tmp_dir / f.name)
+            copied_any = True
+    if not copied_any:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None, None
+    try:
+        return opener(tmp_dir), tmp_dir
+    except Exception:
+        log.exception("could not open leveldb at %s even without its .log file(s)", leveldb_dir)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None, None

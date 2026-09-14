@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import shutil
 from collections.abc import Iterator
 
 from dd_core.enums import SourceType
 from dd_core.schema import NormalizedArtifact
-from dd_lab.parsers.base import INDEXEDDB, ParseContext, emit_value, make_artifact
+from dd_lab.parsers.base import INDEXEDDB, ParseContext, emit_value, make_artifact, open_leveldb_resilient
 from dd_lab.parsers.jsonflat import iter_leaves
 
 log = logging.getLogger("dd_lab.parsers.indexeddb")
@@ -35,10 +36,10 @@ def parse(ctx: ParseContext) -> Iterator[NormalizedArtifact]:
     idb_root = ctx.path(INDEXEDDB)
     for leveldb_dir, blob_dir in _leveldb_dirs(idb_root):
         source_file = ctx.rel(leveldb_dir)
-        try:
-            widb = WrappedIndexDB(leveldb_dir, blob_dir)
-        except Exception:
-            log.exception("could not open IndexedDB at %s", leveldb_dir)
+        widb, cleanup_dir = open_leveldb_resilient(
+            leveldb_dir, lambda d, b=blob_dir: WrappedIndexDB(d, b)
+        )
+        if widb is None:
             continue
         try:
             for db_id in widb.database_ids:
@@ -48,6 +49,8 @@ def parse(ctx: ParseContext) -> Iterator[NormalizedArtifact]:
         finally:
             with contextlib.suppress(Exception):
                 widb.close()
+            if cleanup_dir is not None:
+                shutil.rmtree(cleanup_dir, ignore_errors=True)
 
 
 def _emit_database(ctx, widb, db_id, source_file) -> Iterator[NormalizedArtifact]:
