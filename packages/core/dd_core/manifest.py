@@ -31,6 +31,11 @@ class AcquisitionHost(BaseModel):
     os_version: str
     username: str
     timezone: str | None = None
+    # Set only for an image-based acquisition (dd_lab.imaging) — the
+    # evidentiary root of trust there is "we hashed the whole image file(s)
+    # first", recorded here instead of / in addition to per-file hashes.
+    source_image: str | None = None
+    source_image_sha256: str | None = None
 
 
 class ManifestEntry(BaseModel):

@@ -36,6 +36,20 @@ def _set_status(deps: InvestigationDeps, status: CaseStatus, message: str) -> No
     deps.meta.save(deps.layout)
 
 
+def _judge_findings_best_effort(deps: InvestigationDeps) -> None:
+    """The adversarial judge needs a reachable LLM (its own DD_JUDGE_LLM_*
+    config, falling back to DD_LLM_*/Ollama) — never let its absence or
+    failure abort the run; a case with no model configured still gets
+    findings, just unjudged (visibly so in the report)."""
+    try:
+        from dd_lab.agent.judge import judge_findings
+
+        judged = judge_findings(deps.cases_root, deps.case_id)
+        deps.audit.append("decision", "judge_findings", f"{len(judged)} finding(s) judged")
+    except Exception as e:  # noqa: BLE001 - judging is best-effort, never fatal
+        deps.audit.append("decision", "judge_findings", f"skipped: {e}")
+
+
 def run_pipeline(cases_root: str | Path, case_id: str, *, classifier=None) -> RunOutcome:
     deps = InvestigationDeps(cases_root=Path(cases_root), case_id=case_id, classifier=classifier)
     deps.audit.append("run_start", "deterministic", "fixed-sequence pipeline")
@@ -64,6 +78,12 @@ def run_pipeline(cases_root: str | Path, case_id: str, *, classifier=None) -> Ru
         for kw in deps.meta.keywords:
             hit = T.search_keyword(deps, kw)
             deps.audit.append("decision", "search_keyword", f"{kw!r}: {hit['hits']} hits")
+
+        correlated = T.correlate_and_write_findings(deps)
+        deps.audit.append(
+            "decision", "correlate_and_write_findings", f"{correlated['finding_count']} findings written"
+        )
+        _judge_findings_best_effort(deps)
 
         report = T.generate_report(deps)
         deps.audit.append("decision", "generate_report", report["report_path"])
@@ -108,6 +128,17 @@ def run_agent(
     try:
         result = agent.run_sync(prompt, deps=deps)
         deps.audit.append("model_text", "final", str(result.output)[:2000])
+
+        # Independent judge review runs unconditionally here — never left to
+        # the primary agent's own discretion — then the report is (re)built so
+        # it reflects post-judge statuses rather than whatever was true when
+        # the agent itself called generate_report (if it did).
+        _judge_findings_best_effort(deps)
+        report = T.generate_report(deps)
+        deps.audit.append(
+            "decision", "generate_report", f"final report (post-judge): {report['report_path']}"
+        )
+
         deps.state.finished = deps.state.report_path is not None
         deps.state.save()
         deps.audit.append("run_end", "agent", "complete")

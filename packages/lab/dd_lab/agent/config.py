@@ -37,19 +37,31 @@ class AgentConfig:
     temperature: float = 0.0
 
     @classmethod
-    def from_env(cls) -> AgentConfig:
-        provider = os.environ.get("DD_LLM_PROVIDER", "ollama")
+    def from_env(cls, prefix: str = "DD_LLM") -> AgentConfig:
+        """`prefix` lets a second role (e.g. the judge, `DD_JUDGE_LLM_*`) be
+        configured independently — falling back to the primary agent's
+        `DD_LLM_*` vars for anything not set under its own prefix, and to
+        Ollama if neither is set, so a judge "just works" with no extra setup
+        but can be pointed at a different provider/model to avoid sharing the
+        primary model's blind spots."""
+        primary = "DD_LLM"
+
+        def get(name: str, *fallback_names: str) -> str | None:
+            prefixes = (prefix,) if prefix == primary else (prefix, primary)
+            for p in prefixes:
+                if val := os.environ.get(f"{p}_{name}"):
+                    return val
+            for name2 in fallback_names:
+                if val := os.environ.get(name2):
+                    return val
+            return None
+
+        provider = get("PROVIDER") or "ollama"
         return cls(
             provider=provider,
-            model=os.environ.get("DD_LLM_MODEL", _DEFAULT_MODELS.get(provider, DEFAULT_OLLAMA_MODEL)),
-            base_url=os.environ.get("DD_LLM_BASE_URL"),
-            api_key=(
-                os.environ.get("DD_LLM_API_KEY")
-                or os.environ.get("ANTHROPIC_API_KEY")
-                or os.environ.get("OPENAI_API_KEY")
-                or os.environ.get("GEMINI_API_KEY")
-                or os.environ.get("GOOGLE_API_KEY")
-            ),
+            model=get("MODEL") or _DEFAULT_MODELS.get(provider, DEFAULT_OLLAMA_MODEL),
+            base_url=get("BASE_URL"),
+            api_key=get("API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
         )
 
 

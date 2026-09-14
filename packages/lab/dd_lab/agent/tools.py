@@ -9,20 +9,27 @@ supervisor records *that* they were called.
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from dd_core.casedir import CaseLayout
 from dd_core.manifest import Manifest, verify_case
 from dd_lab.agent.audit import AuditLog
+from dd_lab.agent.findings import Citation, Finding, FindingsStore, FindingStatus
 from dd_lab.agent.state import PipelineState
 from dd_lab.case import CaseMeta
 from dd_lab.classify import Classifier
 from dd_lab.etl.warehouse import Warehouse
 from dd_lab.ingest import IntegrityError, ingest_case
+from dd_lab.investigate import build_correlation_report, verify_claim
 from dd_lab.parsers import discover_apps
 from dd_lab.parsers.base import MEMORY
-from dd_lab.report import build_report
+
+# `dd_lab.report` imports `dd_lab.agent.audit` (for the audit-trail appendix),
+# so importing it back here at module level would close an import cycle the
+# moment anything imports `dd_lab.report` before `dd_lab.agent` — deferred to
+# the one place it's actually used instead.
 
 _SELECT_ONLY = re.compile(r"^\s*(with|select)\b", re.I)
 _FORBIDDEN = re.compile(r"\b(insert|update|delete|drop|alter|create|attach|copy|pragma|call)\b", re.I)
@@ -181,7 +188,148 @@ def search_keyword(deps: InvestigationDeps, keyword: str, limit: int = 50) -> di
     return {"keyword": keyword, "hits": len(rows), "rows": rows}
 
 
+def correlate_entities(deps: InvestigationDeps, min_distinct_sources: int = 2) -> dict:
+    """Phase 2 — find identifiers (ids, invite links, emails, asset ids) that
+    show up in more than one app or storage mechanism, e.g. the same Roblox
+    asset id in a Cache blob, a memory-string carve, and an IndexedDB message.
+    Every hit carries its full citation (artifact_id/app/source_file/locator)
+    and a timestamp-ordered timeline — this is the cross-source link a single-
+    row classifier cannot produce; use it to build hypotheses, then verify
+    every claim with `verify_claim` before writing it into a finding."""
+    wh = Warehouse(deps.layout.warehouse)
+    try:
+        entities = build_correlation_report(wh, min_distinct_sources=min_distinct_sources)
+    finally:
+        wh.close()
+    return {
+        "ok": True,
+        "entity_count": len(entities),
+        "entities": [
+            {
+                "entity_type": e.entity_type,
+                "value": e.value,
+                "apps": e.apps,
+                "source_types": e.source_types,
+                "timeline": [
+                    {
+                        "artifact_id": c.artifact_id, "app": c.app, "source_type": c.source_type,
+                        "source_file": c.source_file, "source_locator": c.source_locator,
+                        "key": c.key, "value": c.value, "record_ts": c.record_ts.isoformat()
+                        if c.record_ts else None,
+                    }
+                    for c in e.timeline()
+                ],
+            }
+            for e in entities
+        ],
+    }
+
+
+def verify_finding(deps: InvestigationDeps, artifact_id: str, claim_substring: str | None = None) -> dict:
+    """Self-verification: re-read `artifact_id` straight from the warehouse and
+    confirm `claim_substring` (if given) is actually present in its stored
+    value. Call this on every artifact_id a finding cites BEFORE writing that
+    finding into the report — a claim that fails this must not be reported."""
+    wh = Warehouse(deps.layout.warehouse)
+    try:
+        v = verify_claim(wh, artifact_id, claim_substring)
+    finally:
+        wh.close()
+    return {
+        "ok": v.ok, "reason": v.reason, "app": v.app,
+        "source_file": v.source_file, "source_locator": v.source_locator,
+        "value": v.value, "value_sha256": v.value_sha256,
+    }
+
+
+def write_finding(
+    deps: InvestigationDeps,
+    claim: str,
+    citations: list[dict],
+    entity_type: str | None = None,
+    entity_value: str | None = None,
+) -> dict:
+    """Register a conclusion with its supporting evidence. `citations` is a
+    list of {"artifact_id": ..., "quote": <exact substring you are relying on,
+    optional>}. Every citation is independently re-verified against the
+    warehouse right now and its value/hash is snapshotted, so later drift in
+    the data is detectable rather than silently followed. A finding with any
+    citation that fails verification — or with no citations at all — is
+    rejected immediately: it is never usable, never judged, never reported.
+    This is the ONLY way a claim becomes part of the case; do not put
+    conclusions only in your final text output."""
+    wh = Warehouse(deps.layout.warehouse)
+    try:
+        cite_results = [
+            _verify_citation(wh, c.get("artifact_id", ""), c.get("quote")) for c in citations
+        ]
+    finally:
+        wh.close()
+
+    all_ok = bool(cite_results) and all(c.ok for c in cite_results)
+    finding = Finding(
+        finding_id=uuid.uuid4().hex[:16],
+        case_id=deps.case_id,
+        claim=claim,
+        entity_type=entity_type,
+        entity_value=entity_value,
+        citations=cite_results,
+        status=FindingStatus.VERIFIED if all_ok else FindingStatus.REJECTED_UNVERIFIED,
+        created_by="agent",
+    )
+    FindingsStore(deps.layout.findings_log).add(finding)
+    return {
+        "ok": all_ok,
+        "finding_id": finding.finding_id,
+        "status": str(finding.status),
+        "unverified_citations": [c.artifact_id for c in cite_results if not c.ok],
+    }
+
+
+def _verify_citation(wh: Warehouse, artifact_id: str, quote: str | None) -> Citation:
+    v = verify_claim(wh, artifact_id, quote)
+    return Citation(
+        artifact_id=artifact_id, ok=v.ok, reason=v.reason, app=v.app,
+        source_file=v.source_file, source_locator=v.source_locator,
+        quote=quote, value_sha256=v.value_sha256,
+    )
+
+
+def correlate_and_write_findings(deps: InvestigationDeps, min_distinct_sources: int = 2) -> dict:
+    """Convenience used by the deterministic (no-LLM) pipeline: run
+    correlate_entities and turn every cross-source hit directly into a finding,
+    citing every artifact the entity was found in. An LLM agent should
+    normally call correlate_entities + write_finding itself so it can inspect
+    before committing to a claim; this skips straight to writing because the
+    deterministic pipeline has no LLM to do that judgement."""
+    wh = Warehouse(deps.layout.warehouse)
+    try:
+        entities = build_correlation_report(wh, min_distinct_sources=min_distinct_sources)
+    finally:
+        wh.close()
+
+    written = []
+    for e in entities:
+        citations = [{"artifact_id": c.artifact_id, "quote": e.value} for c in e.artifacts]
+        claim = (
+            f"The {e.entity_type.replace('_', ' ')} '{e.value}' appears in {len(e.artifacts)} "
+            f"artifact(s) across app(s) {', '.join(e.apps)} and source type(s) "
+            f"{', '.join(e.source_types)}."
+        )
+        written.append(write_finding(deps, claim, citations, entity_type=e.entity_type, entity_value=e.value))
+    return {"ok": True, "finding_count": len(written), "findings": written}
+
+
+def list_findings(deps: InvestigationDeps, status: str | None = None) -> dict:
+    """Current findings for this case and their review status."""
+    store = FindingsStore(deps.layout.findings_log)
+    findings = store.list(FindingStatus(status) if status else None)
+    return {"ok": True, "count": len(findings), "findings": [f.model_dump(mode="json") for f in findings]}
+
+
 def generate_report(deps: InvestigationDeps) -> dict:
+    from dd_lab.report import build_report
+
     path = build_report(deps.cases_root, deps.case_id, actor="agent")
     deps.state.report_path = str(path)
     deps.state.save()

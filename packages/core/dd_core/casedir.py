@@ -15,6 +15,7 @@
         warehouse/case.duckdb      lab: analytical warehouse
         reports/                   lab: generated reports
         logs/audit.jsonl           lab: agent tool calls + model messages
+        logs/findings.json         lab: findings — claims, citations, judge/human review status
         case.json                  lab: case metadata (name, keywords, status)
 """
 
@@ -60,6 +61,10 @@ class CaseLayout:
     @property
     def audit_log(self) -> Path:
         return self.dir / "logs" / "audit.jsonl"
+
+    @property
+    def findings_log(self) -> Path:
+        return self.dir / "logs" / "findings.json"
 
     @property
     def case_meta(self) -> Path:

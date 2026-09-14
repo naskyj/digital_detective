@@ -14,10 +14,14 @@ from pathlib import Path
 
 from dd_core.casedir import CaseLayout
 from dd_core.custody import CustodyLog
+from dd_core.enums import CustodyEvent
+from dd_core.hashing import sha256_file
 from dd_core.manifest import Manifest, verify_case
 from dd_lab.agent.audit import AuditLog
+from dd_lab.agent.findings import FindingsStore
 from dd_lab.case import CaseMeta
 from dd_lab.etl.warehouse import Warehouse
+from dd_lab.investigate import build_correlation_report
 
 _CSS = """
 :root{--fg:#1a1a1a;--muted:#666;--line:#e2e2e2;--accent:#8b1a1a;--hi:#fff4f4}
@@ -32,7 +36,7 @@ th{background:#f0f0f0;font-weight:600}
 .kv{display:grid;grid-template-columns:180px 1fr;gap:2px 16px;margin:8px 0}
 .kv div:nth-child(odd){color:var(--muted)}
 .pill{display:inline-block;padding:1px 8px;border-radius:10px;background:#eee;font-size:12px}
-.ok{background:#e6f5e6;color:#1a6b1a}.bad{background:#fbe4e4;color:#9b1a1a}
+.ok{background:#e6f5e6;color:#1a6b1a}.bad{background:#fbe4e4;color:#9b1a1a}.warn{background:#fff3d6;color:#8a5a00}
 .hi{background:var(--hi)}
 code{background:#f0f0f0;padding:1px 4px;border-radius:3px;font-size:12px;word-break:break-all}
 .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
@@ -60,6 +64,7 @@ def build_report(
     meta = CaseMeta.load_or_none(layout) or CaseMeta(case_id=case_id, name=case_id)
     manifest = Manifest.read(layout.dir)
     verification = verify_case(layout.dir)
+    findings = FindingsStore(layout.findings_log).list()
     wh = Warehouse(layout.warehouse)
 
     try:
@@ -77,6 +82,7 @@ def build_report(
             "substr(value,1,120) AS value FROM v_high_priority LIMIT 100"
         )
         kw_hits = _keyword_hits(wh, meta.keywords)
+        correlations = build_correlation_report(wh)
     finally:
         wh.close()
 
@@ -116,12 +122,79 @@ def build_report(
                        [[h["category"], h["conf"], h["app"], h["key"], h["value"]] for h in high],
                        highlight=True) if high else "<p>None.</p>")
 
+    parts.append(f"<h2>4. Findings ({len(findings)})</h2>")
+    parts.append(
+        "<p class='sub'>Every conclusion the analysis produced, with the citations it rests on. "
+        "Each citation was independently re-verified against the warehouse and its value/hash "
+        "snapshotted at write time; a finding with any failing citation is rejected outright and "
+        "never reaches this report as anything but a rejected entry. \"Judge\" is an independent "
+        "model's adversarial review, not the same model that produced the finding. No finding here "
+        "is itself a legal conclusion — that determination is left to the investigator.</p>"
+    )
+    if findings:
+        for f in findings:
+            status_cls = {
+                "human_approved": "ok", "judge_accepted": "ok",
+                "rejected_unverified": "bad", "judge_rejected": "bad", "human_rejected": "bad",
+                "judge_flagged": "warn", "verified": "warn",
+            }.get(str(f.status), "")
+            parts.append(
+                f"<h3><span class='pill {status_cls}'>{_esc(f.status)}</span> {_esc(f.claim)}</h3>"
+            )
+            meta_bits = [f"by {_esc(f.created_by)}", _esc(f.created_ts)]
+            if f.entity_type:
+                meta_bits.append(f"entity: {_esc(f.entity_type)}={_esc(f.entity_value)}")
+            parts.append(f"<p class='sub'>{' &middot; '.join(meta_bits)}</p>")
+            parts.append(_rows(
+                ["OK", "App", "File", "Locator", "Quote / reason"],
+                [[("✓" if c.ok else "✗"), c.app, c.source_file, c.source_locator,
+                  c.quote if c.ok else c.reason] for c in f.citations],
+            ))
+            if f.judge_verdict:
+                parts.append(
+                    f"<p><b>Judge</b> ({_esc(f.judge_verdict.model)}): "
+                    f"<span class='pill {'ok' if f.judge_verdict.verdict == 'accept' else 'warn' if f.judge_verdict.verdict == 'flag' else 'bad'}'>"
+                    f"{_esc(f.judge_verdict.verdict)}</span> &mdash; {_esc(f.judge_verdict.reasoning)}</p>"
+                )
+            else:
+                parts.append("<p class='sub'>Not yet judged (no model reachable, or run without one).</p>")
+            if f.human_review:
+                parts.append(
+                    f"<p><b>Human review</b> by {_esc(f.human_review.reviewer)}: "
+                    f"<span class='pill {'ok' if f.human_review.decision == 'approve' else 'bad'}'>"
+                    f"{_esc(f.human_review.decision)}</span> &mdash; {_esc(f.human_review.note)}</p>"
+                )
+    else:
+        parts.append("<p>No findings were written for this case.</p>")
+
+    parts.append(f"<h2>5. Cross-Source Correlations ({len(correlations)})</h2>")
+    parts.append(
+        "<p class='sub'>Identifiers (ids, invite links, emails, asset ids) that appear in more "
+        "than one application or storage mechanism — a link a single artifact cannot show on its "
+        "own. Each row cites its source file and in-file locator; times are the record's own "
+        "timestamp, oldest first, as a reconstructed sequence for that identifier.</p>"
+    )
+    if correlations:
+        for e in correlations:
+            parts.append(
+                f"<h3>{_esc(e.entity_type)} &mdash; <code>{_esc(e.value)}</code> "
+                f"({len(e.artifacts)} artifacts across {_esc(', '.join(e.apps))})</h3>"
+            )
+            parts.append(_rows(
+                ["Timestamp", "App", "Source", "File", "Locator", "Key", "Value"],
+                [[c.record_ts, c.app, c.source_type, c.source_file, c.source_locator, c.key,
+                  c.value[:160]] for c in e.timeline()],
+                highlight=True,
+            ))
+    else:
+        parts.append("<p>No identifier was found in more than one app or storage mechanism.</p>")
+
     if meta.keywords:
-        parts.append(f"<h2>4. Investigation Keyword Hits ({sum(k['hits'] for k in kw_hits)})</h2>")
+        parts.append(f"<h2>6. Investigation Keyword Hits ({sum(k['hits'] for k in kw_hits)})</h2>")
         parts.append(_rows(["Keyword", "Hits", "Example"],
                            [[k["keyword"], k["hits"], k["example"]] for k in kw_hits]))
 
-    parts.append(f"<h2>5. Evidence Timeline ({len(timeline)} of the earliest non-generic events)</h2>")
+    parts.append(f"<h2>7. Evidence Timeline ({len(timeline)} of the earliest non-generic events)</h2>")
     parts.append(_rows(["Timestamp", "App", "Category", "Key", "Value"],
                        [[t["ts"], t["app"], t["category"], t["key"], t["value"]] for t in timeline])
                  if timeline else "<p>No timestamped artifacts.</p>")
@@ -150,7 +223,44 @@ def build_report(
     layout.reports.mkdir(parents=True, exist_ok=True)
     out = layout.reports / f"forensic_report_{datetime.now(UTC):%Y%m%d_%H%M%S}.html"
     out.write_text("".join(parts), encoding="utf-8")
+    seal_report(layout, out, actor=actor)
     return out
+
+
+def seal_report(layout: CaseLayout, report_path: Path, *, actor: str = "dd-lab") -> str:
+    """Hash the generated report and log that hash into the same hash-chained
+    custody log that protects the evidence, so the report's own integrity is
+    provable later the same way the evidence's is — a copy edited after
+    generation no longer matches its sealed hash."""
+    digest = sha256_file(report_path)
+    CustodyLog(layout.dir).append(
+        CustodyEvent.REPORT_GENERATED, actor, report_path.name,
+        data={"filename": report_path.name, "sha256": digest, "size_bytes": report_path.stat().st_size},
+    )
+    return digest
+
+
+def verify_report(layout: CaseLayout, report_path: str | Path) -> tuple[bool, str]:
+    """Re-hash `report_path` and check it against the seal recorded for it in
+    the custody log. Returns (ok, detail)."""
+    report_path = Path(report_path)
+    sealed = [
+        r for r in CustodyLog(layout.dir).entries()
+        if r.event == CustodyEvent.REPORT_GENERATED and r.data.get("filename") == report_path.name
+    ]
+    if not sealed:
+        return False, f"no seal recorded for {report_path.name}"
+    if not report_path.is_file():
+        return False, f"{report_path.name} is missing"
+    current = sha256_file(report_path)
+    sealed_hash = sealed[-1].data.get("sha256")
+    if current != sealed_hash:
+        return (
+            False,
+            f"hash mismatch: sealed {sealed_hash[:16]}… vs current {current[:16]}… "
+            "— report was modified after generation",
+        )
+    return True, f"matches the seal recorded {sealed[-1].ts}"
 
 
 def _keyword_hits(wh: Warehouse, keywords: list[str]) -> list[dict]:

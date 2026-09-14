@@ -35,7 +35,23 @@ Rules:
 - `query_warehouse` is read-only SQL over the `artifacts` table and the `v_*`
   views. Columns: app, source_type, source_file, key, value, value_type,
   record_ts, category, confidence.
-- Call `generate_report` last. Then call the final result.
+- After ingest, call `correlate_entities` to find identifiers (ids, invite
+  links, emails, asset ids) that appear across more than one app or storage
+  mechanism — that cross-source link is the thing a per-row classifier cannot
+  see. Use its timeline (already time-ordered) to reconstruct the sequence of
+  events for an entity, and cross-platform links (e.g. a Roblox id that also
+  shows up in Discord evidence) to connect identities across apps.
+- Conclusions become part of the case ONLY via `write_finding` — never rely on
+  your final text output to convey a finding. Call `write_finding` with the
+  claim and every artifact_id (plus, where relevant, the exact quoted
+  substring) that supports it; it re-verifies each citation itself and rejects
+  the finding immediately if any citation doesn't check out, so use
+  `verify_finding` beforehand on anything you're unsure of to avoid a rejected
+  finding. State only what the cited artifacts show — never a legal
+  conclusion (e.g. never assert a crime occurred); describe the evidentiary
+  pattern and let a human investigator draw that conclusion.
+- Call `generate_report` last, after writing your findings. Then call the
+  final result.
 - If a step was already done (see `case_status`), don't repeat it.
 
 Be concise in your reasoning. Prefer a few well-chosen queries over many.
@@ -62,7 +78,9 @@ def build_agent(cfg: AgentConfig, model=None) -> Agent[InvestigationDeps, str]:
         ctx.deps.audit.append("tool_call", name, json.dumps(params)[:500], **params)
 
     def _audit_result(ctx: RunContext[InvestigationDeps], name: str, result: dict) -> dict:
-        summary = {k: result[k] for k in ("ok", "skipped", "artifact_count", "row_count", "hits")
+        summary = {k: result[k] for k in
+                   ("ok", "skipped", "artifact_count", "row_count", "hits", "entity_count", "reason",
+                    "finding_id", "status", "count")
                    if k in result}
         ctx.deps.audit.append("tool_result", name, json.dumps(summary)[:500])
         return result
@@ -114,6 +132,49 @@ def build_agent(cfg: AgentConfig, model=None) -> Agent[InvestigationDeps, str]:
         """Full-text search artifact keys and values for a keyword."""
         _audit_call(ctx, "search_keyword", keyword=keyword)
         return _audit_result(ctx, "search_keyword", T.search_keyword(ctx.deps, keyword))
+
+    @agent.tool
+    def correlate_entities(ctx: RunContext[InvestigationDeps], min_distinct_sources: int = 2) -> dict:
+        """Find ids/links/emails/asset-ids that appear across more than one app
+        or storage mechanism, each with a full citation and a timeline."""
+        _audit_call(ctx, "correlate_entities", min_distinct_sources=min_distinct_sources)
+        return _audit_result(
+            ctx, "correlate_entities", T.correlate_entities(ctx.deps, min_distinct_sources)
+        )
+
+    @agent.tool
+    def verify_finding(
+        ctx: RunContext[InvestigationDeps], artifact_id: str, claim_substring: str | None = None
+    ) -> dict:
+        """Re-check a citation against the warehouse before writing a finding.
+        Call this on every artifact_id you are about to cite."""
+        _audit_call(ctx, "verify_finding", artifact_id=artifact_id, claim_substring=claim_substring)
+        return _audit_result(
+            ctx, "verify_finding", T.verify_finding(ctx.deps, artifact_id, claim_substring)
+        )
+
+    @agent.tool
+    def write_finding(
+        ctx: RunContext[InvestigationDeps],
+        claim: str,
+        citations: list[dict],
+        entity_type: str | None = None,
+        entity_value: str | None = None,
+    ) -> dict:
+        """Register a conclusion + its supporting citations
+        ([{"artifact_id":..., "quote": optional}]). This is the only way a
+        claim becomes part of the case; it is rejected immediately if any
+        citation fails re-verification."""
+        _audit_call(ctx, "write_finding", claim=claim, citations=citations)
+        return _audit_result(
+            ctx, "write_finding", T.write_finding(ctx.deps, claim, citations, entity_type, entity_value)
+        )
+
+    @agent.tool
+    def list_findings(ctx: RunContext[InvestigationDeps], status: str | None = None) -> dict:
+        """Findings recorded so far for this case, with their review status."""
+        _audit_call(ctx, "list_findings", status=status)
+        return _audit_result(ctx, "list_findings", T.list_findings(ctx.deps, status))
 
     @agent.tool
     def generate_report(ctx: RunContext[InvestigationDeps]) -> dict:
