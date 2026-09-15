@@ -51,6 +51,17 @@ class AppSettings(BaseModel):
     use_agent: bool = False  # False -> deterministic pipeline
     classifier_model_dir: str = ""  # trained ONNX model dir, when available
     use_zeroshot: bool = False  # pretrained zero-shot voter (needs `zeroshot` extra)
+    # The adversarial judge (agent/judge.py) reviews every finding independently
+    # of the primary agent above. Left blank, it falls back to DD_JUDGE_LLM_*
+    # env vars, then to the primary agent's own config, then to Ollama — so a
+    # judge always at least attempts to run with no configuration at all. Set
+    # these to point it at a genuinely different model/provider than the
+    # primary agent, which is the whole point of an *independent* review.
+    use_judge: bool = True
+    judge_llm_provider: str = ""
+    judge_llm_model: str = ""
+    judge_llm_base_url: str = ""
+    judge_llm_api_key: str = ""
 
     def build_classifier(self):
         from dd_lab.classify import build_classifier
@@ -64,6 +75,15 @@ class AppSettings(BaseModel):
             cfg.model = self.llm_model
         cfg.base_url = self.llm_base_url or cfg.base_url
         cfg.api_key = self.llm_api_key or cfg.api_key
+        return cfg
+
+    def judge_agent_config(self) -> AgentConfig:
+        cfg = AgentConfig.from_env(prefix="DD_JUDGE_LLM")
+        cfg.provider = self.judge_llm_provider or cfg.provider
+        if self.judge_llm_model:
+            cfg.model = self.judge_llm_model
+        cfg.base_url = self.judge_llm_base_url or cfg.base_url
+        cfg.api_key = self.judge_llm_api_key or cfg.api_key
         return cfg
 
     def save(self) -> None:

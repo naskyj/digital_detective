@@ -68,7 +68,11 @@ def test_agent_drives_pipeline(tmp_path):
         CaseLayout(root, "case_llm_1")
     )
 
-    outcome = run_agent(root, "case_llm_1", AgentConfig(), model=_script())
+    progress_log: list[str] = []
+    outcome = run_agent(
+        root, "case_llm_1", AgentConfig(), model=_script(),
+        progress=progress_log.append, enable_judge=False,
+    )
     assert outcome.ok
     assert outcome.report_path and Path(outcome.report_path).is_file()
 
@@ -77,3 +81,11 @@ def test_agent_drives_pipeline(tmp_path):
     assert called == ["verify_integrity", "run_ingest", "category_summary",
                       "search_keyword", "generate_report"]
     assert any(r.kind == "run_end" for r in records)
+
+    # every tool call the agent made streamed into the live progress log too,
+    # not just the permanent audit trail - this is what the UI's job log shows
+    # in real time while the agent works.
+    assert any("Agent starting" in m for m in progress_log)
+    for name in called:
+        assert any(name in m for m in progress_log)
+    assert "Analysis complete" in progress_log[-1]

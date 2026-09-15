@@ -54,6 +54,11 @@ class SettingsIn(BaseModel):
     use_agent: bool | None = None
     classifier_model_dir: str | None = None
     use_zeroshot: bool | None = None
+    use_judge: bool | None = None
+    judge_llm_provider: str | None = None
+    judge_llm_model: str | None = None
+    judge_llm_base_url: str | None = None
+    judge_llm_api_key: str | None = None
 
 
 class NewCaseIn(BaseModel):
@@ -91,6 +96,8 @@ def get_settings() -> dict:
         "classifier_model_dir": s.classifier_model_dir,
         "use_zeroshot": s.use_zeroshot,
         "llm": describe_llm(s.agent_config()),
+        "use_judge": s.use_judge,
+        "judge_llm": describe_llm(s.judge_agent_config()),
     }
 
 
@@ -99,6 +106,13 @@ def test_llm() -> dict:
     from dd_lab.agent.config import test_connection
 
     return test_connection(_settings.agent_config())
+
+
+@app.post("/api/settings/test-judge-llm")
+def test_judge_llm() -> dict:
+    from dd_lab.agent.config import test_connection
+
+    return test_connection(_settings.judge_agent_config())
 
 
 @app.put("/api/settings")
@@ -259,15 +273,24 @@ def run_case(case_id: str) -> dict:
 
     use_agent = _settings.use_agent
     cfg = _settings.agent_config()
+    judge_cfg = _settings.judge_agent_config()
+    enable_judge = _settings.use_judge
 
     def work(progress) -> dict:
-        progress(f"starting {'agent' if use_agent else 'deterministic'} run")
+        # `progress` streams into the job's live log in real time as each
+        # stage/tool-call happens - not just a message at the very start and
+        # very end, for both the deterministic pipeline and the LLM agent.
         clf = _settings.build_classifier()
         if use_agent:
-            outcome = run_agent(_settings.cases_root, case_id, cfg, classifier=clf)
+            outcome = run_agent(
+                _settings.cases_root, case_id, cfg, classifier=clf,
+                progress=progress, judge_cfg=judge_cfg, enable_judge=enable_judge,
+            )
         else:
-            outcome = run_pipeline(_settings.cases_root, case_id, classifier=clf)
-        progress(outcome.summary)
+            outcome = run_pipeline(
+                _settings.cases_root, case_id, classifier=clf,
+                progress=progress, judge_cfg=judge_cfg, enable_judge=enable_judge,
+            )
         return {"ok": outcome.ok, "summary": outcome.summary, "report": outcome.report_path}
 
     job_id = _jobs.submit("run" if not use_agent else "agent", work, case_id=case_id)

@@ -76,6 +76,8 @@ def build_agent(cfg: AgentConfig, model=None) -> Agent[InvestigationDeps, str]:
 
     def _audit_call(ctx: RunContext[InvestigationDeps], name: str, **params):
         ctx.deps.audit.append("tool_call", name, json.dumps(params)[:500], **params)
+        brief = ", ".join(f"{k}={v!r}" for k, v in params.items() if v not in (None, "", []))[:160]
+        ctx.deps.notify(f"Agent → {name}({brief})" if brief else f"Agent → {name}")
 
     def _audit_result(ctx: RunContext[InvestigationDeps], name: str, result: dict) -> dict:
         summary = {k: result[k] for k in
@@ -83,6 +85,8 @@ def build_agent(cfg: AgentConfig, model=None) -> Agent[InvestigationDeps, str]:
                     "finding_id", "status", "count")
                    if k in result}
         ctx.deps.audit.append("tool_result", name, json.dumps(summary)[:500])
+        brief = ", ".join(f"{k}={v!r}" for k, v in summary.items())[:160]
+        ctx.deps.notify(f"  {name} → {brief}" if brief else f"  {name} done")
         return result
 
     @agent.tool

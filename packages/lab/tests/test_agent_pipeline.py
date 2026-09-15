@@ -45,9 +45,19 @@ def case(tmp_path_factory):
 
 def test_deterministic_pipeline_completes(case):
     root, cid = case
-    outcome = run_pipeline(root, cid)
+    progress_log: list[str] = []
+    outcome = run_pipeline(root, cid, progress=progress_log.append, enable_judge=False)
     assert outcome.ok
     assert outcome.report_path and Path(outcome.report_path).is_file()
+
+    # real-time progress, not just a message at the very start and very end -
+    # this is what the job's live log in the UI streams as the run happens.
+    assert len(progress_log) >= 6
+    joined = " ".join(progress_log)
+    assert "starting" in joined.lower()
+    assert "integrity" in joined.lower()
+    assert "Analysis complete" in progress_log[-1]
+    assert any("Judge review disabled" in m for m in progress_log)  # enable_judge=False, above
 
     html = Path(outcome.report_path).read_text("utf-8")
     assert "Forensic Analysis Report" in html

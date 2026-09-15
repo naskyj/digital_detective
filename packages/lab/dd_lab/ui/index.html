@@ -30,6 +30,8 @@
   .hint{font-size:12px;color:var(--muted);margin-top:6px}
   .spin{display:inline-block;width:12px;height:12px;border:2px solid #fff6;border-top-color:#fff;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px;margin-right:6px}
   @keyframes sp{to{transform:rotate(360deg)}}
+  .center-loading{display:flex;flex-direction:column;align-items:center;justify-content:center;height:60vh;gap:14px;color:var(--muted);font-size:13px}
+  .spin-lg{width:34px;height:34px;border:3px solid var(--line);border-top-color:var(--accent2);border-radius:50%;animation:sp .8s linear infinite}
   .statusdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:1px}
   .sd-completed{background:var(--ok)}.sd-running{background:#d97706}.sd-error{background:var(--bad)}.sd-new{background:#9ca3af}
   input,select,textarea{border:1px solid var(--line);border-radius:7px;padding:7px 9px;font:inherit;background:#fff}
@@ -65,11 +67,12 @@
   <div class="foot" id="jobs"></div>
   <div class="foot" id="conn">connecting…</div>
 </nav>
-<main id="main">loading…</main>
+<main id="main"><div class="center-loading"><div class="spin-lg"></div><div>Loading…</div></div></main>
 
 <script>
 const $ = (s,r=document)=>r.querySelector(s);
 const el = (t,a={},...k)=>{const e=document.createElement(t);for(const[x,v]of Object.entries(a)){if(x==='class')e.className=v;else if(x==='html')e.innerHTML=v;else if(x.startsWith('on'))e.addEventListener(x.slice(2),v);else e.setAttribute(x,v);}k.flat().forEach(c=>e.append(c?.nodeType?c:document.createTextNode(c??'')));return e;};
+const loadingView = (msg)=>el('div',{class:'center-loading'},el('div',{class:'spin-lg'}),el('div',{},msg||'Loading…'));
 const api = async (p,opt)=>{const r=await fetch('/api'+p,opt&&{...opt,headers:{'Content-Type':'application/json',...(opt.headers||{})}});if(!r.ok)throw new Error((await r.json().catch(()=>({detail:r.statusText}))).detail);return r.headers.get('content-type')?.includes('json')?r.json():r.text();};
 const state = {view:'dashboard', arg:null, unsavedWork:null};
 
@@ -97,8 +100,9 @@ async function pollActiveJobs(){
 }
 setInterval(pollActiveJobs, 3000);
 
+const _loadingMsg = {case:'Opening case…', report:'Loading report…', cases:'Loading cases…', import:'Loading…', settings:'Loading settings…', dashboard:'Loading…'};
 async function render(){
-  const m=$('#main'); m.innerHTML='<span class="muted">loading…</span>';
+  const m=$('#main'); m.innerHTML=''; m.append(loadingView(_loadingMsg[state.view]));
   try{ await ({dashboard:vDashboard,import:vImport,cases:vCases,case:vCase,report:vReport,settings:vSettings}[state.view]||vDashboard)(m); }
   catch(e){ m.innerHTML=''; m.append(el('div',{class:'panel'},'Error: '+e.message)); }
 }
@@ -565,14 +569,40 @@ async function vSettings(m){
     el('div',{class:'muted',style:'margin-top:6px'},'Model selection only — installing a local model runtime or provisioning an API key is a separate, one-time setup step.'),
     el('label',{},'Trained classifier model directory (optional)'), md,
     el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:10px'}, zs, 'Use the pretrained zero-shot classifier as an additional voter'),
-    el('div',{class:'muted',style:'margin-top:6px'},'Classification runs on the built-in rule ensemble by default. Point this at a trained model to improve accuracy further.'),
-    el('div',{class:'row',style:'margin-top:14px'},
+    el('div',{class:'muted',style:'margin-top:6px'},'Classification runs on the built-in rule ensemble by default. Point this at a trained model to improve accuracy further.'));
+  m.append(box);
+
+  const jbox=el('div',{class:'panel'});
+  const juse=el('input',{type:'checkbox',...(s.use_judge?{checked:''}:{})});
+  const jprov=el('select',{}, ...['ollama','openai','anthropic'].map(p=>el('option',{value:p,...(p===s.judge_llm.provider?{selected:''}:{})},p)));
+  const jmdl=el('input',{value:s.judge_llm.model,style:'width:280px'});
+  const jurl=el('input',{value:s.judge_llm.base_url||'',placeholder:'leave blank to inherit',style:'width:320px'});
+  const jkey=el('input',{type:'password',placeholder:s.judge_llm.api_key_set?'•••••• (set)':'leave blank to inherit',style:'width:280px'});
+  jbox.append(
+    el('h2',{style:'margin-top:0'},'Independent Review'),
+    el('div',{class:'hint',style:'margin-bottom:10px'},
+      'A second model reviews every finding the primary agent writes before it reaches the '+
+      'report — accepting, flagging, or rejecting each one with its reasoning. Leaving these '+
+      'fields blank points it at the same provider and model as the agent above; for a '+
+      'genuinely independent check, configure a different one here.'),
+    el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg)'}, juse, 'Enable independent review'),
+    el('label',{style:'margin-top:10px'},'Provider'), jprov,
+    el('label',{},'Model'), jmdl,
+    el('label',{},'Base URL'), jurl,
+    el('label',{},'API key'), jkey);
+  m.append(jbox);
+
+  const actions=el('div',{class:'panel'});
+  actions.append(el('div',{class:'row'},
       el('button',{onclick:async(e)=>{
         const btn=e.target;
         btn.disabled=true; btn.innerHTML='<span class="spin"></span>Saving…';
         try{
-          const body={cases_root:cr.value,llm_provider:prov.value,llm_model:mdl.value,llm_base_url:url.value,use_agent:ag.checked,use_zeroshot:zs.checked,classifier_model_dir:md.value};
+          const body={cases_root:cr.value,llm_provider:prov.value,llm_model:mdl.value,llm_base_url:url.value,
+            use_agent:ag.checked,use_zeroshot:zs.checked,classifier_model_dir:md.value,
+            use_judge:juse.checked,judge_llm_provider:jprov.value,judge_llm_model:jmdl.value,judge_llm_base_url:jurl.value};
           if(key.value)body.llm_api_key=key.value;
+          if(jkey.value)body.judge_llm_api_key=jkey.value;
           await api('/settings',{method:'PUT',body:JSON.stringify(body)});
           btn.textContent='Saved ✓';
           setTimeout(()=>{btn.textContent='Save Settings';btn.disabled=false;},1500);
@@ -584,8 +614,15 @@ async function vSettings(m){
           alert(r.ok?`OK — ${r.provider}/${r.model}\n${r.sample||''}`:`Failed: ${r.error}`);
         }catch(x){alert('Error: '+x.message);}
         e.target.disabled=false; e.target.textContent='Test connection';
-      }},'Test connection')));
-  m.append(box);
+      }},'Test connection'),
+      el('button',{class:'sec',onclick:async(e)=>{
+        e.target.disabled=true; e.target.textContent='Testing…';
+        try{ const r=await api('/settings/test-judge-llm',{method:'POST'});
+          alert(r.ok?`OK — ${r.provider}/${r.model}\n${r.sample||''}`:`Failed: ${r.error}`);
+        }catch(x){alert('Error: '+x.message);}
+        e.target.disabled=false; e.target.textContent='Test judge connection';
+      }},'Test judge connection')));
+  m.append(actions);
 }
 
 (async()=>{

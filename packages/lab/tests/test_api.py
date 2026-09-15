@@ -62,6 +62,20 @@ def test_health_and_settings(client):
     assert client.get("/health").json()["ok"] is True
     s = client.get("/api/settings").json()
     assert "llm" in s and s["llm"]["provider"] in {"ollama", "openai", "anthropic"}
+    # the judge is configurable from Settings alone - no CLI/env required
+    assert "judge_llm" in s and "use_judge" in s
+
+    updated = client.put("/api/settings", json={
+        "judge_llm_provider": "anthropic", "judge_llm_model": "claude-sonnet-5", "use_judge": False,
+    }).json()
+    assert updated["judge_llm"]["provider"] == "anthropic"
+    assert updated["judge_llm"]["model"] == "claude-sonnet-5"
+    assert updated["use_judge"] is False
+    # the primary agent's own config is untouched by a judge-only update
+    assert updated["llm"]["provider"] in {"ollama", "openai", "anthropic"}
+
+    probe = client.post("/api/settings/test-judge-llm").json()
+    assert "ok" in probe and probe["provider"] == "anthropic"
 
 
 def test_active_jobs_listing(client):

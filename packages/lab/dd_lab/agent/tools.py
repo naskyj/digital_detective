@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,6 +45,15 @@ class InvestigationDeps:
     audit: AuditLog = field(init=False)
     state: PipelineState = field(init=False)
     classifier: Classifier | None = None
+    # Optional live-progress sink (e.g. a running job's log) — separate from
+    # `audit`, which is the permanent, reviewable record written regardless.
+    # `notify()` is a no-op if this is unset, so every tool works the same
+    # whether or not anyone is watching in real time.
+    progress: Callable[[str], None] | None = None
+
+    def notify(self, msg: str) -> None:
+        if self.progress is not None:
+            self.progress(msg)
 
     def __post_init__(self) -> None:
         self.cases_root = Path(self.cases_root)
