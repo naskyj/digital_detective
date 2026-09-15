@@ -65,3 +65,13 @@ def _plant_profile(mount_point: Path) -> None:
     (profile / "Local Storage" / "leveldb" / "000003.log").write_bytes(
         b"authorId 123456789012345678 rbxassetid://9988776655"
     )
+
+    # A Microsoft Store (MSIX/UWP) install redirects %APPDATA% into a
+    # per-package sandbox instead of the classic AppData/<App> layout —
+    # confirmed on a real Store-installed Slack profile, otherwise invisible.
+    slack = (
+        mount_point / "Users" / "Suspect" / "AppData" / "Local" / "Packages"
+        / "SomeVendor.Slack_abc123" / "LocalCache" / "Roaming" / "Slack"
+    )
+    (slack / "Local Storage" / "leveldb").mkdir(parents=True)
+    (slack / "Local State").write_text('{"os_crypt":{"encrypted_key":"xyz"}}')

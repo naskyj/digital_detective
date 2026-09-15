@@ -35,6 +35,14 @@ _ROOT_PREFIXES = ("", "sysvol/")  # "c:/" deliberately omitted: it's the same
 _USER_GLOBS = (
     "Users/*/AppData/Roaming/*",
     "Users/*/AppData/Local/*",
+    # Microsoft Store (MSIX/UWP) installs redirect %APPDATA%/%LOCALAPPDATA%
+    # into a per-package sandbox instead of the classic AppData/<App> layout
+    # — confirmed on real evidence: a Store-installed Slack's entire Chromium
+    # profile (Local State, Local Storage, IndexedDB, Cache, ...) lived only
+    # at .../Packages/<PackageFamilyName>/LocalCache/Roaming/Slack, invisible
+    # to the two patterns above.
+    "Users/*/AppData/Local/Packages/*/LocalCache/Roaming/*",
+    "Users/*/AppData/Local/Packages/*/LocalCache/Local/*",
     "Users/*/Library/Application Support/*",
     "home/*/.config/*",
 )

@@ -41,6 +41,21 @@ def test_discover_apps_finds_the_planted_profile(raw_fat_image):
     apps = discover_apps(target)
     names = [a.name.lower() for a in apps]
     assert any("discord" in n for n in names)
+    # Microsoft-Store-packaged app (AppData/Local/Packages/.../LocalCache/Roaming/<App>)
+    assert any("slack" in n for n in names)
+
+
+def test_acquire_from_image_reports_the_examined_hosts_identity_not_the_analysts(tmp_path, raw_fat_image):
+    """Regression: this used to report platform.node()/platform.system() -
+    the ANALYST's machine - instead of anything from the image."""
+    result = acquire_from_image(raw_fat_image, tmp_path, operator="Test Examiner")
+    from dd_core.manifest import Manifest
+
+    manifest = Manifest.read(result.case_dir)
+    import platform
+
+    assert manifest.host.hostname != platform.node()
+    assert manifest.host.os != platform.system()
 
 
 def test_acquire_from_image_produces_a_verifiable_case(tmp_path, raw_fat_image):

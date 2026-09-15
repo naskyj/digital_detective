@@ -18,7 +18,6 @@ The image itself is opened read-only; nothing here can write to it.
 from __future__ import annotations
 
 import logging
-import platform
 import shutil
 import uuid
 from collections.abc import Callable
@@ -61,6 +60,31 @@ def _safe_name(name: str) -> str:
 
 def _new_case_id() -> str:
     return f"{datetime.now(UTC):%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}"
+
+
+def _image_host(target, image_path: str, image_sha256: str) -> AcquisitionHost:
+    """The EXAMINED machine's own identity, read from the image itself —
+    never `platform.node()`/`platform.system()`, which report whichever
+    machine is running this code (the investigator's), not the one the
+    evidence came from. Confirmed wrong in practice: a Windows E01 opened on
+    a Mac reported the analyst's own hostname ("MacBook-Pro.local") until
+    this fix. `dissect` resolves hostname/os/version from the image's own
+    registry/filesystem where available; falls back to "unknown" (never to
+    the analyst's machine) when the image's OS can't be determined."""
+
+    def attr(name: str) -> str | None:
+        try:
+            val = getattr(target, name, None)
+        except Exception:  # noqa: BLE001 - dissect raises its own exception types here
+            return None
+        return str(val) if val else None
+
+    return AcquisitionHost(
+        hostname=attr("hostname") or "unknown (not determinable from this image)",
+        os=attr("os") or "unknown", os_version=attr("version") or "unknown",
+        username="", timezone="",
+        source_image=image_path, source_image_sha256=image_sha256,
+    )
 
 
 def acquire_from_image(
@@ -184,11 +208,7 @@ def acquire_from_image(
         case_id=case_id,
         collector_version=f"image-extractor-{__version__}",
         operator=operator or "unknown",
-        host=AcquisitionHost(
-            hostname=platform.node() or "unknown", os=platform.system(),
-            os_version=platform.release(), username="", timezone="",
-            source_image=str(image_path), source_image_sha256=image_sha256,
-        ),
+        host=_image_host(target, str(image_path), image_sha256),
         started_ts=started, completed_ts=now,
         target_apps=target_apps, entries=entries,
         public_key_pem=public_pem.decode(),
