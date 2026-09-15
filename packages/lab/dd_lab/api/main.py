@@ -182,6 +182,16 @@ def image_extract(body: ImageExtractIn) -> dict:
 @app.get("/api/cases")
 def get_cases() -> dict:
     cases = list_cases(_settings.cases_root)
+    for c in cases:
+        if c.status == CaseStatus.RUNNING and not _jobs.active_for(c.case_id):
+            # Same reconciliation as get_case(): the job that set this is
+            # gone (app closed/restarted mid-run) with nothing left alive to
+            # update case.json - fix it here so the case list (and its
+            # running/completed/stopped counts) reflect reality.
+            c.status = CaseStatus.ERROR
+            c.last_message = "Analysis was interrupted (the application was closed or restarted mid-run)."
+            c.save(_layout(c.case_id))
+
     counts = {"total": len(cases), "running": 0, "completed": 0, "stopped": 0}
     for c in cases:
         if c.status == CaseStatus.RUNNING:
@@ -230,6 +240,17 @@ def get_case(case_id: str) -> dict:
         finally:
             wh.close()
 
+    active_job = _jobs.active_for(case_id) or _last_job(case_id)
+    job_is_active = active_job and active_job["status"] in ("queued", "running")
+    if meta.status == CaseStatus.RUNNING and not job_is_active:
+        # The job that set status=running is gone (the app was closed/restarted
+        # mid-run, or the process died) - nothing was left alive to update
+        # case.json when that happened, so it would otherwise say "running"
+        # forever. Reconcile here, on read, so the UI reflects reality.
+        meta.status = CaseStatus.ERROR
+        meta.last_message = "Analysis was interrupted (the application was closed or restarted mid-run)."
+        meta.save(layout)
+
     reports = sorted(layout.reports.glob("*.html")) if layout.reports.is_dir() else []
     return {
         "meta": meta.model_dump(mode="json"),
@@ -244,7 +265,7 @@ def get_case(case_id: str) -> dict:
         },
         "warehouse": summary,
         "reports": [r.name for r in reports],
-        "active_job": _jobs.active_for(case_id) or _last_job(case_id),
+        "active_job": active_job,
     }
 
 

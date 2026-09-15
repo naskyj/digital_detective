@@ -106,6 +106,34 @@ def test_active_jobs_listing(client):
     assert not any(j["id"] == job_id for j in jobs), "finished job still listed as active"
 
 
+def test_interrupted_run_status_is_reconciled_not_stuck_running(client, tmp_path):
+    """Found on real evidence: a run interrupted by the app being closed or
+    restarted mid-analysis leaves case.json saying "running" forever, since
+    nothing survives to ever update it. GET /api/cases/{id} and GET
+    /api/cases must both notice (no job is actually active for this case)
+    and correct the status instead of showing a phantom in-progress run."""
+    from dd_core.casedir import CaseLayout
+    from dd_lab.case import CaseStatus
+
+    layout = CaseLayout(tmp_path / "cases", "case_api_1")
+    meta = CaseMeta.load(layout)
+    meta.status = CaseStatus.RUNNING
+    meta.last_message = "agent (claude-sonnet-5)"
+    meta.save(layout)
+
+    detail = client.get("/api/cases/case_api_1").json()
+    assert detail["meta"]["status"] == "error"
+    assert "interrupted" in detail["meta"]["last_message"].lower()
+
+    # and the fix persists to disk, not just the one response
+    assert CaseMeta.load(layout).status == CaseStatus.ERROR
+
+    listing = client.get("/api/cases").json()
+    case_row = next(c for c in listing["cases"] if c["case_id"] == "case_api_1")
+    assert case_row["status"] == "error"
+    assert listing["counts"]["running"] == 0
+
+
 def test_no_live_collection_routes(client):
     """The lab deliberately never collects evidence live from the machine it
     runs on - that's dd_collector's job. /api/apps and /api/collect must not

@@ -18,6 +18,22 @@ from dd_core.schema import NormalizedArtifact
 
 log = logging.getLogger("dd_lab.warehouse")
 
+
+def _clean_orphaned_load_files(warehouse_dir: Path) -> None:
+    """`load_artifacts` streams to a `_load_<uuid>.jsonl` temp file and always
+    deletes it in a `finally` - unless the whole process dies mid-load (killed,
+    crashed, or the app was closed/restarted while a run was in progress), in
+    which case that cleanup never runs and the file (which can be hundreds of
+    MB — one per interrupted load) sits there forever. Any such file found when
+    a Warehouse opens predates this instantiation, so it cannot belong to a
+    load in progress right now; it's an orphan, safe to remove."""
+    for f in warehouse_dir.glob("_load_*.jsonl"):
+        try:
+            f.unlink()
+            log.info("removed orphaned load file from an interrupted run: %s", f.name)
+        except OSError:
+            pass  # best-effort - never let cleanup abort opening the warehouse
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS artifacts (
     artifact_id       VARCHAR PRIMARY KEY,
@@ -127,6 +143,7 @@ class Warehouse:
     def __init__(self, db_path: str | Path):
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        _clean_orphaned_load_files(self.path.parent)
         self.con = duckdb.connect(str(self.path))
         self.con.execute(SCHEMA)
 
