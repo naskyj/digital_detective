@@ -391,6 +391,17 @@ def case_audit(case_id: str) -> dict:
 # --------------------------------------------------------------------- jobs
 
 
+@app.get("/api/jobs")
+def list_active_jobs() -> dict:
+    """Every job still queued/running, across all cases — backs the
+    persistent activity indicator so a long extraction or analysis stays
+    visible (and known to be genuinely still running) no matter which page
+    is open. Background jobs run on a server-side worker thread; navigating
+    the UI elsewhere never stops one."""
+    active = [j for j in _jobs.list(limit=200) if j["status"] in ("queued", "running")]
+    return {"jobs": active}
+
+
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str) -> dict:
     job = _jobs.get(job_id)

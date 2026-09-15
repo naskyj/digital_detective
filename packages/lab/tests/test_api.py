@@ -64,6 +64,34 @@ def test_health_and_settings(client):
     assert "llm" in s and s["llm"]["provider"] in {"ollama", "openai", "anthropic"}
 
 
+def test_active_jobs_listing(client):
+    """Backs the persistent sidebar indicator: a job shows up while it's
+    queued/running and disappears once it finishes - proof the indicator
+    reflects genuine server-side state, not just what the current page thinks."""
+    from dd_lab.api import main as main_mod
+
+    def slow_work(progress):
+        time.sleep(0.3)
+        return {"ok": True}
+
+    job_id = main_mod._jobs.submit("test", slow_work)
+
+    found = False
+    for _ in range(20):
+        if any(j["id"] == job_id for j in client.get("/api/jobs").json()["jobs"]):
+            found = True
+            break
+        time.sleep(0.05)
+    assert found, "job never appeared in the active list while running"
+
+    for _ in range(40):
+        if client.get(f"/api/jobs/{job_id}").json()["status"] == "done":
+            break
+        time.sleep(0.05)
+    jobs = client.get("/api/jobs").json()["jobs"]
+    assert not any(j["id"] == job_id for j in jobs), "finished job still listed as active"
+
+
 def test_no_live_collection_routes(client):
     """The lab deliberately never collects evidence live from the machine it
     runs on - that's dd_collector's job. /api/apps and /api/collect must not

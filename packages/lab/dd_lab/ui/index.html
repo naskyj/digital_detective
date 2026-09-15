@@ -62,6 +62,7 @@
   <a data-view="import">Import</a>
   <a data-view="cases">Cases</a>
   <a data-view="settings">Settings</a>
+  <div class="foot" id="jobs"></div>
   <div class="foot" id="conn">connecting…</div>
 </nav>
 <main id="main">loading…</main>
@@ -70,11 +71,31 @@
 const $ = (s,r=document)=>r.querySelector(s);
 const el = (t,a={},...k)=>{const e=document.createElement(t);for(const[x,v]of Object.entries(a)){if(x==='class')e.className=v;else if(x==='html')e.innerHTML=v;else if(x.startsWith('on'))e.addEventListener(x.slice(2),v);else e.setAttribute(x,v);}k.flat().forEach(c=>e.append(c?.nodeType?c:document.createTextNode(c??'')));return e;};
 const api = async (p,opt)=>{const r=await fetch('/api'+p,opt&&{...opt,headers:{'Content-Type':'application/json',...(opt.headers||{})}});if(!r.ok)throw new Error((await r.json().catch(()=>({detail:r.statusText}))).detail);return r.headers.get('content-type')?.includes('json')?r.json():r.text();};
-const state = {view:'dashboard', arg:null};
+const state = {view:'dashboard', arg:null, unsavedWork:null};
 
 function nav(){document.querySelectorAll('nav a').forEach(a=>{a.classList.toggle('active',a.dataset.view===state.view);a.onclick=()=>go(a.dataset.view);});}
-function go(view,arg){state.view=view;state.arg=arg||null;location.hash=view+(arg?'/'+arg:'');nav();render();}
+function go(view,arg){
+  // Background jobs (extraction, analysis) run on a server-side worker
+  // thread and are unaffected by navigating the UI. A handful of short,
+  // non-job operations are not (currently: scanning an image) - state.unsavedWork
+  // names one of those while it's in flight, so leaving can actually lose it.
+  if(state.unsavedWork && !confirm(state.unsavedWork+' is still in progress and will be lost if you leave this page. Leave anyway?')) return;
+  state.unsavedWork=null;
+  state.view=view;state.arg=arg||null;location.hash=view+(arg?'/'+arg:'');nav();render();
+}
 window.addEventListener('hashchange',()=>{const[v,a]=location.hash.slice(1).split('/');if(v&&v!==state.view||a!==state.arg){state.view=v||'dashboard';state.arg=a||null;nav();render();}});
+
+// Persistent, app-wide indicator: a background job stays visible (and known
+// to genuinely still be running) no matter which page is open.
+async function pollActiveJobs(){
+  const box=$('#jobs');
+  try{
+    const d=await api('/jobs');
+    box.textContent = d.jobs.length ? `● ${d.jobs.length} job${d.jobs.length>1?'s':''} running` : '';
+    box.style.color = d.jobs.length ? '#d97706' : '';
+  }catch(e){ /* transient - leave the indicator as it was */ }
+}
+setInterval(pollActiveJobs, 3000);
 
 async function render(){
   const m=$('#main'); m.innerHTML='<span class="muted">loading…</span>';
@@ -109,25 +130,24 @@ async function vDashboard(m){
 }
 
 async function vImport(m){
-  // The lab deliberately does not collect evidence live from this machine —
-  // that's dd_collector's job, run as its own minimal tool directly against
-  // the examined machine. The lab only ever reads evidence that already
-  // exists: a case the collector produced, or a disk image extracted here.
+  // This application never collects evidence live from the machine it runs
+  // on. Evidence is brought in two ways: a case produced by the dedicated
+  // field-collection utility, or a forensic image processed below.
   m.innerHTML=''; m.append(el('h1',{},'Import Evidence'));
   m.append(el('div',{class:'hint',style:'margin-bottom:14px'},
-    'This app never collects evidence live from the machine it runs on. If you '+
-    'need a live capture, use the standalone dd-collect tool on the examined '+
-    'machine (see docs/FIELD_GUIDE.md), then bring the resulting case folder '+
-    'here — or extract straight from a disk image below.'));
+    'This application does not perform live collection on the machine it runs on. '+
+    'A case is brought in either as evidence already acquired by the field '+
+    'collection utility, or by processing a forensic image directly, below.'));
   m.append(imageImportPanel());
 }
 
 function imageImportPanel(){
   const box=el('div',{class:'panel'});
-  box.append(el('h2',{style:'margin-top:0'},'Import from a Disk Image'),
+  box.append(el('h2',{style:'margin-top:0'},'Process a Forensic Image'),
     el('div',{class:'hint',style:'margin-bottom:10px'},
-      'Already have a disk image (raw/.dd/.001, VMDK/VHD, or E01) instead of a live machine? '+
-      'Point the lab at it directly — no mounting, no admin rights needed. See docs/IMAGE_ACQUISITION.md.'));
+      'Supports raw/dd images (including split segments), VMDK and VHD/VHDX virtual '+
+      'disks, and E01/EWF containers. The image is opened read-only; nothing on it is '+
+      'ever modified.'));
 
   const path=el('input',{placeholder:'/path/to/image.raw or E:\\case.E01',style:'width:420px'});
   const browsePath=el('button',{class:'sec',onclick:()=>browseForFile(path)},'Browse…');
@@ -137,11 +157,14 @@ function imageImportPanel(){
 
   const scanBtn=el('button',{class:'sec',onclick:async()=>{
     if(!path.value.trim()) return alert('Enter an image path first.');
-    scanBtn.disabled=true; scanBtn.innerHTML='<span class="spin" style="border-color:#0003;border-top-color:#333"></span>scanning…';
-    scanLog.textContent=''; appsBox.style.display='none'; appsBox.innerHTML=''; checks.length=0;
+    scanBtn.disabled=true; scanBtn.innerHTML='<span class="spin" style="border-color:#0003;border-top-color:#333"></span>Scanning…';
+    scanLog.innerHTML='<span class="spin" style="border-color:#0003;border-top-color:#333"></span>Opening the image and searching for application profiles — this can take a moment on a large image.';
+    appsBox.style.display='none'; appsBox.innerHTML=''; checks.length=0;
+    state.unsavedWork='The image scan';
     try{
       const d=await api('/image/list',{method:'POST',body:JSON.stringify({image_path:path.value.trim()})});
-      if(!d.apps.length){ scanLog.textContent='No Electron/Chromium app profiles found on this image.'; }
+      scanLog.textContent='';
+      if(!d.apps.length){ scanLog.textContent='No supported application profiles were found on this image.'; }
       else{
         appsBox.style.display='block';
         d.apps.forEach(a=>{
@@ -151,7 +174,8 @@ function imageImportPanel(){
             el('span',{class:'muted mono',style:'flex:1;text-align:right'},a.profile_dir)));
         });
       }
-    }catch(e){ scanLog.textContent='Could not open image: '+e.message; }
+    }catch(e){ scanLog.textContent='The image could not be opened: '+e.message; }
+    state.unsavedWork=null;
     scanBtn.disabled=false; scanBtn.textContent='Scan Image';
   }},'Scan Image');
 
@@ -160,35 +184,39 @@ function imageImportPanel(){
     el('div',{class:'row',style:'margin-top:8px'}, scanBtn), scanLog, appsBox);
 
   const op=el('input',{placeholder:'e.g. Det. A. Smith',style:'width:300px'});
-  const memImg=el('input',{placeholder:'optional — a separately acquired physmem.raw',style:'width:420px'});
+  const memImg=el('input',{placeholder:'optional',style:'width:420px'});
   const browseMemImg=el('button',{class:'sec',onclick:()=>browseForFile(
     memImg,['Memory dumps (*.raw;*.dmp;*.mem;*.bin)','All files (*.*)'])},'Browse…');
-  const cid=el('input',{placeholder:'auto',style:'width:300px'});
+  const cid=el('input',{placeholder:'generated automatically if left blank',style:'width:300px'});
   box.append(
     el('label',{},'Operator name (recorded in the chain of custody)'), op,
     el('label',{},'Memory image (optional — a full-RAM capture acquired separately)'),
     el('div',{class:'row'}, memImg, browseMemImg),
-    el('label',{},'Case ID (optional — generated from the timestamp if blank)'), cid);
+    el('label',{},'Case ID (optional)'), cid);
 
-  const log=el('div',{class:'log',style:'display:none;margin-top:12px'});
+  const bgHint=el('div',{class:'hint',style:'display:none;margin-top:8px'},
+    'Running in the background — this page can be left safely; progress is also '+
+    'shown in the sidebar and on the Cases page.');
+  const log=el('div',{class:'log',style:'display:none;margin-top:8px'});
   const done=el('div',{style:'display:none;margin-top:12px'});
   const btn=el('button',{class:'primary',style:'margin-top:16px',onclick:async()=>{
     if(!path.value.trim()) return alert('Enter an image path first.');
     const chosen = checks.length ? checks.filter(([c])=>c.checked).map(([,a])=>a.name) : null;
-    if(checks.length && !chosen.length) return alert('Select at least one application, or scan first.');
-    btn.disabled=true; btn.innerHTML='<span class="spin"></span>extracting…';
-    log.style.display='block'; log.textContent=''; done.style.display='none';
+    if(checks.length && !chosen.length) return alert('Select at least one application, or scan the image first.');
+    btn.disabled=true; btn.innerHTML='<span class="spin"></span>Starting…';
+    log.style.display='block'; log.textContent=''; done.style.display='none'; bgHint.style.display='none';
     try{
       const r=await api('/image/extract',{method:'POST',body:JSON.stringify({
         image_path:path.value.trim(), apps:chosen, operator:op.value,
         memory_image_path:memImg.value||null, case_id:cid.value||null})});
+      btn.innerHTML='<span class="spin"></span>Processing…'; bgHint.style.display='block';
       const j=await pollJob(r.job_id,log);
       if(j && j.status==='done' && j.result){
         done.style.display='block'; done.innerHTML='';
         done.append(
-          el('b',{},`✓ Extracted case ${j.result.case_id}`),
+          el('b',{},`Case ${j.result.case_id} created`),
           el('div',{class:'hint'},`${j.result.files} files · ${(j.result.bytes/1e6).toFixed(1)} MB · `+
-            `image sha256 ${j.result.image_sha256.slice(0,16)}… · key ${j.result.fingerprint}` +
+            `image checksum ${j.result.image_sha256.slice(0,16)}… · signing key ${j.result.fingerprint}` +
             (j.result.warnings?.length?` · ${j.result.warnings.length} warning(s)`:'')),
           el('button',{style:'margin-top:8px',onclick:()=>{state.newCaseId=j.result.case_id;go('cases');}},
             'Create a case from this →'));
@@ -196,7 +224,7 @@ function imageImportPanel(){
     }catch(e){ log.textContent+='\nCould not start: '+e.message; }
     btn.disabled=false; btn.textContent='Extract from Image';
   }},'Extract from Image');
-  box.append(btn, log, done);
+  box.append(btn, bgHint, log, done);
   return box;
 }
 
@@ -234,20 +262,21 @@ async function vCases(m){
   const d=await api('/cases');
   m.innerHTML=''; m.append(el('h1',{},'Cases'));
   const pre = state.newCaseId; state.newCaseId=null;
-  const cidI=el('input',{id:'ncid',placeholder:'from the collector',style:'width:300px',value:pre||''});
+  const cidI=el('input',{id:'ncid',placeholder:'the acquired evidence folder name',style:'width:300px',value:pre||''});
   const createBtn=el('button',{class:'primary',style:'margin-top:14px',onclick:async(e)=>{
     const cid=cidI.value.trim(), name=$('#nname').value.trim();
     if(!cid||!name) return alert('Case ID and name are required.');
-    e.target.disabled=true;
+    const btn=e.target;
+    btn.disabled=true; btn.innerHTML='<span class="spin"></span>Creating…';
     try{
       await api('/cases',{method:'POST',body:JSON.stringify({case_id:cid,name,
         keywords:$('#nkw').value,description:$('#ndesc').value})});
       go('case',cid);
-    }catch(err){ alert(err.message); e.target.disabled=false; }
+    }catch(err){ alert(err.message); btn.disabled=false; btn.textContent='Create case'; }
   }},'Create case');
   m.append(el('div',{class:'panel'},
     el('b',{},'New case'),
-    el('div',{class:'hint'},'A case wraps a collected evidence folder with a name and the keywords you want investigated. The Case ID must match a folder in the cases directory (Settings).'),
+    el('div',{class:'hint'},'A case pairs an acquired evidence folder with a name and the keywords you want investigated. The Case ID must match a folder already present in the cases directory (Settings).'),
     el('label',{},'Case ID'), cidI,
     el('label',{},'Case name'), el('input',{id:'nname',placeholder:'e.g. Discord DM review',style:'width:420px'}),
     el('label',{},'Investigation keywords (comma or newline separated)'),
@@ -532,17 +561,22 @@ async function vSettings(m){
     el('label',{},'Model'), mdl,
     el('label',{},'Base URL (Ollama / OpenAI-compatible)'), url,
     el('label',{},'API key (OpenAI / Anthropic / Google)'), key,
-    el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:12px'}, ag, 'Use the LLM agent to orchestrate (otherwise a fixed deterministic pipeline runs)'),
-    el('div',{class:'muted',style:'margin-top:6px'},'Installing Ollama and pulling a model is a separate setup step; this only selects which model to use. See docs/LLM_SETUP.md.'),
+    el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:12px'}, ag, 'Use the AI agent to orchestrate analysis (otherwise a fixed deterministic pipeline runs)'),
+    el('div',{class:'muted',style:'margin-top:6px'},'Model selection only — installing a local model runtime or provisioning an API key is a separate, one-time setup step.'),
     el('label',{},'Trained classifier model directory (optional)'), md,
-    el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:10px'}, zs, 'Use the pretrained zero-shot classifier as a stopgap 4th voter (needs the "zeroshot" extra)'),
-    el('div',{class:'muted',style:'margin-top:6px'},'Classification runs on rules by default. Point this at a trained model when the training track produces one.'),
+    el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:10px'}, zs, 'Use the pretrained zero-shot classifier as an additional voter'),
+    el('div',{class:'muted',style:'margin-top:6px'},'Classification runs on the built-in rule ensemble by default. Point this at a trained model to improve accuracy further.'),
     el('div',{class:'row',style:'margin-top:14px'},
-      el('button',{onclick:async()=>{
-        const body={cases_root:cr.value,llm_provider:prov.value,llm_model:mdl.value,llm_base_url:url.value,use_agent:ag.checked,use_zeroshot:zs.checked,classifier_model_dir:md.value};
-        if(key.value)body.llm_api_key=key.value;
-        await api('/settings',{method:'PUT',body:JSON.stringify(body)});
-        alert('Saved.');
+      el('button',{onclick:async(e)=>{
+        const btn=e.target;
+        btn.disabled=true; btn.innerHTML='<span class="spin"></span>Saving…';
+        try{
+          const body={cases_root:cr.value,llm_provider:prov.value,llm_model:mdl.value,llm_base_url:url.value,use_agent:ag.checked,use_zeroshot:zs.checked,classifier_model_dir:md.value};
+          if(key.value)body.llm_api_key=key.value;
+          await api('/settings',{method:'PUT',body:JSON.stringify(body)});
+          btn.textContent='Saved ✓';
+          setTimeout(()=>{btn.textContent='Save Settings';btn.disabled=false;},1500);
+        }catch(x){ alert('Could not save settings: '+x.message); btn.textContent='Save Settings'; btn.disabled=false; }
       }},'Save Settings'),
       el('button',{class:'sec',onclick:async(e)=>{
         e.target.disabled=true; e.target.textContent='Testing…';
@@ -558,7 +592,7 @@ async function vSettings(m){
   try{ const h=await api('/settings'); $('#conn').textContent='● connected'; }
   catch{ $('#conn').textContent='● offline'; }
   const [v,a]=location.hash.slice(1).split('/'); state.view=v||'dashboard'; state.arg=a||null;
-  nav(); render();
+  nav(); render(); pollActiveJobs();
 })();
 </script>
 </body>
