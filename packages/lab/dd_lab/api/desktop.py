@@ -42,7 +42,10 @@ def _make_pick_file(window):
         import webview
 
         types = tuple(file_types) if file_types else (
-            "Disk / memory images (*.raw;*.dd;*.img;*.001;*.e01;*.E01;*.vmdk;*.vhd;*.vhdx)",
+            # pywebview's filter parser only accepts [\w ] in the description
+            # (see webview.util.parse_file_type) - no "/" or other punctuation,
+            # or it rejects the WHOLE call with "not a valid file filter".
+            "Disk and memory images (*.raw;*.dd;*.img;*.001;*.e01;*.E01;*.vmdk;*.vhd;*.vhdx)",
             "All files (*.*)",
         )
         result = window.create_file_dialog(webview.FileDialog.OPEN, file_types=types)
