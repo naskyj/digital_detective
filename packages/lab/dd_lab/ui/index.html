@@ -46,6 +46,12 @@
   .log{background:#0b0b0d;color:#c7f5c7;font:11px/1.45 ui-monospace,Menlo,monospace;padding:10px;border-radius:7px;max-height:230px;overflow:auto;white-space:pre-wrap}
   .muted{color:var(--muted)}.mono{font-family:ui-monospace,Menlo,monospace;font-size:11px;word-break:break-all}
   .scroll{max-height:52vh;overflow:auto;border:1px solid var(--line);border-radius:8px}
+  /* tbl() cells: unlike .mono, short columns (seq/ts/kind/name/...) must never
+     shrink to nothing when a `detail` cell on the same row holds a big JSON
+     blob — word-break:break-all lets the browser's table layout treat them as
+     infinitely compressible, which wraps them one character per line. */
+  .tbl-cell{font-family:ui-monospace,Menlo,monospace;font-size:11px;white-space:nowrap}
+  .tbl-detail{font-family:ui-monospace,Menlo,monospace;font-size:11px;white-space:pre-wrap;word-break:break-word;max-width:640px}
   a.link{color:var(--accent2);cursor:pointer}
 </style>
 </head>
@@ -53,7 +59,7 @@
 <nav>
   <div class="brand">🔍 Digital Detective</div>
   <a data-view="dashboard">Dashboard</a>
-  <a data-view="collect">Collect</a>
+  <a data-view="import">Import</a>
   <a data-view="cases">Cases</a>
   <a data-view="settings">Settings</a>
   <div class="foot" id="conn">connecting…</div>
@@ -72,7 +78,7 @@ window.addEventListener('hashchange',()=>{const[v,a]=location.hash.slice(1).spli
 
 async function render(){
   const m=$('#main'); m.innerHTML='<span class="muted">loading…</span>';
-  try{ await ({dashboard:vDashboard,collect:vCollect,cases:vCases,case:vCase,settings:vSettings}[state.view]||vDashboard)(m); }
+  try{ await ({dashboard:vDashboard,import:vImport,cases:vCases,case:vCase,report:vReport,settings:vSettings}[state.view]||vDashboard)(m); }
   catch(e){ m.innerHTML=''; m.append(el('div',{class:'panel'},'Error: '+e.message)); }
 }
 
@@ -102,63 +108,17 @@ async function vDashboard(m){
   });
 }
 
-async function vCollect(m){
-  const d=await api('/apps');
-  m.innerHTML=''; m.append(el('h1',{},'Collect Evidence'));
-  const box=el('div',{class:'panel'});
-  box.append(el('div',{class:'hint',style:'margin-bottom:6px'},
-    'Copies the selected apps’ profiles read-only, hashes every file, and writes a '+
-    'signed evidence package into the cases directory. Quit an app before selecting '+
-    'it — a running app locks its database and some files will be skipped.'));
-  const checks=[];
-  const anyRunning=d.apps.some(a=>a.running);
-  d.apps.forEach(a=>{
-    const cb=el('input',{type:'checkbox'}); checks.push([cb,a]);
-    box.append(el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:8px'},
-      cb, el('span',{},el('b',{},a.name), a.version?' v'+a.version:'',
-        a.running?el('span',{class:'pill bad',style:'margin-left:6px'},'running — quit it first'):''),
-      el('span',{class:'muted mono',style:'flex:1;text-align:right'},a.profile_dir)));
-  });
-  if(anyRunning) box.append(el('div',{class:'hint',style:'color:var(--bad);margin-top:8px'},
-    'Some apps are running. Quit them (tray icon → Quit) and click Rescan for a clean copy.'));
-  box.append(el('div',{class:'row',style:'margin-top:8px'},
-    el('button',{class:'ghost',onclick:()=>render()},'↻ Rescan')));
-
-  box.append(el('label',{},'Operator name (recorded in the chain of custody)'),
-    el('input',{id:'op',placeholder:'e.g. Det. A. Smith',style:'width:300px'}));
-  const mem=el('input',{type:'checkbox',id:'mem'});
-  box.append(el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:10px'},
-    mem,'Also capture memory (needs winpmem.exe / procdump.exe bundled with the collector)'));
-  box.append(el('label',{},'Case ID (optional — generated from the timestamp if blank)'),
-    el('input',{id:'cid',placeholder:'auto',style:'width:300px'}));
-
-  const log=el('div',{class:'log',style:'display:none;margin-top:12px'});
-  const done=el('div',{style:'display:none;margin-top:12px'});
-  const btn=el('button',{class:'primary',style:'margin-top:16px',onclick:async()=>{
-    const chosen=checks.filter(([c])=>c.checked).map(([,a])=>a);
-    if(!chosen.length)return alert('Select at least one application.');
-    btn.disabled=true; btn.innerHTML='<span class="spin"></span>collecting…';
-    log.style.display='block'; log.textContent=''; done.style.display='none';
-    try{
-      const r=await api('/collect',{method:'POST',body:JSON.stringify({
-        profiles:chosen.map(a=>a.profile_dir), operator:$('#op').value,
-        memory:mem.checked, case_id:$('#cid').value||null})});
-      const j=await pollJob(r.job_id,log);
-      if(j && j.status==='done' && j.result){
-        done.style.display='block'; done.innerHTML='';
-        done.append(
-          el('b',{},`✓ Collected case ${j.result.case_id}`),
-          el('div',{class:'hint'},`${j.result.files} files · ${(j.result.bytes/1e6).toFixed(1)} MB · `+
-            `key ${j.result.fingerprint}` + (j.result.warnings?.length?` · ${j.result.warnings.length} warning(s)`:'')),
-          el('button',{style:'margin-top:8px',onclick:()=>{state.newCaseId=j.result.case_id;go('cases');}},
-            'Create a case from this →'));
-      }
-    }catch(e){ log.textContent+='\nCould not start: '+e.message; }
-    btn.disabled=false; btn.textContent='Start Collection';
-  }},'Start Collection');
-  box.append(btn, log, done);
-  m.append(box);
-
+async function vImport(m){
+  // The lab deliberately does not collect evidence live from this machine —
+  // that's dd_collector's job, run as its own minimal tool directly against
+  // the examined machine. The lab only ever reads evidence that already
+  // exists: a case the collector produced, or a disk image extracted here.
+  m.innerHTML=''; m.append(el('h1',{},'Import Evidence'));
+  m.append(el('div',{class:'hint',style:'margin-bottom:14px'},
+    'This app never collects evidence live from the machine it runs on. If you '+
+    'need a live capture, use the standalone dd-collect tool on the examined '+
+    'machine (see docs/FIELD_GUIDE.md), then bring the resulting case folder '+
+    'here — or extract straight from a disk image below.'));
   m.append(imageImportPanel());
 }
 
@@ -170,6 +130,7 @@ function imageImportPanel(){
       'Point the lab at it directly — no mounting, no admin rights needed. See docs/IMAGE_ACQUISITION.md.'));
 
   const path=el('input',{placeholder:'/path/to/image.raw or E:\\case.E01',style:'width:420px'});
+  const browsePath=el('button',{class:'sec',onclick:()=>browseForFile(path)},'Browse…');
   const scanLog=el('div',{class:'hint'});
   const appsBox=el('div',{style:'display:none;margin-top:10px'});
   const checks=[];
@@ -194,15 +155,19 @@ function imageImportPanel(){
     scanBtn.disabled=false; scanBtn.textContent='Scan Image';
   }},'Scan Image');
 
-  box.append(el('label',{},'Image path (readable by this machine)'), path,
+  box.append(el('label',{},'Image path (readable by this machine)'),
+    el('div',{class:'row'}, path, browsePath),
     el('div',{class:'row',style:'margin-top:8px'}, scanBtn), scanLog, appsBox);
 
   const op=el('input',{placeholder:'e.g. Det. A. Smith',style:'width:300px'});
   const memImg=el('input',{placeholder:'optional — a separately acquired physmem.raw',style:'width:420px'});
+  const browseMemImg=el('button',{class:'sec',onclick:()=>browseForFile(
+    memImg,['Memory dumps (*.raw;*.dmp;*.mem;*.bin)','All files (*.*)'])},'Browse…');
   const cid=el('input',{placeholder:'auto',style:'width:300px'});
   box.append(
     el('label',{},'Operator name (recorded in the chain of custody)'), op,
-    el('label',{},'Memory image (optional — a full-RAM capture acquired separately)'), memImg,
+    el('label',{},'Memory image (optional — a full-RAM capture acquired separately)'),
+    el('div',{class:'row'}, memImg, browseMemImg),
     el('label',{},'Case ID (optional — generated from the timestamp if blank)'), cid);
 
   const log=el('div',{class:'log',style:'display:none;margin-top:12px'});
@@ -233,6 +198,21 @@ function imageImportPanel(){
   }},'Extract from Image');
   box.append(btn, log, done);
   return box;
+}
+
+async function browseForFile(inputEl,fileTypes){
+  // Native picker (pywebview desktop window only) returns the real local
+  // path with no file transfer at all — the right choice for a forensic
+  // image/memory dump that can be tens of GB, unlike an actual browser
+  // upload which would mean copying the whole thing over HTTP first.
+  if(!(window.pywebview && window.pywebview.api && window.pywebview.api.pick_file)){
+    alert('Native file browsing needs the desktop app window (not a plain browser tab) — type the path instead.');
+    return;
+  }
+  try{
+    const p=await window.pywebview.api.pick_file(fileTypes||null);
+    if(p) inputEl.value=p;
+  }catch(e){ alert('Could not open the file picker: '+e.message); }
 }
 
 async function pollJob(id,logEl,onDone){
@@ -311,7 +291,7 @@ async function vCase(m){
         ? 'There is no signed manifest.json in this folder — the acquisition did not finish. Re-run the collector for this case (close the target apps first so their databases aren’t locked).'
         : e.message),
       el('div',{class:'row',style:'margin-top:10px'},
-        el('button',{class:'sec',onclick:()=>go('collect')},'Go to Collect'),
+        el('button',{class:'sec',onclick:()=>go('import')},'Go to Import'),
         el('button',{class:'ghost',onclick:()=>go('cases')},'Back to Cases'))));
     return;
   }
@@ -383,8 +363,7 @@ async function vCase(m){
       runlog);
   } else {
     actions.append(el('div',{class:'row'},
-      d.reports.length?el('button',{class:'primary',onclick:()=>
-        window.open('/api/cases/'+id+'/report','_blank')},'📄  Open report'):'',
+      d.reports.length?el('button',{class:'primary',onclick:()=>go('report',id)},'📄  Open report'):'',
       el('button',{class:'sec',onclick:e=>startRun(e.target)},'↻  Re-run analysis'),
       el('button',{class:'sec',onclick:()=>document.getElementById('browser')
         ?.scrollIntoView({behavior:'smooth'})},'🔍  Browse artifacts'),
@@ -406,9 +385,70 @@ async function vCase(m){
       el('div',{class:'bar',style:`width:${100*c.artifacts/max}%`}),
       el('span',{class:'muted'},c.artifacts.toLocaleString()))));
     m.append(bars);
+    m.append(await classificationPanel(id));
     const br=browser(id, w.by_category.map(c=>c.category).filter(Boolean));
     br.id='browser'; m.append(br);
   }
+}
+
+async function classificationPanel(id){
+  // Answers "what was classified as forensic vs. general, and how robustly":
+  // the ensemble already votes per artifact (regex/keyword/NER/model) but
+  // nothing surfaced that before — a category only one voter ever fires on
+  // is a much weaker signal than one several voters agree on.
+  const wrap=el('div',{class:'panel'});
+  wrap.append(el('h2',{style:'margin-top:0'},'Classification breakdown'),
+    el('div',{class:'hint',style:'margin-bottom:8px'},
+      'How the rules + keyword + NER + model ensemble voted per category. '+
+      'Click a row for a few example artifacts and their individual votes.'));
+  let d;
+  try{ d=await api('/cases/'+id+'/classification'); }
+  catch(e){ wrap.append(el('div',{class:'hint'},'Could not load: '+e.message)); return wrap; }
+
+  const t=el('table',{},el('thead',{},el('tr',{},
+    ...['Category','Count','Mean conf','Regex','Keyword','NER','Model'].map(h=>el('th',{},h)))));
+  const tb=el('tbody',{});
+  d.by_category.forEach(c=>{
+    const exBox=el('div',{style:'display:none;padding:8px 0'});
+    const row=el('tr',{style:'cursor:pointer',onclick:()=>{
+      if(exBox.style.display==='none'){
+        if(!exBox.childNodes.length){
+          const examples=d.examples[c.category]||[];
+          exBox.append(examples.length
+            ? tbl(examples,['app','source_type','key','value','regex_vote','keyword_vote','ner_vote','model_vote'])
+            : el('div',{class:'hint'},'no examples'));
+        }
+        exBox.style.display='block';
+      } else exBox.style.display='none';
+    }},
+      el('td',{},el('span',{class:'pill cat'},c.category||'')),
+      el('td',{},c.n.toLocaleString()),
+      el('td',{},c.mean_conf??''),
+      el('td',{},c.regex_agree.toLocaleString()),
+      el('td',{},c.keyword_agree.toLocaleString()),
+      el('td',{},c.ner_agree.toLocaleString()),
+      el('td',{},c.model_agree.toLocaleString()));
+    tb.append(row);
+    const exRow=el('tr',{}); const exCell=el('td',{colspan:'7'},exBox);
+    exRow.append(exCell); tb.append(exRow);
+  });
+  t.append(tb);
+  wrap.append(el('div',{class:'scroll'},t));
+  return wrap;
+}
+
+async function vReport(m){
+  const id=state.arg;
+  // Rendered as an iframe, not window.open(): a pywebview desktop window has
+  // no browser chrome to open a new tab/window in, so window.open silently
+  // did nothing there. An iframe works identically in the desktop app and a
+  // plain browser tab, and keeps the report's own CSS isolated from the SPA's.
+  m.innerHTML='';
+  m.append(el('div',{class:'row',style:'margin-bottom:10px'},
+    el('button',{class:'sec',onclick:()=>go('case',id)},'←  Back to case')));
+  m.append(el('iframe',{
+    src:'/api/cases/'+encodeURIComponent(id)+'/report',
+    style:'width:100%;height:calc(100vh - 110px);border:1px solid var(--line);border-radius:8px;background:#fff'}));
 }
 
 function browser(id,cats){
@@ -455,16 +495,22 @@ function browser(id,cats){
 }
 
 async function showAudit(id){
+  document.getElementById('audit-section')?.remove();  // else a second click duplicates everything below
   const d=await api('/cases/'+id+'/audit');
-  const m=$('#main'); m.append(el('h2',{},'Chain of custody'));
-  m.append(el('div',{class:'panel scroll'}, tbl(d.custody,['seq','ts','event','actor','detail'])));
-  m.append(el('h2',{},'Analysis audit'));
-  m.append(el('div',{class:'panel scroll'}, tbl(d.audit,['seq','ts','kind','name','detail'])));
+  const sec=el('div',{id:'audit-section'});
+  sec.append(
+    el('h2',{},'Chain of custody'),
+    el('div',{class:'panel scroll'}, tbl(d.custody,['seq','ts','event','actor','detail'])),
+    el('h2',{},'Analysis audit'),
+    el('div',{class:'panel scroll'}, tbl(d.audit,['seq','ts','kind','name','detail'])));
+  $('#main').append(sec);
   window.scrollTo(0,document.body.scrollHeight);
 }
 function tbl(rows,cols){
   const t=el('table',{},el('thead',{},el('tr',{},...cols.map(c=>el('th',{},c)))));
-  const tb=el('tbody',{}); rows.forEach(r=>tb.append(el('tr',{},...cols.map(c=>el('td',{class:c==='detail'?'':'mono'},String(r[c]??''))))));
+  const tb=el('tbody',{});
+  rows.forEach(r=>tb.append(el('tr',{},...cols.map(c=>
+    el('td',{class:c==='detail'?'tbl-detail':'tbl-cell'},String(r[c]??''))))));
   t.append(tb); return t;
 }
 

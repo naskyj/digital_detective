@@ -63,13 +63,6 @@ class NewCaseIn(BaseModel):
     keywords: str = ""
 
 
-class CollectIn(BaseModel):
-    profiles: list[str]  # app names or profile paths
-    operator: str = ""
-    memory: bool = False
-    case_id: str | None = None
-
-
 class ImageListIn(BaseModel):
     image_path: str
 
@@ -119,44 +112,15 @@ def put_settings(body: SettingsIn) -> dict:
     return get_settings()
 
 
-# --------------------------------------------------------------------- collection
-
-
-@app.get("/api/apps")
-def list_apps() -> dict:
-    from dd_collector.discover import discover_apps
-
-    return {"apps": [a.as_dict() for a in discover_apps()]}
-
-
-@app.post("/api/collect")
-def collect(body: CollectIn) -> dict:
-    from dd_collector.acquire import acquire
-    from dd_collector.discover import find_app
-
-    apps = []
-    for spec in body.profiles:
-        a = find_app(spec)
-        if a is None:
-            raise HTTPException(404, f"no Electron app matching {spec!r}")
-        apps.append(a)
-
-    def work(progress) -> dict:
-        result = acquire(
-            apps, _settings.cases_root, case_id=body.case_id,
-            operator=body.operator, collect_memory=body.memory, progress=progress,
-        )
-        return {
-            "case_id": result.case_id, "files": result.file_count,
-            "bytes": result.total_bytes, "fingerprint": result.public_key_fingerprint,
-            "warnings": result.warnings,
-        }
-
-    job_id = _jobs.submit("collect", work, case_id=body.case_id)
-    return {"job_id": job_id}
-
-
 # ------------------------------------------------------------ image acquisition
+#
+# The lab deliberately does NOT do live evidence collection — that's
+# dd_collector's job, run as its own minimal tool directly on (or against a
+# copy of) the examined machine. The lab only ever reads evidence that
+# already exists: either a case a collector run produced, or a disk image
+# extracted below. Keeping that boundary means the lab's heavier dependencies
+# (DuckDB, the classifier, the agent) never need to run anywhere near a live
+# target, and a live acquisition never depends on anything the lab needs.
 
 
 @app.post("/api/image/list")
@@ -338,7 +302,8 @@ def case_artifacts(
         total = wh.query(f"SELECT count(*) AS n FROM artifacts {clause}", list(params))[0]["n"]
         rows = wh.query(
             f"SELECT app, source_type, category, confidence, key, substr(value,1,300) AS value, "
-            f"record_ts, source_file FROM artifacts {clause} "
+            f"record_ts, source_file, artifact_id, regex_vote, keyword_vote, ner_vote, model_vote, "
+            f"evidence_spans FROM artifacts {clause} "
             f"ORDER BY (category != 'GENERAL') DESC, confidence DESC NULLS LAST, key "
             f"LIMIT {int(limit)}",
             list(params),
@@ -352,6 +317,40 @@ def case_artifacts(
     finally:
         wh.close()
     return {"rows": rows, "total": total, "shown": len(rows), "facets": facets}
+
+
+@app.get("/api/cases/{case_id}/classification")
+def case_classification(case_id: str) -> dict:
+    """Per-category classification robustness: not just how many artifacts
+    landed in a category, but which of the ensemble's voters (regex/keyword/
+    NER/model) actually agreed on it — a category where only one voter ever
+    fires is a much weaker signal than one several voters agree on."""
+    deps = InvestigationDeps(cases_root=Path(_settings.cases_root), case_id=case_id)
+    if not deps.layout.warehouse.is_file():
+        raise HTTPException(409, "case not processed yet")
+    from dd_lab.etl.warehouse import Warehouse
+
+    wh = Warehouse(deps.layout.warehouse)
+    try:
+        rows = wh.query(
+            "SELECT category, count(*) AS n, round(avg(confidence),3) AS mean_conf, "
+            "sum(CASE WHEN regex_vote = category THEN 1 ELSE 0 END) AS regex_agree, "
+            "sum(CASE WHEN keyword_vote = category THEN 1 ELSE 0 END) AS keyword_agree, "
+            "sum(CASE WHEN ner_vote = category THEN 1 ELSE 0 END) AS ner_agree, "
+            "sum(CASE WHEN model_vote = category THEN 1 ELSE 0 END) AS model_agree "
+            "FROM artifacts GROUP BY category ORDER BY n DESC"
+        )
+        examples = {}
+        for r in rows:
+            examples[r["category"]] = wh.query(
+                "SELECT app, source_type, key, substr(value,1,200) AS value, "
+                "regex_vote, keyword_vote, ner_vote, model_vote "
+                "FROM artifacts WHERE category = ? ORDER BY confidence DESC NULLS LAST LIMIT 5",
+                [r["category"]],
+            )
+    finally:
+        wh.close()
+    return {"by_category": rows, "examples": examples}
 
 
 @app.post("/api/cases/{case_id}/query")

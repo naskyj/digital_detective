@@ -408,7 +408,6 @@ name = "dd-lab"
 version = "0.1.0"
 source = { editable = "packages/lab" }
 dependencies = [
-    { name = "dd-collector" },
     { name = "dd-core" },
     { name = "duckdb" },
     { name = "fastapi" },
@@ -458,7 +457,6 @@ dev = [
 requires-dist = [
     { name = "ccl-chromium-reader", marker = "extra == 'chromium'", git = "https://github.com/cclgroupltd/ccl_chromium_reader.git?tag=0.3.18" },
     { name = "ccl-simplesnappy", marker = "extra == 'chromium'", git = "https://github.com/cclgroupltd/ccl_simplesnappy.git" },
-    { name = "dd-collector", editable = "packages/collector" },
     { name = "dd-core", editable = "packages/core" },
     { name = "dissect-fat", marker = "extra == 'image'", specifier = ">=3.10,<4" },
     { name = "dissect-target", marker = "extra == 'image'", specifier = ">=3.20,<4" },

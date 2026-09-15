@@ -64,9 +64,12 @@ def test_health_and_settings(client):
     assert "llm" in s and s["llm"]["provider"] in {"ollama", "openai", "anthropic"}
 
 
-def test_apps_listing(client):
-    r = client.get("/api/apps").json()
-    assert "apps" in r
+def test_no_live_collection_routes(client):
+    """The lab deliberately never collects evidence live from the machine it
+    runs on - that's dd_collector's job. /api/apps and /api/collect must not
+    exist here."""
+    assert client.get("/api/apps").status_code == 404
+    assert client.post("/api/collect", json={"profiles": []}).status_code == 404
 
 
 def test_case_lifecycle_via_api(client):
@@ -76,6 +79,8 @@ def test_case_lifecycle_via_api(client):
     detail = client.get("/api/cases/case_api_1").json()
     assert detail["integrity"]["ok"] is True
     assert detail["warehouse"] is None  # not processed yet
+
+    assert client.get("/api/cases/case_api_1/classification").status_code == 409
 
     job = client.post("/api/cases/case_api_1/run").json()
     for _ in range(120):
@@ -91,6 +96,19 @@ def test_case_lifecycle_via_api(client):
 
     arts = client.get("/api/cases/case_api_1/artifacts?limit=10").json()
     assert "rows" in arts
+    # per-voter classification breakdown must be present on every row, not
+    # just category/confidence - this is what the UI's classification panel
+    # and artifact-browser "why" view read.
+    row = arts["rows"][0]
+    for col in ("artifact_id", "regex_vote", "keyword_vote", "ner_vote", "model_vote", "evidence_spans"):
+        assert col in row
+
+    clf = client.get("/api/cases/case_api_1/classification").json()
+    assert clf["by_category"]
+    for c in clf["by_category"]:
+        for col in ("category", "n", "mean_conf", "regex_agree", "keyword_agree", "ner_agree", "model_agree"):
+            assert col in c
+        assert c["category"] in clf["examples"]
 
     bad = client.post("/api/cases/case_api_1/query", json={"sql": "DROP TABLE artifacts"}).json()
     assert bad["ok"] is False

@@ -5,7 +5,6 @@ description = "Digital Detective investigator application: agent, parsers, ETL, 
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "dd-core",
-    "dd-collector",
     "duckdb>=1.1",
     "pydantic-ai-slim[openai]>=1.0",
     "fastapi>=0.115",

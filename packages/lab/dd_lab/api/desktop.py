@@ -26,6 +26,26 @@ def launch(app, host: str, port: int) -> None:
             time.sleep(0.1)
 
     window = webview.create_window("Digital Detective", base, width=1200, height=820)
+    window.expose(_make_pick_file(window))
     webview.start()
     server.should_exit = True
-    _ = window
+
+
+def _make_pick_file(window):
+    """Expose a native "open file" dialog to the UI as `pywebview.api.pick_file()`
+    — lets the investigator browse to a disk image / memory dump instead of
+    typing a path, without ever copying the (potentially huge) file: the
+    dialog just returns the real local path, which the existing image-import
+    flow already reads directly."""
+
+    def pick_file(file_types: list[str] | None = None) -> str | None:
+        import webview
+
+        types = tuple(file_types) if file_types else (
+            "Disk / memory images (*.raw;*.dd;*.img;*.001;*.e01;*.E01;*.vmdk;*.vhd;*.vhdx)",
+            "All files (*.*)",
+        )
+        result = window.create_file_dialog(webview.FileDialog.OPEN, file_types=types)
+        return result[0] if result else None
+
+    return pick_file
