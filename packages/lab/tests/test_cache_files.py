@@ -73,12 +73,30 @@ def test_list_cache_files_has_urls_and_sizes(cache_ctx):
 
 def test_read_cache_entry_returns_real_decoded_bytes(cache_ctx):
     entries = list(list_cache_files(cache_ctx))
-    openable = next((e for e in entries if e.openable and e.content_type), None)
-    assert openable, "no openable cache entry found to test against"
+    # size_bytes > 0, not just openable+content_type - an openable entry can
+    # legitimately be empty (see the dedicated test below), which would make
+    # this test's "real decoded bytes" assertion fail on a technicality.
+    openable = next((e for e in entries if e.openable and e.content_type and (e.size_bytes or 0) > 0), None)
+    assert openable, "no non-empty openable cache entry found to test against"
     body, content_type, filename_hint = read_cache_entry(cache_ctx, openable.cache_dir, openable.key)
     assert body
     assert content_type
     assert filename_hint
+
+
+def test_read_cache_entry_empty_body_is_a_real_empty_response_not_missing(cache_ctx):
+    """Found on real evidence: a cache entry can have a genuinely empty body
+    (e.g. a 304/204) - `bodies = [b""]` from ccl_chromium_reader. Using
+    truthiness (`if b`) to pick the body treats b"" the same as "no body at
+    all" and incorrectly 404s an entry the listing itself marked openable.
+    `is not None` is the right check - this locks that in."""
+    entries = list(list_cache_files(cache_ctx))
+    empty = next((e for e in entries if e.openable and (e.size_bytes or 0) == 0), None)
+    if empty is None:
+        pytest.skip("no empty-body openable cache entry found in this profile right now")
+    body, _content_type, _hint = read_cache_entry(cache_ctx, empty.cache_dir, empty.key)
+    assert body == b""
+    assert body is not None
 
 
 def test_read_cache_entry_unknown_key_is_none_not_a_crash(cache_ctx):

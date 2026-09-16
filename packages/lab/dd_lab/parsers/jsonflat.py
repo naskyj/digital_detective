@@ -10,11 +10,22 @@ scalar leaf, with a dotted/bracketed path as the key.
     ->  user.name          = "bob"
         user.friends[0]     = "x"
         user.friends[1]     = "y"
+
+Array indices always use unquoted brackets (`[0]`); object keys that aren't
+safe bare identifiers (containing brackets, dots, spaces, ...) use quoted
+brackets instead (`["[python]"]`), never a dot. VS Code's own settings really
+do use `"[python]"` as a literal object key (language-scoped defaults); a
+dict key can, in principle, be anything, including a string that reads like
+an array index (`"[0]"`). Without this distinction those collide with real
+array indices and can't be told apart after flattening — this is what makes
+`key["oddly named"]` vs `key[0]` unambiguous everywhere, not just at the
+outermost segment.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 
 from dd_core.enums import ValueType
@@ -24,6 +35,17 @@ from dd_core.enums import ValueType
 # past the cap the remainder of the document is emitted as a single JSON leaf.
 MAX_DEPTH = 16
 MAX_LEAVES = 2_000
+
+_SAFE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _key_segment(k: str, *, is_first: bool) -> str:
+    """One object-key path segment, safe to concatenate directly onto the
+    path built so far (no extra separator needed by the caller)."""
+    if _SAFE_KEY.match(k):
+        return k if is_first else f".{k}"
+    escaped = k.replace("\\", "\\\\").replace('"', '\\"')
+    return f'["{escaped}"]'
 
 
 def _classify_scalar(v: object) -> tuple[str, ValueType]:
@@ -61,7 +83,7 @@ def _walk(
             yield path or "$", "{}", ValueType.JSON
             return
         for k, v in obj.items():
-            child = f"{path}.{k}" if path else str(k)
+            child = f"{path}{_key_segment(str(k), is_first=not path)}"
             yield from _walk(v, child, depth + 1, budget)
     elif isinstance(obj, (list, tuple)):
         if not obj:

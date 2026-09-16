@@ -353,7 +353,11 @@ def read_cache_entry(ctx: ParseContext, cache_dir_rel: str, key: str) -> tuple[b
         ct = ((meta.get_attribute("content-type") or [""])[0] if meta else "") or "application/octet-stream"
         enc = (meta.get_attribute("content-encoding") or [""])[0] if meta else ""
         bodies = cache.get_cachefile(key)
-        body = next((b for b in (bodies or []) if b), None)
+        # `if b` (truthy) would treat a genuinely empty body (b"" - a real,
+        # valid 0-byte response, e.g. a 304/204) as "no body" and 404 an
+        # entry the listing correctly marked openable. `is not None` is the
+        # right check - an empty body is still a body.
+        body = next((b for b in (bodies or []) if b is not None), None)
         if body is None:
             return None, ct, "cache_entry"
         if enc:

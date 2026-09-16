@@ -15,8 +15,13 @@ from collections.abc import Iterator
 
 from dd_core.enums import SourceType
 from dd_core.schema import NormalizedArtifact
-from dd_lab.parsers.base import INDEXEDDB, ParseContext, emit_value, make_artifact, open_leveldb_resilient
-from dd_lab.parsers.jsonflat import iter_leaves
+from dd_lab.parsers.base import (
+    INDEXEDDB,
+    ParseContext,
+    emit_parsed_value,
+    emit_value,
+    open_leveldb_resilient,
+)
 
 log = logging.getLogger("dd_lab.parsers.indexeddb")
 
@@ -68,15 +73,10 @@ def _emit_database(ctx, widb, db_id, source_file) -> Iterator[NormalizedArtifact
             locator = f"{db.name}/{store_name}/{_key_repr(rec)}"
             value = getattr(rec, "value", None)
             if isinstance(value, (dict, list)):
-                for leaf_path, leaf_value, leaf_type in iter_leaves(value):
-                    key = f"idb.{db.name}.{store_name}"
-                    if leaf_path and leaf_path != "$":
-                        key = f"{key}.{leaf_path}"
-                    yield make_artifact(
-                        ctx, source_type=SourceType.INDEXEDDB, source_file=source_file,
-                        locator=f"{locator}#{leaf_path}", key=key,
-                        value=leaf_value, value_type=leaf_type,
-                    )
+                yield from emit_parsed_value(
+                    ctx, source_type=SourceType.INDEXEDDB, source_file=source_file,
+                    locator=locator, key=f"idb.{db.name}.{store_name}", parsed=value,
+                )
             elif value is not None:
                 yield from emit_value(
                     ctx, source_type=SourceType.INDEXEDDB, source_file=source_file,

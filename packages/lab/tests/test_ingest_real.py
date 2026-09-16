@@ -104,5 +104,12 @@ def test_full_cache_ingest(tmp_path):
     try:
         cache_rows = wh.query("SELECT count(*) AS n FROM artifacts WHERE source_type = 'cache'")
         assert cache_rows[0]["n"] > 0
+        # Real evidence found this exact shape broken: a "." immediately
+        # before a "[" - whether from a genuine array index (the original
+        # bug) or a literal object key that merely looks like one (VS
+        # Code's own "[python]"/"[java]" settings keys - the more subtle
+        # follow-up bug, found on this same real cache).
+        bad = wh.query("SELECT key FROM artifacts WHERE source_type = 'cache' AND key LIKE '%.[%'")
+        assert bad == [], f"dot-before-bracket key(s) still present: {bad[:5]}"
     finally:
         wh.close()

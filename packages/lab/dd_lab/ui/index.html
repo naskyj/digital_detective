@@ -446,13 +446,19 @@ async function caseExplorer(id, w, evidenceApps){
     ? state.explorerSelection : {type:'overview'};
   state.explorerSelection = {...sel, caseId:id};
 
-  function navRow(label,count,active,onclick,indent){
+  function navRow(label,count,active,onclick,indent,icon){
     return el('div',{onclick,
       style:`cursor:pointer;padding:6px ${8+indent*14}px;border-radius:6px;font-size:12.5px;`+
-        `display:flex;justify-content:space-between;gap:8px;margin:1px 0;`+
+        `display:flex;align-items:center;gap:6px;margin:1px 0;`+
         (active?`background:var(--accent2);color:#fff`:`color:var(--fg)`)},
-      el('span',{style:'overflow:hidden;text-overflow:ellipsis;white-space:nowrap'},label),
+      icon?el('span',{class:'nav-chevron',style:'width:12px;flex-shrink:0;text-align:center;opacity:.7'},icon):'',
+      el('span',{style:'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'},label),
       count!=null?el('span',{style:(active?'':'color:var(--muted)')+';flex-shrink:0'},count.toLocaleString()):'');
+  }
+  const expandedApps = new Set();  // collapsed by default; persists across renderNav() calls
+  function toggleExpand(app){
+    if(expandedApps.has(app)) expandedApps.delete(app); else expandedApps.add(app);
+    renderNav();
   }
 
   async function select(next){
@@ -479,9 +485,16 @@ async function caseExplorer(id, w, evidenceApps){
     nav.append(navRow('Database files', null, s.type==='dbfiles', ()=>select({type:'dbfiles'}), 0));
     nav.append(el('div',{style:'height:1px;background:var(--line);margin:10px 0'}));
     tree.apps.forEach(a=>{
-      nav.append(navRow(a.app, a.total, s.type==='source'&&s.app===a.app&&!s.source_type,
-        ()=>select({type:'source', app:a.app, source_type:null}), 0));
-      a.sources.forEach(src=>{
+      // Collapsed by default (a dropdown, not an always-expanded dump);
+      // stays open once toggled, and auto-opens for the app currently
+      // being browsed so navigating into one of its sources doesn't hide it.
+      const isOpen = expandedApps.has(a.app) || (s.type==='source' && s.app===a.app);
+      const row = navRow(a.app, a.total, s.type==='source'&&s.app===a.app&&!s.source_type,
+        ()=>select({type:'source', app:a.app, source_type:null}), 0, isOpen?'▾':'▸');
+      const chevron = row.querySelector('.nav-chevron');
+      chevron.onclick = (e)=>{ e.stopPropagation(); toggleExpand(a.app); };
+      nav.append(row);
+      if(isOpen) a.sources.forEach(src=>{
         const active = s.type==='source' && s.app===a.app && s.source_type===src.source_type;
         nav.append(navRow(SRC_LABELS[src.source_type]||src.source_type, src.n, active,
           ()=>select({type:'source', app:a.app, source_type:src.source_type}), 1));
@@ -616,13 +629,16 @@ function browser(id,cats,fixed){
     if(!fixed.source_type) cols.push('Source');
     if(showUrl) cols.push('URL');
     cols.push('Time','Key','Value');
-    const t=el('table',{},el('thead',{},el('tr',{},...cols.map(h=>el('th',{},h)))));
+    const confTitle='Classification confidence (0–1) — how sure the rule/keyword/NER/model '+
+      'ensemble was that this row belongs to its category. Higher is more certain.';
+    const t=el('table',{},el('thead',{},el('tr',{},
+      ...cols.map(h=>el('th',{title:h==='Conf'?confTitle:''},h)))));
     const tb=el('tbody',{});
     d.rows.forEach(r=>{
       const cells=[el('td',{},el('span',{class:'pill cat'},r.category||'')),
-        el('td',{},r.confidence!=null?r.confidence.toFixed(2):'')];
+        el('td',{title:confTitle},r.confidence!=null?r.confidence.toFixed(2):'')];
       if(!fixed.app) cells.push(el('td',{},r.app));
-      if(!fixed.source_type) cells.push(el('td',{},r.source_type));
+      if(!fixed.source_type) cells.push(el('td',{},SRC_LABELS[r.source_type]||r.source_type));
       if(showUrl) cells.push(el('td',{class:'mono',title:r.url||'',
         style:'max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'},r.url||''));
       cells.push(

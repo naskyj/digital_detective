@@ -263,13 +263,28 @@ def test_cache_files_route_with_real_cache_content(tmp_path, monkeypatch):
         assert col in row
     assert row["physical_file"]
 
-    openable = next(r for r in d["rows"] if r["openable"])
+    # "openable" only promises a body location was resolvable, not that the
+    # body is non-empty - a real 0-byte response (e.g. a 304/204) is
+    # legitimately openable and legitimately empty. Assert the real contract
+    # (200, never a crash) for whichever the real cache happens to hand us,
+    # and separately require at least one genuinely non-empty entry decodes
+    # to real bytes - both facts matter, for different reasons.
+    openables = [r for r in d["rows"] if r["openable"]]
+    assert openables
+    for r in openables:
+        body = client.get(
+            "/api/cases/case_cache_api/cache-files/open",
+            params={"app": "app", "dir": r["cache_dir"], "key": r["key"]},
+        )
+        assert body.status_code == 200, (r["key"], body.status_code)
+    non_empty = [r for r in openables if (r.get("size_bytes") or 0) > 0]
+    assert non_empty, "no non-empty cache entry found to verify real content decoding"
     body = client.get(
         "/api/cases/case_cache_api/cache-files/open",
-        params={"app": "app", "dir": openable["cache_dir"], "key": openable["key"]},
+        params={"app": "app", "dir": non_empty[0]["cache_dir"], "key": non_empty[0]["key"]},
     )
-    assert body.status_code == 200
     assert len(body.content) > 0
+    openable = openables[0]
 
     q = client.get(
         "/api/cases/case_cache_api/cache-files", params={"app": "app", "q": openable["url"][:20]}

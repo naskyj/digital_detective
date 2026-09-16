@@ -38,7 +38,8 @@ log = logging.getLogger("dd_lab.parsers")
 __all__ = [
     "CACHE", "CODE_CACHE", "COOKIES", "COOKIES_LEGACY", "INDEXEDDB", "LOCAL_STATE",
     "LOCAL_STORAGE", "MEMORY", "PREFERENCES", "SERVICE_WORKER_CACHE", "SESSION_STORAGE",
-    "ParseContext", "emit_value", "make_artifact", "open_leveldb_resilient",
+    "ParseContext", "emit_parsed_value", "emit_value", "join_leaf_key", "make_artifact",
+    "open_leveldb_resilient",
 ]
 
 # Values longer than this are truncated in the `value` column (full hash is kept).
@@ -99,6 +100,55 @@ def make_artifact(
     )
 
 
+def join_leaf_key(key: str, leaf_path: str) -> str:
+    """`key` + one leaf path from `jsonflat.iter_leaves`, joined correctly.
+
+    iter_leaves() already formats each segment to be self-sufficient - an
+    array index carries its own bracket ("[0]"), a non-identifier-safe
+    object key carries its own quoted bracket (`["odd key"]`) - so a leaf
+    path only ever needs a "." in front of it when it does NOT already start
+    with "[". The one place every parser that flattens JSON must agree on
+    this: two independent reimplementations of this exact join (here and,
+    formerly, a duplicate inline in indexeddb.py) is how "key.[0]" bugs
+    happen and then only get half-fixed.
+    """
+    if not leaf_path or leaf_path == "$":
+        return key
+    if leaf_path.startswith("["):
+        return f"{key}{leaf_path}"
+    return f"{key}.{leaf_path}"
+
+
+def emit_parsed_value(
+    ctx: ParseContext,
+    *,
+    source_type: SourceType,
+    source_file: str,
+    locator: str,
+    key: str,
+    parsed: object,
+    record_ts: datetime | None = None,
+) -> Iterator[NormalizedArtifact]:
+    """Like `emit_value`, but for a value that's already a parsed Python
+    object (dict/list) rather than a raw JSON string - e.g. IndexedDB
+    records, which ccl_chromium_reader already hands back deserialized."""
+    produced = False
+    for leaf_path, leaf_value, leaf_type in iter_leaves(parsed):
+        produced = True
+        yield make_artifact(
+            ctx, source_type=source_type, source_file=source_file,
+            locator=f"{locator}#{leaf_path}", key=join_leaf_key(key, leaf_path),
+            value=leaf_value, value_type=leaf_type, record_ts=record_ts,
+        )
+    if not produced:
+        import json as _json
+
+        yield make_artifact(
+            ctx, source_type=source_type, source_file=source_file, locator=locator,
+            key=key, value=_json.dumps(parsed), value_type=ValueType.JSON, record_ts=record_ts,
+        )
+
+
 def emit_value(
     ctx: ParseContext,
     *,
@@ -124,18 +174,9 @@ def emit_value(
     produced = False
     for leaf_path, leaf_value, leaf_type in iter_leaves(parsed):
         produced = True
-        # iter_leaves() already prefixes an array index with its own bracket
-        # ("[0]", "friends[1]", ...) - joining with "." unconditionally turned
-        # a top-level array's leaves into "key.[0]" instead of "key[0]".
-        if not leaf_path or leaf_path == "$":
-            full_key = key
-        elif leaf_path.startswith("["):
-            full_key = f"{key}{leaf_path}"
-        else:
-            full_key = f"{key}.{leaf_path}"
         yield make_artifact(
             ctx, source_type=source_type, source_file=source_file,
-            locator=f"{locator}#{leaf_path}", key=full_key,
+            locator=f"{locator}#{leaf_path}", key=join_leaf_key(key, leaf_path),
             value=leaf_value, value_type=leaf_type, record_ts=record_ts,
         )
     if not produced:
