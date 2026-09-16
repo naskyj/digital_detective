@@ -111,6 +111,16 @@ def _first(gen) -> str | None:
         return None
 
 
+def url_from_cache_key(key: str) -> str:
+    """A Chromium cache key is typically `<request-context>/<sub-key>/<url>`
+    (e.g. "1/0/https://discord.com/api/..."); this pulls the URL back out.
+    Falls back to the raw key when it doesn't look like that shape - some
+    Cache API keys are bare URLs already. Shared by every place that shows a
+    cache entry's URL (the parser, the cache-file inventory, and the
+    artifact-browser API's derived `url` column for cache rows)."""
+    return key.split("/", 2)[-1] if key.count("/") >= 2 else key
+
+
 def _location(cache, key: str, stream: str):
     """The physical on-disk file (+ byte offset) backing one cache entry's
     metadata or body stream — the same fact a tool like ChromeCacheView shows
@@ -140,7 +150,7 @@ def _emit_entry(ctx: ParseContext, cache, key: str, source_file: str) -> Iterato
     meta_locator = f"{key} @{meta_loc.file_name}:{meta_loc.offset}" if meta_loc else key
     body_locator = f"{key} @{body_loc.file_name}:{body_loc.offset}" if body_loc else key
 
-    url = key.split("/", 2)[-1] if key.count("/") >= 2 else key
+    url = url_from_cache_key(key)
     request_time: datetime | None = getattr(meta, "request_time", None) if meta else None
 
     yield make_artifact(
@@ -248,7 +258,7 @@ def _describe_entry(ctx: ParseContext, cache, key: str, cache_dir_rel: str, kind
     except Exception:
         meta = None
     body_loc = _location(cache, key, "body")
-    url = key.split("/", 2)[-1] if key.count("/") >= 2 else key
+    url = url_from_cache_key(key)
 
     def attr(name: str) -> str | None:
         return (meta.get_attribute(name) or [None])[0] if meta else None
@@ -348,7 +358,7 @@ def read_cache_entry(ctx: ParseContext, cache_dir_rel: str, key: str) -> tuple[b
             return None, ct, "cache_entry"
         if enc:
             body = _decompress(body, enc)
-        url = key.split("/", 2)[-1] if key.count("/") >= 2 else key
+        url = url_from_cache_key(key)
         filename_hint = (url.rsplit("/", 1)[-1] or "cache_entry").split("?", 1)[0][:120] or "cache_entry"
         return body, ct, filename_hint
     except Exception:

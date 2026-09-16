@@ -124,7 +124,15 @@ def emit_value(
     produced = False
     for leaf_path, leaf_value, leaf_type in iter_leaves(parsed):
         produced = True
-        full_key = f"{key}.{leaf_path}" if leaf_path and leaf_path != "$" else key
+        # iter_leaves() already prefixes an array index with its own bracket
+        # ("[0]", "friends[1]", ...) - joining with "." unconditionally turned
+        # a top-level array's leaves into "key.[0]" instead of "key[0]".
+        if not leaf_path or leaf_path == "$":
+            full_key = key
+        elif leaf_path.startswith("["):
+            full_key = f"{key}{leaf_path}"
+        else:
+            full_key = f"{key}.{leaf_path}"
         yield make_artifact(
             ctx, source_type=source_type, source_file=source_file,
             locator=f"{locator}#{leaf_path}", key=full_key,

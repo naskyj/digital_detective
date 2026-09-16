@@ -345,6 +345,14 @@ def case_artifact_tree(case_id: str) -> dict:
     return {"apps": [{"app": a, "total": totals[a], "sources": apps[a]} for a in ordered]}
 
 
+def _derive_cache_url(source_locator: str) -> str:
+    from dd_lab.parsers.cache import url_from_cache_key
+
+    # source_locator for a cache row is "<raw cache key> @<file>:<offset>[::body[#leaf]]"
+    # (see cache.py::_emit_entry) - the key is always the part before " @".
+    return url_from_cache_key(source_locator.split(" @", 1)[0])
+
+
 @app.get("/api/cases/{case_id}/artifacts")
 def case_artifacts(
     case_id: str,
@@ -353,6 +361,7 @@ def case_artifacts(
     source_type: str | None = None,
     q: str | None = None,
     limit: int = 200,
+    offset: int = 0,
 ) -> dict:
     deps = InvestigationDeps(cases_root=Path(_settings.cases_root), case_id=case_id)
     if not deps.layout.warehouse.is_file():
@@ -373,10 +382,10 @@ def case_artifacts(
         total = wh.query(f"SELECT count(*) AS n FROM artifacts {clause}", list(params))[0]["n"]
         rows = wh.query(
             f"SELECT app, source_type, category, confidence, key, substr(value,1,300) AS value, "
-            f"record_ts, source_file, artifact_id, regex_vote, keyword_vote, ner_vote, model_vote, "
-            f"evidence_spans FROM artifacts {clause} "
-            f"ORDER BY (category != 'GENERAL') DESC, confidence DESC NULLS LAST, key "
-            f"LIMIT {int(limit)}",
+            f"record_ts, source_file, source_locator, artifact_id, regex_vote, keyword_vote, "
+            f"ner_vote, model_vote, evidence_spans FROM artifacts {clause} "
+            f"ORDER BY (category != 'GENERAL') DESC, confidence DESC NULLS LAST, key, artifact_id "
+            f"LIMIT {int(limit)} OFFSET {int(offset)}",
             list(params),
         )
         facets = {
@@ -387,6 +396,12 @@ def case_artifacts(
         }
     finally:
         wh.close()
+    # A cache row's URL isn't its own column - it's packed into source_locator
+    # (see _derive_cache_url) - surfaced here so the UI can show it without
+    # needing to know that encoding itself.
+    for r in rows:
+        r["url"] = _derive_cache_url(r["source_locator"]) if r["source_type"] == "cache" else None
+        del r["source_locator"]
     return {"rows": rows, "total": total, "shown": len(rows), "facets": facets}
 
 
@@ -489,6 +504,153 @@ def case_cache_file_open(
         content=body, media_type=content_type,
         headers={"Content-Disposition": f'inline; filename="{filename_hint}"'},
     )
+
+
+@app.get("/api/cases/{case_id}/artifacts/export.csv")
+def case_artifacts_export(
+    case_id: str,
+    category: str | None = None,
+    app: str | None = None,
+    source_type: str | None = None,
+    q: str | None = None,
+) -> Response:
+    """A full CSV export of the currently filtered artifact view - unlike
+    /artifacts (capped for on-screen paging), this exports every matching
+    row up to a hard safety cap, with the untruncated value."""
+    deps = InvestigationDeps(cases_root=Path(_settings.cases_root), case_id=case_id)
+    if not deps.layout.warehouse.is_file():
+        raise HTTPException(409, "case not processed yet")
+    where, params = [], []
+    for col, val in (("category", category), ("app", app), ("source_type", source_type)):
+        if val:
+            where.append(f"{col} = ?")
+            params.append(val)
+    if q:
+        where.append("(key ILIKE ? OR value ILIKE ?)")
+        params += [f"%{q}%", f"%{q}%"]
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    from dd_lab.etl.warehouse import Warehouse
+
+    fields = ["app", "source_type", "category", "confidence", "key", "value",
+              "record_ts", "source_file", "artifact_id"]
+    wh = Warehouse(deps.layout.warehouse)
+    try:
+        rows = wh.query(
+            f"SELECT {', '.join(fields)} FROM artifacts {clause} "
+            f"ORDER BY (category != 'GENERAL') DESC, confidence DESC NULLS LAST, key, artifact_id "
+            f"LIMIT 200000",
+            list(params),
+        )
+    finally:
+        wh.close()
+    import csv
+    import io
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fields)
+    writer.writeheader()
+    writer.writerows(rows)
+    return Response(
+        content=buf.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{case_id}_artifacts.csv"'},
+    )
+
+
+@app.get("/api/cases/{case_id}/localstorage-files")
+def case_localstorage_files(case_id: str, app_name: str = Query(..., alias="app")) -> dict:
+    """Every physical .ldb/.log file in this app's Local Storage store, each
+    with a record count read directly from that one file - the same
+    ChromeCacheView-style traceability the Cache files panel gives, adapted
+    to how LevelDB actually stores things (a key isn't pinned to one file;
+    compaction moves it between .ldb files over time, so this lists files,
+    not keys)."""
+    layout = _layout(case_id)
+    if not layout.manifest.is_file():
+        raise HTTPException(404, "case not found")
+    from dd_lab.parsers.base import LOCAL_STORAGE, ParseContext
+    from dd_lab.parsers.leveldb_browse import list_leveldb_files
+
+    ctx = ParseContext(case_id=case_id, app=app_name, evidence_root=layout.evidence)
+    files = list_leveldb_files(ctx.path(LOCAL_STORAGE))
+    return {"files": [f.model_dump(mode="json") for f in files]}
+
+
+@app.get("/api/cases/{case_id}/localstorage-files/open")
+def case_localstorage_file_open(
+    case_id: str,
+    app_name: str = Query(..., alias="app"),
+    file: str = Query(...),
+    limit: int = 200,
+    offset: int = 0,
+) -> dict:
+    """One physical Local Storage file's raw records, read directly from
+    that file - not the merged, cross-file logical view the normal parser
+    produces. `file` is checked against this app's real store files first."""
+    layout = _layout(case_id)
+    if not layout.manifest.is_file():
+        raise HTTPException(404, "case not found")
+    from dd_lab.parsers.base import LOCAL_STORAGE, ParseContext
+    from dd_lab.parsers.leveldb_browse import list_leveldb_files, read_leveldb_file
+
+    ctx = ParseContext(case_id=case_id, app=app_name, evidence_root=layout.evidence)
+    store_dir = ctx.path(LOCAL_STORAGE)
+    if file not in {f.filename for f in list_leveldb_files(store_dir)}:
+        raise HTTPException(404, "file not found in this app's Local Storage store")
+    records, total, truncated = read_leveldb_file(store_dir, file, limit=limit, offset=offset)
+    return {
+        "records": [r.model_dump(mode="json") for r in records],
+        "total": total, "shown": len(records), "truncated": truncated,
+    }
+
+
+@app.get("/api/cases/{case_id}/db-files")
+def case_db_files(case_id: str, app_name: str = Query(..., alias="app")) -> dict:
+    """Every SQLite-backed evidence file for this app (currently: Cookies),
+    each with its table list and row counts - raw database browsing,
+    independent of the named parser that reads Cookies for a specific
+    purpose."""
+    layout = _layout(case_id)
+    if not layout.manifest.is_file():
+        raise HTTPException(404, "case not found")
+    from dd_lab.parsers.base import COOKIES, COOKIES_LEGACY, ParseContext
+    from dd_lab.parsers.sqlite_browse import list_sqlite_tables
+
+    ctx = ParseContext(case_id=case_id, app=app_name, evidence_root=layout.evidence)
+    files = []
+    for rel in (COOKIES, COOKIES_LEGACY):
+        entry = list_sqlite_tables(ctx.path(rel))
+        if entry:
+            files.append({**entry.model_dump(mode="json"), "path": rel})
+    return {"files": files}
+
+
+@app.get("/api/cases/{case_id}/db-files/open")
+def case_db_file_open(
+    case_id: str,
+    app_name: str = Query(..., alias="app"),
+    path: str = Query(...),
+    table: str = Query(...),
+    limit: int = 200,
+    offset: int = 0,
+) -> dict:
+    """One table's raw rows from a SQLite-backed evidence file. `path` is
+    checked against the known database-file locations (never an arbitrary
+    path); `table` is checked against the database's own table list inside
+    sqlite_browse.read_sqlite_table before being used in SQL."""
+    layout = _layout(case_id)
+    if not layout.manifest.is_file():
+        raise HTTPException(404, "case not found")
+    from dd_lab.parsers.base import COOKIES, COOKIES_LEGACY, ParseContext
+    from dd_lab.parsers.sqlite_browse import read_sqlite_table
+
+    if path not in (COOKIES, COOKIES_LEGACY):
+        raise HTTPException(404, "not a recognised database file")
+    ctx = ParseContext(case_id=case_id, app=app_name, evidence_root=layout.evidence)
+    db_path = ctx.path(path)
+    if not db_path.is_file():
+        raise HTTPException(404, "database file not found for this app")
+    columns, rows, total = read_sqlite_table(db_path, table, limit=limit, offset=offset)
+    return {"columns": columns, "rows": rows, "total": total, "shown": len(rows)}
 
 
 @app.post("/api/cases/{case_id}/query")

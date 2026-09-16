@@ -362,11 +362,15 @@ async function vCase(m){
     !iv.ok?el('div',{class:'scroll',style:'margin-top:8px'},
       tbl(iv.issues,['kind','path','expected','actual'])):''));
 
-  // Cache files reads straight off the evidence directory, so it works
+  // These three read straight off the evidence directory, so they work
   // whether or not "Run analysis" has happened yet. Once the case is
-  // processed it moves into the explorer's left nav below (so it isn't
-  // duplicated); until then it's shown here on its own.
-  if(!processed && d.evidence.apps.length) m.append(cacheFilesPanel(id, d.evidence.apps));
+  // processed they move into the explorer's left nav below (so they aren't
+  // duplicated); until then they're shown here on their own.
+  if(!processed && d.evidence.apps.length){
+    m.append(cacheFilesPanel(id, d.evidence.apps));
+    m.append(localStorageFilesPanel(id, d.evidence.apps));
+    m.append(databaseFilesPanel(id, d.evidence.apps));
+  }
 
   // --- the primary action panel ------------------------------------------
   const actions=el('div',{class:'panel'});
@@ -458,6 +462,8 @@ async function caseExplorer(id, w, evidenceApps){
   }
   async function paneFor(s){
     if(s.type==='cache') return cacheFilesPanel(id, evidenceApps);
+    if(s.type==='lsfiles') return localStorageFilesPanel(id, evidenceApps);
+    if(s.type==='dbfiles') return databaseFilesPanel(id, evidenceApps);
     if(s.type==='source') return browser(id, w.by_category.map(c=>c.category).filter(Boolean),
       {app:s.app, source_type:s.source_type});
     return overviewPanel(id, w);
@@ -469,6 +475,8 @@ async function caseExplorer(id, w, evidenceApps){
     nav.append(el('div',{style:'font-weight:700;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:2px 0 8px'},'Explore'));
     nav.append(navRow('Overview', null, s.type==='overview', ()=>select({type:'overview'}), 0));
     nav.append(navRow('Cache files', null, s.type==='cache', ()=>select({type:'cache'}), 0));
+    nav.append(navRow('Local Storage files', null, s.type==='lsfiles', ()=>select({type:'lsfiles'}), 0));
+    nav.append(navRow('Database files', null, s.type==='dbfiles', ()=>select({type:'dbfiles'}), 0));
     nav.append(el('div',{style:'height:1px;background:var(--line);margin:10px 0'}));
     tree.apps.forEach(a=>{
       nav.append(navRow(a.app, a.total, s.type==='source'&&s.app===a.app&&!s.source_type,
@@ -567,6 +575,7 @@ function browser(id,cats,fixed){
   // from dropdowns here. With nothing fixed (unused currently, kept for
   // re-use) it falls back to picker dropdowns for both.
   fixed = fixed || {};
+  const showUrl = fixed.source_type === 'cache';
   const wrap=el('div',{class:'panel'});
   const cat=el('select',{}, el('option',{value:''},'all categories'), ...cats.map(c=>el('option',{value:c},c)));
   const appSel = fixed.app ? null : el('select',{}, el('option',{value:''},'all apps'));
@@ -574,26 +583,39 @@ function browser(id,cats,fixed){
   const q=el('input',{placeholder:'search key or value',style:'flex:1;min-width:180px'});
   const count=el('div',{class:'hint'});
   const out=el('div',{class:'scroll',style:'margin-top:10px'});
-  let facetsLoaded=false;
-  async function load(){
-    out.innerHTML='<div class="muted" style="padding:10px">loading…</div>';
+  const prevBtn=el('button',{class:'sec'},'← Prev');
+  const nextBtn=el('button',{class:'sec'},'Next →');
+  const dlBtn=el('a',{class:'ghost',style:'text-decoration:none;padding:8px 8px;cursor:pointer'},'⬇ Download CSV');
+  let facetsLoaded=false, offset=0; const limit=100;
+  function currentParams(){
     const p=new URLSearchParams();
     if(cat.value)p.set('category',cat.value);
     if(fixed.app) p.set('app',fixed.app); else if(appSel.value) p.set('app',appSel.value);
     if(fixed.source_type) p.set('source_type',fixed.source_type); else if(srcSel.value) p.set('source_type',srcSel.value);
     if(q.value)p.set('q',q.value);
-    p.set('limit','300');
+    return p;
+  }
+  async function load(){
+    out.innerHTML='<div class="muted" style="padding:10px">loading…</div>';
+    const p=currentParams();
+    p.set('limit',String(limit)); p.set('offset',String(offset));
+    dlBtn.href='/api'+'/cases/'+id+'/artifacts/export.csv?'+currentParams();
     const d=await api('/cases/'+id+'/artifacts?'+p);
     if(!facetsLoaded && d.facets){
       if(appSel) d.facets.apps.forEach(a=>appSel.append(el('option',{value:a},a)));
       if(srcSel) d.facets.source_types.forEach(s=>srcSel.append(el('option',{value:s},s)));
       facetsLoaded=true;
     }
-    count.textContent = d.total>d.shown
-      ? `showing ${d.shown} of ${d.total.toLocaleString()} matching — narrow the filters to see more`
-      : `${d.total.toLocaleString()} matching`;
-    const cols = fixed.app && fixed.source_type ? ['Category','Conf','Key','Value']
-      : fixed.app ? ['Category','Conf','Source','Key','Value'] : ['Category','Conf','App','Source','Key','Value'];
+    count.textContent = d.total
+      ? `showing ${offset+1}–${offset+d.shown} of ${d.total.toLocaleString()} matching`
+      : 'no matching artifacts';
+    prevBtn.disabled = offset<=0;
+    nextBtn.disabled = offset+d.shown>=d.total;
+    const cols=['Category','Conf'];
+    if(!fixed.app) cols.push('App');
+    if(!fixed.source_type) cols.push('Source');
+    if(showUrl) cols.push('URL');
+    cols.push('Time','Key','Value');
     const t=el('table',{},el('thead',{},el('tr',{},...cols.map(h=>el('th',{},h)))));
     const tb=el('tbody',{});
     d.rows.forEach(r=>{
@@ -601,20 +623,31 @@ function browser(id,cats,fixed){
         el('td',{},r.confidence!=null?r.confidence.toFixed(2):'')];
       if(!fixed.app) cells.push(el('td',{},r.app));
       if(!fixed.source_type) cells.push(el('td',{},r.source_type));
-      cells.push(el('td',{class:'mono'},r.key), el('td',{},r.value));
-      tb.append(el('tr',{},...cells));
+      if(showUrl) cells.push(el('td',{class:'mono',title:r.url||'',
+        style:'max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'},r.url||''));
+      cells.push(
+        el('td',{title:r.record_ts||''},r.record_ts?ago(r.record_ts):''),
+        el('td',{class:'mono'},r.key), el('td',{},r.value));
+      // the physical evidence file this row came from, on hover - keeps the
+      // table from needing its own column for it
+      tb.append(el('tr',{title:r.source_file?'file: '+r.source_file:''},...cells));
     });
     t.append(tb); out.innerHTML=''; out.append(t);
   }
-  cat.onchange=load;
-  if(appSel) appSel.onchange=load;
-  if(srcSel) srcSel.onchange=load;
-  let tmo; q.oninput=()=>{clearTimeout(tmo);tmo=setTimeout(load,300);};
+  cat.onchange=()=>{offset=0; load();};
+  if(appSel) appSel.onchange=()=>{offset=0; load();};
+  if(srcSel) srcSel.onchange=()=>{offset=0; load();};
+  prevBtn.onclick=()=>{offset=Math.max(0,offset-limit); load();};
+  nextBtn.onclick=()=>{offset+=limit; load();};
+  let tmo; q.oninput=()=>{clearTimeout(tmo);tmo=setTimeout(()=>{offset=0; load();},300);};
   const heading = fixed.app
     ? fixed.source_type ? `${fixed.app} → ${SRC_LABELS[fixed.source_type]||fixed.source_type}` : `${fixed.app} → all sources`
     : 'Artifact browser';
-  wrap.append(el('h2',{style:'margin-top:0'},heading),
-    el('div',{class:'row'},cat, ...(appSel?[appSel]:[]), ...(srcSel?[srcSel]:[]), q), count, out);
+  wrap.append(el('div',{class:'row'},
+      el('h2',{style:'margin:0'},heading), el('span',{style:'flex:1'}), dlBtn),
+    el('div',{class:'row',style:'margin-top:8px'},cat, ...(appSel?[appSel]:[]), ...(srcSel?[srcSel]:[]), q),
+    count, out,
+    el('div',{class:'row',style:'margin-top:8px'}, prevBtn, nextBtn));
   load();
   return wrap;
 }
@@ -710,6 +743,125 @@ async function vCacheEntry(m){
   m.append(el('iframe',{
     src:'/api/cases/'+encodeURIComponent(t.caseId)+'/cache-files/open?'+p,
     style:'width:100%;height:calc(100vh - 110px);border:1px solid var(--line);border-radius:8px;background:#fff'}));
+}
+
+function localStorageFilesPanel(id, apps){
+  // The Local Storage equivalent of cacheFilesPanel - but a LevelDB key
+  // isn't pinned to one physical file the way a cache entry is (compaction
+  // moves it between .ldb files over time), so this lists the physical
+  // store files themselves (name, kind, size, record count) rather than
+  // one row per key. "Open" expands a raw record dump read directly from
+  // that one file - real .ldb/.log parsing, not the merged logical view.
+  const wrap=el('div',{class:'panel'});
+  const appSel=el('select',{}, ...apps.map(a=>el('option',{value:a},a)));
+  const out=el('div',{class:'scroll',style:'margin-top:10px'});
+
+  async function load(){
+    out.innerHTML='<div class="muted" style="padding:10px">loading…</div>';
+    let d;
+    try{ d=await api('/cases/'+id+'/localstorage-files?app='+encodeURIComponent(appSel.value)); }
+    catch(e){ out.innerHTML=''; out.append(el('div',{class:'hint'},'Could not load: '+e.message)); return; }
+    if(!d.files.length){ out.innerHTML=''; out.append(el('div',{class:'hint'},'No Local Storage files found for this app.')); return; }
+    const t=el('table',{},el('thead',{},el('tr',{},
+      ...['Filename','Kind','Size','Records',''].map(h=>el('th',{},h)))));
+    const tb=el('tbody',{});
+    d.files.forEach(f=>{
+      const recBox=el('div',{style:'display:none;padding:8px 0'});
+      let recOffset=0; const recLimit=100;
+      async function loadRecords(){
+        recBox.innerHTML='<div class="muted">loading…</div>';
+        const rp=new URLSearchParams({app:appSel.value, file:f.filename, limit:String(recLimit), offset:String(recOffset)});
+        const rd=await api('/cases/'+id+'/localstorage-files/open?'+rp);
+        recBox.innerHTML='';
+        recBox.append(el('div',{class:'hint'},
+          `showing ${recOffset+1}–${recOffset+rd.shown} of ${rd.total.toLocaleString()} record(s) in ${f.filename}`+
+          (rd.truncated?' — file ended early (a corrupt/partial record was hit)':'')));
+        recBox.append(tbl(rd.records,['key','value','state','seq']));
+        const nav=el('div',{class:'row',style:'margin-top:6px'});
+        const pv=el('button',{class:'ghost',disabled:recOffset<=0,onclick:()=>{recOffset=Math.max(0,recOffset-recLimit);loadRecords();}},'← Prev');
+        const nx=el('button',{class:'ghost',disabled:recOffset+rd.shown>=rd.total,onclick:()=>{recOffset+=recLimit;loadRecords();}},'Next →');
+        nav.append(pv,nx); recBox.append(nav);
+      }
+      const row=el('tr',{style:'cursor:pointer',onclick:()=>{
+        if(recBox.style.display==='none'){ recOffset=0; recBox.style.display='block'; loadRecords(); }
+        else recBox.style.display='none';
+      }},
+        el('td',{class:'mono'},f.filename),
+        el('td',{},f.kind),
+        el('td',{},fmtBytes(f.size_bytes)),
+        el('td',{},f.record_count!=null?f.record_count.toLocaleString()+(f.truncated?' (partial)':''):'—'),
+        el('td',{},'Open'));
+      tb.append(row);
+      const recRow=el('tr',{}); recRow.append(el('td',{colspan:'5'},recBox)); tb.append(recRow);
+    });
+    t.append(tb); out.innerHTML=''; out.append(t);
+  }
+  appSel.onchange=load;
+  wrap.append(el('h2',{style:'margin-top:0'},'Local Storage files'),
+    el('div',{class:'hint',style:'margin-bottom:8px'},
+      'Every physical .ldb/.log file in this app\'s Local Storage store, read directly - '+
+      'raw records from that one file, including deleted/overwritten entries still '+
+      'physically present, not the merged logical view the analysis pipeline uses.'),
+    el('div',{class:'row'}, appSel), out);
+  load();
+  return wrap;
+}
+
+function databaseFilesPanel(id, apps){
+  // Raw SQLite database browsing - currently the one database file the
+  // evidence layout defines (Cookies), listed with its tables and row
+  // counts; "Open" expands a paginated raw row dump for a chosen table.
+  const wrap=el('div',{class:'panel'});
+  const appSel=el('select',{}, ...apps.map(a=>el('option',{value:a},a)));
+  const out=el('div',{class:'scroll',style:'margin-top:10px'});
+
+  async function load(){
+    out.innerHTML='<div class="muted" style="padding:10px">loading…</div>';
+    let d;
+    try{ d=await api('/cases/'+id+'/db-files?app='+encodeURIComponent(appSel.value)); }
+    catch(e){ out.innerHTML=''; out.append(el('div',{class:'hint'},'Could not load: '+e.message)); return; }
+    if(!d.files.length){ out.innerHTML=''; out.append(el('div',{class:'hint'},'No database files found for this app.')); return; }
+    const t=el('table',{},el('thead',{},el('tr',{},
+      ...['File','Table','Rows',''].map(h=>el('th',{},h)))));
+    const tb=el('tbody',{});
+    d.files.forEach(f=>f.tables.forEach(tbl_=>{
+      const rowBox=el('div',{style:'display:none;padding:8px 0'});
+      let rOffset=0; const rLimit=100;
+      async function loadRows(){
+        rowBox.innerHTML='<div class="muted">loading…</div>';
+        const rp=new URLSearchParams({app:appSel.value, path:f.path, table:tbl_.table, limit:String(rLimit), offset:String(rOffset)});
+        const rd=await api('/cases/'+id+'/db-files/open?'+rp);
+        rowBox.innerHTML='';
+        rowBox.append(el('div',{class:'hint'},
+          `showing ${rOffset+1}–${rOffset+rd.rows.length} of ${rd.total.toLocaleString()} row(s)`));
+        const rt=el('table',{},el('thead',{},el('tr',{},...rd.columns.map(c=>el('th',{},c)))));
+        const rtb=el('tbody',{});
+        rd.rows.forEach(row=>rtb.append(el('tr',{},...row.map(v=>el('td',{class:'mono'},v)))));
+        rt.append(rtb); rowBox.append(rt);
+        const nav=el('div',{class:'row',style:'margin-top:6px'});
+        const pv=el('button',{class:'ghost',disabled:rOffset<=0,onclick:()=>{rOffset=Math.max(0,rOffset-rLimit);loadRows();}},'← Prev');
+        const nx=el('button',{class:'ghost',disabled:rOffset+rd.rows.length>=rd.total,onclick:()=>{rOffset+=rLimit;loadRows();}},'Next →');
+        nav.append(pv,nx); rowBox.append(nav);
+      }
+      const row=el('tr',{style:'cursor:pointer',onclick:()=>{
+        if(rowBox.style.display==='none'){ rOffset=0; rowBox.style.display='block'; loadRows(); }
+        else rowBox.style.display='none';
+      }},
+        el('td',{class:'mono'},f.filename), el('td',{},tbl_.table),
+        el('td',{},tbl_.row_count.toLocaleString()), el('td',{},'Open'));
+      tb.append(row);
+      const dataRow=el('tr',{}); dataRow.append(el('td',{colspan:'4'},rowBox)); tb.append(dataRow);
+    }));
+    t.append(tb); out.innerHTML=''; out.append(t);
+  }
+  appSel.onchange=load;
+  wrap.append(el('h2',{style:'margin-top:0'},'Database files'),
+    el('div',{class:'hint',style:'margin-bottom:8px'},
+      'Raw SQLite tables from database-backed evidence files (Cookies today), read '+
+      'directly - independent of what the named parser normally extracts from them.'),
+    el('div',{class:'row'}, appSel), out);
+  load();
+  return wrap;
 }
 
 async function showAudit(id){

@@ -275,3 +275,126 @@ def test_cache_files_route_with_real_cache_content(tmp_path, monkeypatch):
         "/api/cases/case_cache_api/cache-files", params={"app": "app", "q": openable["url"][:20]}
     ).json()
     assert q["total"] >= 1
+
+
+@pytest.mark.slow
+def test_artifact_browsing_extras_with_real_evidence(tmp_path, monkeypatch):
+    """The per-app/source artifact table's derived cache URL and real
+    pagination, the CSV export, and the new raw LevelDB/SQLite file
+    browsers - all against real Local Storage, Cache, and Cookies data."""
+    monkeypatch.setenv("DD_CONFIG_DIR", str(tmp_path / "cfg"))
+    import importlib
+
+    from dd_lab.api import settings as settings_mod
+
+    importlib.reload(settings_mod)
+    from dd_lab.api import main as main_mod
+
+    importlib.reload(main_mod)
+    main_mod._settings.cases_root = str(tmp_path / "cases")
+    main_mod._settings.save()
+
+    profile = _profile()
+    build_sample_case(
+        tmp_path / "cases", "case_browse_extras", "app", profile,
+        include=frozenset({"cache", "local_storage", "cookies"}),
+    )
+    from dd_core.casedir import CaseLayout
+
+    CaseMeta(case_id="case_browse_extras", name="browsing extras test").save(
+        CaseLayout(tmp_path / "cases", "case_browse_extras")
+    )
+    # Ingest directly (parse + classify + load, like ingest_case elsewhere in
+    # this suite) rather than through /run - the full deterministic pipeline
+    # (memory analysis, keyword search, correlation, report) adds nothing
+    # this test needs and is much slower against the full real cache.
+    from dd_lab.ingest import ingest_case
+
+    ingest_case(tmp_path / "cases", "case_browse_extras")
+    client = TestClient(main_mod.app)
+
+    # --- derived URL + real pagination on the per-app/source table --------
+    cache_rows = client.get(
+        "/api/cases/case_browse_extras/artifacts",
+        params={"app": "app", "source_type": "cache", "limit": 5},
+    ).json()
+    assert cache_rows["total"] > 5
+    assert all(r["url"] for r in cache_rows["rows"])
+
+    non_cache = client.get(
+        "/api/cases/case_browse_extras/artifacts",
+        params={"app": "app", "source_type": "local_storage", "limit": 5},
+    ).json()
+    if non_cache["rows"]:
+        assert all(r["url"] is None for r in non_cache["rows"])
+
+    page1 = client.get(
+        "/api/cases/case_browse_extras/artifacts",
+        params={"app": "app", "source_type": "cache", "limit": 5, "offset": 0},
+    ).json()
+    page2 = client.get(
+        "/api/cases/case_browse_extras/artifacts",
+        params={"app": "app", "source_type": "cache", "limit": 5, "offset": 5},
+    ).json()
+    ids1 = {r["artifact_id"] for r in page1["rows"]}
+    ids2 = {r["artifact_id"] for r in page2["rows"]}
+    assert ids1 and ids2 and ids1.isdisjoint(ids2)
+
+    # --- CSV export ----------------------------------------------------
+    csv_resp = client.get(
+        "/api/cases/case_browse_extras/artifacts/export.csv",
+        params={"app": "app", "source_type": "cache"},
+    )
+    assert csv_resp.status_code == 200
+    assert csv_resp.headers["content-type"].startswith("text/csv")
+    import csv
+    import io
+
+    csv_rows = list(csv.reader(io.StringIO(csv_resp.text)))
+    assert csv_rows[0][0] == "app"
+    # capped at 200k rows even though this real case's cache has far more -
+    # a safety cap, not a bug, so compare against min() rather than the raw total.
+    # Parsed with csv.reader (not a naive newline split): a cached response
+    # body can legitimately contain embedded newlines, which the writer
+    # correctly quotes as part of one row.
+    assert len(csv_rows) - 1 == min(cache_rows["total"], 200_000)
+
+    # --- raw Local Storage physical-file browser ------------------------
+    ls_files = client.get(
+        "/api/cases/case_browse_extras/localstorage-files", params={"app": "app"}
+    ).json()
+    assert ls_files["files"]
+    f = ls_files["files"][0]
+    for col in ("filename", "kind", "size_bytes"):
+        assert col in f
+    opened = client.get(
+        "/api/cases/case_browse_extras/localstorage-files/open",
+        params={"app": "app", "file": f["filename"], "limit": 5},
+    ).json()
+    assert "records" in opened and opened["total"] >= 0
+
+    bad = client.get(
+        "/api/cases/case_browse_extras/localstorage-files/open",
+        params={"app": "app", "file": "../../../../etc/passwd"},
+    )
+    assert bad.status_code == 404
+
+    # --- raw database (Cookies) browser ---------------------------------
+    db_files = client.get(
+        "/api/cases/case_browse_extras/db-files", params={"app": "app"}
+    ).json()
+    assert db_files["files"]
+    dbf = db_files["files"][0]
+    assert dbf["tables"]
+    table = dbf["tables"][0]["table"]
+    db_opened = client.get(
+        "/api/cases/case_browse_extras/db-files/open",
+        params={"app": "app", "path": dbf["path"], "table": table, "limit": 5},
+    ).json()
+    assert "columns" in db_opened
+
+    bad_path = client.get(
+        "/api/cases/case_browse_extras/db-files/open",
+        params={"app": "app", "path": "/etc/passwd", "table": table},
+    )
+    assert bad_path.status_code == 404
