@@ -362,10 +362,11 @@ async function vCase(m){
     !iv.ok?el('div',{class:'scroll',style:'margin-top:8px'},
       tbl(iv.issues,['kind','path','expected','actual'])):''));
 
-  // Cache files: reads straight off the evidence directory, so it works
-  // whether or not "Run analysis" has happened yet - unlike the artifact
-  // browser below, which needs a processed warehouse.
-  if(d.evidence.apps.length) m.append(cacheFilesPanel(id, d.evidence.apps));
+  // Cache files reads straight off the evidence directory, so it works
+  // whether or not "Run analysis" has happened yet. Once the case is
+  // processed it moves into the explorer's left nav below (so it isn't
+  // duplicated); until then it's shown here on its own.
+  if(!processed && d.evidence.apps.length) m.append(cacheFilesPanel(id, d.evidence.apps));
 
   // --- the primary action panel ------------------------------------------
   const actions=el('div',{class:'panel'});
@@ -413,20 +414,91 @@ async function vCase(m){
   }
   m.append(actions);
 
-  // --- results ----------------------------------------------------------
+  // --- results: a left-nav explorer (app -> source type, each with a
+  // count - the same drill-down shape a tool like Magnet AXIOM uses) driving
+  // a right-hand content pane. ---------------------------------------------
   if(processed){
-    const max=Math.max(...w.by_category.map(c=>c.artifacts),1);
-    const bars=el('div',{class:'panel'});
-    bars.append(el('h2',{style:'margin-top:0'},'Artifact categories'));
-    w.by_category.filter(c=>c.category).forEach(c=>bars.append(el('div',{class:'barrow'},
-      el('span',{class:'pill cat'},c.category),
-      el('div',{class:'bar',style:`width:${100*c.artifacts/max}%`}),
-      el('span',{class:'muted'},c.artifacts.toLocaleString()))));
-    m.append(bars);
-    m.append(await classificationPanel(id));
-    const br=browser(id, w.by_category.map(c=>c.category).filter(Boolean));
-    br.id='browser'; m.append(br);
+    const explorer=await caseExplorer(id, w, d.evidence.apps);
+    explorer.id='browser'; m.append(explorer);
   }
+}
+
+const SRC_LABELS = {
+  local_storage:'Local Storage', session_storage:'Session Storage', indexeddb:'IndexedDB',
+  cache:'Cache', cookies:'Cookies', preferences:'Preferences', local_state:'Local State',
+  memory_string:'Memory Strings', memory_process:'Memory Processes',
+  memory_network:'Memory Network', memory_artifact:'Memory Artifacts',
+};
+
+async function caseExplorer(id, w, evidenceApps){
+  const nav=el('div',{class:'panel',style:'width:240px;flex-shrink:0;align-self:flex-start;position:sticky;top:0;max-height:calc(100vh - 140px);overflow:auto'});
+  const content=el('div',{style:'flex:1;min-width:0'});
+  const wrap=el('div',{style:'display:flex;gap:16px;align-items:flex-start'}, nav, content);
+
+  let tree;
+  try{ tree=await api('/cases/'+id+'/artifact-tree'); }
+  catch(e){ tree={apps:[]}; }
+  const sel = state.explorerSelection && state.explorerSelection.caseId===id
+    ? state.explorerSelection : {type:'overview'};
+  state.explorerSelection = {...sel, caseId:id};
+
+  function navRow(label,count,active,onclick,indent){
+    return el('div',{onclick,
+      style:`cursor:pointer;padding:6px ${8+indent*14}px;border-radius:6px;font-size:12.5px;`+
+        `display:flex;justify-content:space-between;gap:8px;margin:1px 0;`+
+        (active?`background:var(--accent2);color:#fff`:`color:var(--fg)`)},
+      el('span',{style:'overflow:hidden;text-overflow:ellipsis;white-space:nowrap'},label),
+      count!=null?el('span',{style:(active?'':'color:var(--muted)')+';flex-shrink:0'},count.toLocaleString()):'');
+  }
+
+  async function select(next){
+    state.explorerSelection={...next, caseId:id};
+    renderNav();
+    content.innerHTML=''; content.append(await paneFor(next));
+  }
+  async function paneFor(s){
+    if(s.type==='cache') return cacheFilesPanel(id, evidenceApps);
+    if(s.type==='source') return browser(id, w.by_category.map(c=>c.category).filter(Boolean),
+      {app:s.app, source_type:s.source_type});
+    return overviewPanel(id, w);
+  }
+
+  function renderNav(){
+    nav.innerHTML='';
+    const s=state.explorerSelection;
+    nav.append(el('div',{style:'font-weight:700;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:2px 0 8px'},'Explore'));
+    nav.append(navRow('Overview', null, s.type==='overview', ()=>select({type:'overview'}), 0));
+    nav.append(navRow('Cache files', null, s.type==='cache', ()=>select({type:'cache'}), 0));
+    nav.append(el('div',{style:'height:1px;background:var(--line);margin:10px 0'}));
+    tree.apps.forEach(a=>{
+      nav.append(navRow(a.app, a.total, s.type==='source'&&s.app===a.app&&!s.source_type,
+        ()=>select({type:'source', app:a.app, source_type:null}), 0));
+      a.sources.forEach(src=>{
+        const active = s.type==='source' && s.app===a.app && s.source_type===src.source_type;
+        nav.append(navRow(SRC_LABELS[src.source_type]||src.source_type, src.n, active,
+          ()=>select({type:'source', app:a.app, source_type:src.source_type}), 1));
+      });
+    });
+    if(!tree.apps.length) nav.append(el('div',{class:'hint'},'No artifact breakdown available.'));
+  }
+
+  renderNav();
+  content.append(await paneFor(state.explorerSelection));
+  return wrap;
+}
+
+async function overviewPanel(id, w){
+  const box=el('div',{});
+  const max=Math.max(...w.by_category.map(c=>c.artifacts),1);
+  const bars=el('div',{class:'panel'});
+  bars.append(el('h2',{style:'margin-top:0'},'Artifact categories'));
+  w.by_category.filter(c=>c.category).forEach(c=>bars.append(el('div',{class:'barrow'},
+    el('span',{class:'pill cat'},c.category),
+    el('div',{class:'bar',style:`width:${100*c.artifacts/max}%`}),
+    el('span',{class:'muted'},c.artifacts.toLocaleString()))));
+  box.append(bars);
+  box.append(await classificationPanel(id));
+  return box;
 }
 
 async function classificationPanel(id){
@@ -489,11 +561,16 @@ async function vReport(m){
     style:'width:100%;height:calc(100vh - 110px);border:1px solid var(--line);border-radius:8px;background:#fff'}));
 }
 
-function browser(id,cats){
+function browser(id,cats,fixed){
+  // `fixed` (from the case explorer's left nav) pins app and/or source_type
+  // - which app/source to look at is chosen there, tree-style, rather than
+  // from dropdowns here. With nothing fixed (unused currently, kept for
+  // re-use) it falls back to picker dropdowns for both.
+  fixed = fixed || {};
   const wrap=el('div',{class:'panel'});
   const cat=el('select',{}, el('option',{value:''},'all categories'), ...cats.map(c=>el('option',{value:c},c)));
-  const appSel=el('select',{}, el('option',{value:''},'all apps'));
-  const srcSel=el('select',{}, el('option',{value:''},'all sources'));
+  const appSel = fixed.app ? null : el('select',{}, el('option',{value:''},'all apps'));
+  const srcSel = fixed.source_type ? null : el('select',{}, el('option',{value:''},'all sources'));
   const q=el('input',{placeholder:'search key or value',style:'flex:1;min-width:180px'});
   const count=el('div',{class:'hint'});
   const out=el('div',{class:'scroll',style:'margin-top:10px'});
@@ -502,32 +579,42 @@ function browser(id,cats){
     out.innerHTML='<div class="muted" style="padding:10px">loading…</div>';
     const p=new URLSearchParams();
     if(cat.value)p.set('category',cat.value);
-    if(appSel.value)p.set('app',appSel.value);
-    if(srcSel.value)p.set('source_type',srcSel.value);
+    if(fixed.app) p.set('app',fixed.app); else if(appSel.value) p.set('app',appSel.value);
+    if(fixed.source_type) p.set('source_type',fixed.source_type); else if(srcSel.value) p.set('source_type',srcSel.value);
     if(q.value)p.set('q',q.value);
     p.set('limit','300');
     const d=await api('/cases/'+id+'/artifacts?'+p);
     if(!facetsLoaded && d.facets){
-      d.facets.apps.forEach(a=>appSel.append(el('option',{value:a},a)));
-      d.facets.source_types.forEach(s=>srcSel.append(el('option',{value:s},s)));
+      if(appSel) d.facets.apps.forEach(a=>appSel.append(el('option',{value:a},a)));
+      if(srcSel) d.facets.source_types.forEach(s=>srcSel.append(el('option',{value:s},s)));
       facetsLoaded=true;
     }
     count.textContent = d.total>d.shown
       ? `showing ${d.shown} of ${d.total.toLocaleString()} matching — narrow the filters to see more`
       : `${d.total.toLocaleString()} matching`;
-    const t=el('table',{},el('thead',{},el('tr',{},...['Category','Conf','App','Source','Key','Value'].map(h=>el('th',{},h)))));
+    const cols = fixed.app && fixed.source_type ? ['Category','Conf','Key','Value']
+      : fixed.app ? ['Category','Conf','Source','Key','Value'] : ['Category','Conf','App','Source','Key','Value'];
+    const t=el('table',{},el('thead',{},el('tr',{},...cols.map(h=>el('th',{},h)))));
     const tb=el('tbody',{});
-    d.rows.forEach(r=>tb.append(el('tr',{},
-      el('td',{},el('span',{class:'pill cat'},r.category||'')),
-      el('td',{},r.confidence!=null?r.confidence.toFixed(2):''),
-      el('td',{},r.app), el('td',{},r.source_type),
-      el('td',{class:'mono'},r.key), el('td',{},r.value))));
+    d.rows.forEach(r=>{
+      const cells=[el('td',{},el('span',{class:'pill cat'},r.category||'')),
+        el('td',{},r.confidence!=null?r.confidence.toFixed(2):'')];
+      if(!fixed.app) cells.push(el('td',{},r.app));
+      if(!fixed.source_type) cells.push(el('td',{},r.source_type));
+      cells.push(el('td',{class:'mono'},r.key), el('td',{},r.value));
+      tb.append(el('tr',{},...cells));
+    });
     t.append(tb); out.innerHTML=''; out.append(t);
   }
-  cat.onchange=appSel.onchange=srcSel.onchange=load;
+  cat.onchange=load;
+  if(appSel) appSel.onchange=load;
+  if(srcSel) srcSel.onchange=load;
   let tmo; q.oninput=()=>{clearTimeout(tmo);tmo=setTimeout(load,300);};
-  wrap.append(el('h2',{style:'margin-top:0'},'Artifact browser'),
-    el('div',{class:'row'},cat,appSel,srcSel,q), count, out);
+  const heading = fixed.app
+    ? fixed.source_type ? `${fixed.app} → ${SRC_LABELS[fixed.source_type]||fixed.source_type}` : `${fixed.app} → all sources`
+    : 'Artifact browser';
+  wrap.append(el('h2',{style:'margin-top:0'},heading),
+    el('div',{class:'row'},cat, ...(appSel?[appSel]:[]), ...(srcSel?[srcSel]:[]), q), count, out);
   load();
   return wrap;
 }

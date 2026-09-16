@@ -318,6 +318,33 @@ def run_case(case_id: str) -> dict:
     return {"job_id": job_id}
 
 
+@app.get("/api/cases/{case_id}/artifact-tree")
+def case_artifact_tree(case_id: str) -> dict:
+    """Per-app, per-source-type artifact counts — backs the case page's left
+    navigation tree (app -> Local Storage / Cache / Memory / ... , each with
+    a count), the same drill-down shape a tool like Magnet AXIOM uses."""
+    deps = InvestigationDeps(cases_root=Path(_settings.cases_root), case_id=case_id)
+    if not deps.layout.warehouse.is_file():
+        raise HTTPException(409, "case not processed yet")
+    from dd_lab.etl.warehouse import Warehouse
+
+    wh = Warehouse(deps.layout.warehouse)
+    try:
+        rows = wh.query(
+            "SELECT app, source_type, count(*) AS n FROM artifacts "
+            "GROUP BY app, source_type ORDER BY app, n DESC"
+        )
+    finally:
+        wh.close()
+    apps: dict[str, list[dict]] = {}
+    totals: dict[str, int] = {}
+    for r in rows:
+        apps.setdefault(r["app"], []).append({"source_type": r["source_type"], "n": r["n"]})
+        totals[r["app"]] = totals.get(r["app"], 0) + r["n"]
+    ordered = sorted(apps, key=lambda a: totals[a], reverse=True)
+    return {"apps": [{"app": a, "total": totals[a], "sources": apps[a]} for a in ordered]}
+
+
 @app.get("/api/cases/{case_id}/artifacts")
 def case_artifacts(
     case_id: str,

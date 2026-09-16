@@ -151,6 +151,7 @@ def test_case_lifecycle_via_api(client):
     assert detail["warehouse"] is None  # not processed yet
 
     assert client.get("/api/cases/case_api_1/classification").status_code == 409
+    assert client.get("/api/cases/case_api_1/artifact-tree").status_code == 409
 
     job = client.post("/api/cases/case_api_1/run").json()
     for _ in range(120):
@@ -179,6 +180,20 @@ def test_case_lifecycle_via_api(client):
         for col in ("category", "n", "mean_conf", "regex_agree", "keyword_agree", "ner_agree", "model_agree"):
             assert col in c
         assert c["category"] in clf["examples"]
+
+    # Backs the case page's left-nav explorer: per-app, per-source-type
+    # counts, each app's sources summing to its total.
+    tree = client.get("/api/cases/case_api_1/artifact-tree").json()
+    assert tree["apps"]
+    app_row = next(a for a in tree["apps"] if a["app"] == "app")
+    assert app_row["sources"]
+    assert app_row["total"] == sum(s["n"] for s in app_row["sources"])
+    src = app_row["sources"][0]
+    filtered = client.get(
+        "/api/cases/case_api_1/artifacts",
+        params={"app": "app", "source_type": src["source_type"], "limit": 1000},
+    ).json()
+    assert filtered["total"] == src["n"]
 
     bad = client.post("/api/cases/case_api_1/query", json={"sql": "DROP TABLE artifacts"}).json()
     assert bad["ok"] is False
