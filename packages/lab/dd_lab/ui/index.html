@@ -100,10 +100,10 @@ async function pollActiveJobs(){
 }
 setInterval(pollActiveJobs, 3000);
 
-const _loadingMsg = {case:'Opening case…', report:'Loading report…', cases:'Loading cases…', import:'Loading…', settings:'Loading settings…', dashboard:'Loading…'};
+const _loadingMsg = {case:'Opening case…', report:'Loading report…', cases:'Loading cases…', import:'Loading…', settings:'Loading settings…', dashboard:'Loading…', cacheentry:'Opening cache entry…'};
 async function render(){
   const m=$('#main'); m.innerHTML=''; m.append(loadingView(_loadingMsg[state.view]));
-  try{ await ({dashboard:vDashboard,import:vImport,cases:vCases,case:vCase,report:vReport,settings:vSettings}[state.view]||vDashboard)(m); }
+  try{ await ({dashboard:vDashboard,import:vImport,cases:vCases,case:vCase,report:vReport,settings:vSettings,cacheentry:vCacheEntry}[state.view]||vDashboard)(m); }
   catch(e){ m.innerHTML=''; m.append(el('div',{class:'panel'},'Error: '+e.message)); }
 }
 
@@ -362,6 +362,11 @@ async function vCase(m){
     !iv.ok?el('div',{class:'scroll',style:'margin-top:8px'},
       tbl(iv.issues,['kind','path','expected','actual'])):''));
 
+  // Cache files: reads straight off the evidence directory, so it works
+  // whether or not "Run analysis" has happened yet - unlike the artifact
+  // browser below, which needs a processed warehouse.
+  if(d.evidence.apps.length) m.append(cacheFilesPanel(id, d.evidence.apps));
+
   // --- the primary action panel ------------------------------------------
   const actions=el('div',{class:'panel'});
   const runlog=el('div',{id:'runlog',class:'log',style:'display:none;margin-top:10px'});
@@ -525,6 +530,99 @@ function browser(id,cats){
     el('div',{class:'row'},cat,appSel,srcSel,q), count, out);
   load();
   return wrap;
+}
+
+function fmtBytes(n){
+  if(n==null) return '';
+  if(n<1024) return n+' B';
+  if(n<1048576) return (n/1024).toFixed(1)+' KB';
+  return (n/1048576).toFixed(1)+' MB';
+}
+
+function cacheFilesPanel(id, apps){
+  // A ChromeCacheView-style inventory: one row per cache entry (the HTTP
+  // disk cache and the Cache API alike), naming the exact physical file and
+  // byte offset behind it - not just the logical cache key - so it's clear
+  // which file on the evidence copy each row actually came from. Reads
+  // straight off the evidence directory via /cache-files, independent of
+  // whether analysis has run.
+  const wrap=el('div',{class:'panel'});
+  const appSel=el('select',{}, ...apps.map(a=>el('option',{value:a},a)));
+  const q=el('input',{placeholder:'search URL or key',style:'flex:1;min-width:180px'});
+  const count=el('div',{class:'hint'});
+  const out=el('div',{class:'scroll',style:'margin-top:10px'});
+  const prevBtn=el('button',{class:'sec'},'← Prev');
+  const nextBtn=el('button',{class:'sec'},'Next →');
+  let offset=0; const limit=100; let total=0;
+
+  async function load(){
+    out.innerHTML='<div class="muted" style="padding:10px">loading…</div>';
+    const p=new URLSearchParams({app:appSel.value, limit:String(limit), offset:String(offset)});
+    if(q.value) p.set('q', q.value);
+    let d;
+    try{ d=await api('/cases/'+id+'/cache-files?'+p); }
+    catch(e){ out.innerHTML=''; out.append(el('div',{class:'hint'},'Could not load: '+e.message)); return; }
+    total=d.total;
+    count.textContent = total
+      ? `showing ${offset+1}–${offset+d.shown} of ${total.toLocaleString()}`
+      : 'no cache entries found for this app (the cache may be empty, or not part of this evidence copy)';
+    prevBtn.disabled = offset<=0;
+    nextBtn.disabled = offset+d.shown>=total;
+
+    const t=el('table',{},el('thead',{},el('tr',{},
+      ...['Filename','Kind','URL','Content Type','Size','Request Time','Status',''].map(h=>el('th',{},h)))));
+    const tb=el('tbody',{});
+    d.rows.forEach(r=>{
+      const title=[r.content_encoding?'encoding: '+r.content_encoding:'',
+                   r.cache_control?'cache-control: '+r.cache_control:'',
+                   r.server?'server: '+r.server:''].filter(Boolean).join(' · ');
+      tb.append(el('tr',{title},
+        el('td',{class:'mono'},r.physical_file||'—'),
+        el('td',{},el('span',{class:'pill'},r.cache_kind==='cache_api'?'Cache API':'disk cache')),
+        el('td',{class:'mono',style:'max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'},r.url),
+        el('td',{},r.content_type||''),
+        el('td',{},fmtBytes(r.size_bytes)),
+        el('td',{},r.request_time?ago(r.request_time):''),
+        el('td',{},r.http_status||''),
+        el('td',{}, r.openable
+          ? el('button',{class:'ghost',onclick:()=>{
+              state.cacheEntryTarget={caseId:id, app:r.app, dir:r.cache_dir, key:r.key, url:r.url};
+              go('cacheentry');
+            }},'Open')
+          : '')));
+    });
+    t.append(tb); out.innerHTML=''; out.append(t);
+  }
+  appSel.onchange=()=>{offset=0; load();};
+  prevBtn.onclick=()=>{offset=Math.max(0,offset-limit); load();};
+  nextBtn.onclick=()=>{offset+=limit; load();};
+  let tmo; q.oninput=()=>{clearTimeout(tmo); tmo=setTimeout(()=>{offset=0; load();},300);};
+  wrap.append(el('h2',{style:'margin-top:0'},'Cache files'),
+    el('div',{class:'hint',style:'margin-bottom:8px'},
+      'Every entry in the HTTP disk cache and the Cache API, with the exact physical '+
+      'file behind it - the same view a tool like ChromeCacheView gives, built on the '+
+      'same evidence copy everything else here reads from.'),
+    el('div',{class:'row'}, appSel, q), count, out,
+    el('div',{class:'row',style:'margin-top:8px'}, prevBtn, nextBtn));
+  load();
+  return wrap;
+}
+
+async function vCacheEntry(m){
+  const t=state.cacheEntryTarget;
+  m.innerHTML='';
+  if(!t){
+    m.append(el('div',{class:'panel'},'Nothing selected — go back to the case and open a cache entry.'),
+      el('button',{class:'sec',onclick:()=>go('cases')},'← Back to Cases'));
+    return;
+  }
+  const p=new URLSearchParams({app:t.app, dir:t.dir, key:t.key});
+  m.append(el('div',{class:'row',style:'margin-bottom:10px'},
+    el('button',{class:'sec',onclick:()=>go('case',t.caseId)},'←  Back to case'),
+    el('span',{class:'muted mono',style:'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'},t.url)));
+  m.append(el('iframe',{
+    src:'/api/cases/'+encodeURIComponent(t.caseId)+'/cache-files/open?'+p,
+    style:'width:100%;height:calc(100vh - 110px);border:1px solid var(--line);border-radius:8px;background:#fff'}));
 }
 
 async function showAudit(id){

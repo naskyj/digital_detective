@@ -9,8 +9,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -395,6 +395,73 @@ def case_classification(case_id: str) -> dict:
     finally:
         wh.close()
     return {"by_category": rows, "examples": examples}
+
+
+@app.get("/api/cases/{case_id}/cache-files")
+def case_cache_files(
+    case_id: str,
+    app_name: str | None = Query(None, alias="app"),
+    q: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict:
+    """A ChromeCacheView-style listing: one row per cache entry (HTTP disk
+    cache and the Cache API alike), naming the exact physical file behind it.
+    Reads straight off the evidence directory — unlike /artifacts this needs
+    no completed analysis run, so the cache can be browsed immediately after
+    a case is created."""
+    layout = _layout(case_id)
+    if not layout.manifest.is_file():
+        raise HTTPException(404, "case not found")
+    from dd_lab.parsers import discover_apps
+    from dd_lab.parsers.base import ParseContext
+    from dd_lab.parsers.cache import list_cache_files
+
+    all_apps = discover_apps(layout.evidence)
+    target_apps = [app_name] if app_name else all_apps
+    rows: list[dict] = []
+    for a in target_apps:
+        ctx = ParseContext(case_id=case_id, app=a, evidence_root=layout.evidence)
+        if not ctx.app_root.is_dir():
+            continue
+        rows.extend(e.model_dump(mode="json") for e in list_cache_files(ctx))
+    if q:
+        ql = q.lower()
+        rows = [r for r in rows if ql in (r["url"] or "").lower() or ql in r["key"].lower()]
+    rows.sort(key=lambda r: r["response_time"] or r["request_time"] or "", reverse=True)
+    total = len(rows)
+    page = rows[offset : offset + limit]
+    return {"rows": page, "total": total, "shown": len(page), "apps": all_apps}
+
+
+@app.get("/api/cases/{case_id}/cache-files/open")
+def case_cache_file_open(
+    case_id: str,
+    app_name: str = Query(..., alias="app"),
+    dir_: str = Query(..., alias="dir"),
+    key: str = Query(...),
+) -> Response:
+    """The decoded body of one cache entry, for the UI's "Open" action.
+    `dir` is validated against this app's actual cache directories before
+    anything is opened — it never resolves an arbitrary path."""
+    layout = _layout(case_id)
+    if not layout.manifest.is_file():
+        raise HTTPException(404, "case not found")
+    from dd_lab.parsers.base import ParseContext
+    from dd_lab.parsers.cache import cache_dirs, read_cache_entry
+
+    ctx = ParseContext(case_id=case_id, app=app_name, evidence_root=layout.evidence)
+    if dir_ not in cache_dirs(ctx):
+        raise HTTPException(404, "cache directory not found for this app")
+    body, content_type, filename_hint = read_cache_entry(ctx, dir_, key)
+    if body is None:
+        raise HTTPException(404, "this cache entry has no readable body")
+    # inline, not attachment: previews in the SPA's iframe viewer; a browser
+    # tab opening this URL directly is still free to save it under this name
+    return Response(
+        content=body, media_type=content_type,
+        headers={"Content-Disposition": f'inline; filename="{filename_hint}"'},
+    )
 
 
 @app.post("/api/cases/{case_id}/query")

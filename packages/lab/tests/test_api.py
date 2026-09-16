@@ -189,3 +189,74 @@ def test_case_lifecycle_via_api(client):
 
     audit = client.get("/api/cases/case_api_1/audit").json()
     assert audit["custody"] and audit["audit"]
+
+
+def test_cache_files_route_works_without_a_run(client):
+    """Unlike /artifacts, the cache-file browser reads straight off the
+    evidence directory - it must work before "Run analysis" has ever
+    executed, and must not error just because this sample case's fixture
+    didn't copy a Cache directory (it copies only the fast sources)."""
+    detail = client.get("/api/cases/case_api_1").json()
+    assert detail["warehouse"] is None  # confirms this case is genuinely unprocessed
+
+    d = client.get("/api/cases/case_api_1/cache-files").json()
+    assert d["rows"] == []
+    assert d["total"] == 0
+    assert "app" in d["apps"]
+
+
+def test_cache_files_open_rejects_a_directory_not_in_this_case(client):
+    """`dir` is validated against the app's real cache directories before
+    anything is opened - it must never resolve an arbitrary path."""
+    r = client.get(
+        "/api/cases/case_api_1/cache-files/open",
+        params={"app": "app", "dir": "../../../../etc", "key": "x"},
+    )
+    assert r.status_code == 404
+
+
+@pytest.mark.slow
+def test_cache_files_route_with_real_cache_content(tmp_path, monkeypatch):
+    """End to end against a real Chromium HTTP cache: the listing names a
+    real physical file per entry, and "open" returns its actual decoded
+    bytes - the ChromeCacheView-style workflow this API exists for."""
+    monkeypatch.setenv("DD_CONFIG_DIR", str(tmp_path / "cfg"))
+    import importlib
+
+    from dd_lab.api import settings as settings_mod
+
+    importlib.reload(settings_mod)
+    from dd_lab.api import main as main_mod
+
+    importlib.reload(main_mod)
+    main_mod._settings.cases_root = str(tmp_path / "cases")
+    main_mod._settings.save()
+
+    profile = _profile()
+    build_sample_case(tmp_path / "cases", "case_cache_api", "app", profile, include=frozenset({"cache"}))
+    from dd_core.casedir import CaseLayout
+
+    CaseMeta(case_id="case_cache_api", name="cache API test").save(
+        CaseLayout(tmp_path / "cases", "case_cache_api")
+    )
+    client = TestClient(main_mod.app)
+
+    d = client.get("/api/cases/case_cache_api/cache-files", params={"app": "app", "limit": 20}).json()
+    assert d["total"] > 0
+    row = d["rows"][0]
+    for col in ("entry_id", "app", "cache_dir", "physical_file", "key", "url"):
+        assert col in row
+    assert row["physical_file"]
+
+    openable = next(r for r in d["rows"] if r["openable"])
+    body = client.get(
+        "/api/cases/case_cache_api/cache-files/open",
+        params={"app": "app", "dir": openable["cache_dir"], "key": openable["key"]},
+    )
+    assert body.status_code == 200
+    assert len(body.content) > 0
+
+    q = client.get(
+        "/api/cases/case_cache_api/cache-files", params={"app": "app", "q": openable["url"][:20]}
+    ).json()
+    assert q["total"] >= 1
