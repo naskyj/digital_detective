@@ -33,7 +33,7 @@ from dd_core.hashing import sha256_file
 from dd_core.manifest import AcquisitionHost, Manifest, build_entry
 from dd_core.schema import TargetApp
 from dd_core.signing import generate_keypair, public_key_fingerprint, write_keypair
-from dd_lab.imaging.discover import ImageApp, discover_apps
+from dd_lab.imaging.discover import ImageApp, discover_apps, discover_apps_in_folder
 from dd_lab.imaging.image import open_image
 
 log = logging.getLogger("dd_lab.imaging.acquire")
@@ -87,6 +87,143 @@ def _image_host(target, image_path: str, image_sha256: str) -> AcquisitionHost:
     )
 
 
+def _extract_discovered_apps(
+    found: list[tuple[str, Path, str | None]],
+    *,
+    layout: CaseLayout,
+    custody: CustodyLog,
+    operator: str,
+    say: ProgressFn,
+    warnings: list[str],
+    provenance: str,
+) -> list[TargetApp]:
+    """Copy every discovered (name, profile_dir, version) into the case's
+    evidence/ directory, hash + custody-log each one - the one per-app copy
+    loop `acquire_from_image` and `acquire_from_folder` both drive, so a fix
+    here (or to `plan_profile_copy`/`execute_copy` in dd_core) applies to
+    both acquisition paths identically."""
+    target_apps: list[TargetApp] = []
+    for name, profile_dir, version in found:
+        dest_name = _safe_name(name)
+        app_evidence = layout.evidence / dest_name
+        app_evidence.mkdir(parents=True, exist_ok=True)
+
+        say(f"[{name}] extracting profile from {profile_dir}")
+        specs = plan_profile_copy(profile_dir)
+        if not specs:
+            warnings.append(f"{name}: no recognisable Chromium data at {profile_dir}")
+            say(f"[{name}] WARNING: nothing to extract")
+            continue
+
+        try:
+            report = execute_copy(specs, app_evidence)
+        except Exception as e:  # noqa: BLE001 - one bad app must not kill the case
+            warnings.append(f"{name}: extraction failed ({e}); skipped")
+            say(f"[{name}] ERROR: extraction failed: {e}")
+            custody.append(CustodyEvent.NOTE, operator, f"{name}: extraction failed - {e}")
+            continue
+
+        say(f"[{name}] extracted {len(report.written)} files"
+            + (f", skipped {len(report.skipped)}" if report.skipped else ""))
+        for src, reason in report.skipped[:20]:
+            warnings.append(f"{name}: could not extract {src} ({reason})")
+        custody.append(
+            CustodyEvent.ARTIFACT_ACQUIRED, operator,
+            f"{name}: {len(report.written)} files extracted, {len(report.skipped)} skipped, "
+            f"{provenance} {profile_dir}",
+            data={"sources": [s.dest_rel for s in specs], "skipped": [s for s, _ in report.skipped[:50]]},
+        )
+        target_apps.append(TargetApp(name=dest_name, user_data_dir=str(profile_dir), version=version))
+    return target_apps
+
+
+def _copy_supplied_memory_image(
+    memory_image_path: str | Path,
+    *,
+    layout: CaseLayout,
+    custody: CustodyLog,
+    operator: str,
+    say: ProgressFn,
+    target_apps: list[TargetApp],
+    warnings: list[str],
+) -> None:
+    say(f"Copying supplied memory image {memory_image_path}")
+    mem_dir = layout.evidence / "_system" / MEMORY
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    dest = mem_dir / "physmem.raw"
+    src = Path(memory_image_path)
+    if src.is_file():
+        shutil.copyfile(src, dest)
+        target_apps.append(TargetApp(name="_system", user_data_dir="(supplied memory image)"))
+        custody.append(
+            CustodyEvent.ARTIFACT_ACQUIRED, operator, f"memory image copied from {memory_image_path}"
+        )
+    else:
+        warnings.append(f"memory image {memory_image_path} not found")
+
+
+def _sign_and_finalize_manifest(
+    *,
+    case_id: str,
+    layout: CaseLayout,
+    host: AcquisitionHost,
+    started: datetime,
+    target_apps: list[TargetApp],
+    operator: str,
+    private_pem: bytes,
+    public_pem: bytes,
+    collector_version: str,
+    custody: CustodyLog,
+    say: ProgressFn,
+    source_summary: str,
+) -> tuple[Manifest, str]:
+    """Hash every copied file, build + sign the manifest, seal the
+    acquisition into the custody log. Shared by `acquire_from_image` and
+    `acquire_from_folder` - the only thing that differs between them by
+    this point is `host` (how the examined machine's identity was
+    determined) and `source_summary` (what to call the evidentiary root in
+    the custody log's completion message)."""
+    say("Hashing evidence and building the manifest")
+    now = datetime.now(UTC)
+    entries = []
+    for f in sorted(layout.evidence.rglob("*")):
+        if f.is_file():
+            rel = f.relative_to(layout.evidence).as_posix()
+            entries.append(build_entry(layout.evidence, f, SourceType(source_type_for_path(rel)), now))
+
+    manifest = Manifest(
+        case_id=case_id, collector_version=collector_version, operator=operator or "unknown",
+        host=host, started_ts=started, completed_ts=now,
+        target_apps=target_apps, entries=entries, public_key_pem=public_pem.decode(),
+    )
+    manifest.write(layout.dir, private_pem)
+    fpr = public_key_fingerprint(public_pem)
+    custody.append(CustodyEvent.ACQUISITION_COMPLETE, operator,
+                   f"{len(entries)} files, {manifest.total_bytes:,} bytes, {source_summary}")
+    custody.append(CustodyEvent.MANIFEST_SIGNED, operator, f"Ed25519, public key fingerprint {fpr}")
+    say(f"Done. {len(entries)} files signed. Public key fingerprint: {fpr}")
+    return manifest, fpr
+
+
+def _generate_or_load_signing_key(
+    layout: CaseLayout, signing_key_pem: bytes | None, say: ProgressFn
+) -> tuple[bytes, bytes]:
+    if signing_key_pem:
+        from cryptography.hazmat.primitives import serialization
+
+        from dd_core.signing import load_private_key
+
+        public_pem = load_private_key(signing_key_pem).public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        return signing_key_pem, public_pem
+    private_pem, public_pem = generate_keypair()
+    write_keypair(layout.dir / "keys", private_pem, public_pem)
+    say("Generated acquisition signing key (keys/collector_key.pem)")
+    return private_pem, public_pem
+
+
 def acquire_from_image(
     image_path: str | Path,
     output_root: str | Path,
@@ -124,21 +261,7 @@ def acquire_from_image(
     say(f"Image sha256: {image_sha256}")
 
     target = open_image(image_path)
-
-    if signing_key_pem:
-        private_pem = signing_key_pem
-        from cryptography.hazmat.primitives import serialization
-
-        from dd_core.signing import load_private_key
-
-        public_pem = load_private_key(private_pem).public_key().public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-    else:
-        private_pem, public_pem = generate_keypair()
-        write_keypair(layout.dir / "keys", private_pem, public_pem)
-        say("Generated acquisition signing key (keys/collector_key.pem)")
+    private_pem, public_pem = _generate_or_load_signing_key(layout, signing_key_pem, say)
 
     say("Scanning the image for Electron/Chromium app profiles")
     found: list[ImageApp] = discover_apps(target)
@@ -148,81 +271,114 @@ def acquire_from_image(
         warnings.append("no matching Electron app profiles found on this image")
         say("WARNING: no matching app profiles found")
 
-    target_apps: list[TargetApp] = []
-    for app in found:
-        dest_name = _safe_name(app.name)
-        app_evidence = layout.evidence / dest_name
-        app_evidence.mkdir(parents=True, exist_ok=True)
-
-        say(f"[{app.name}] extracting profile from {app.profile_dir}")
-        specs = plan_profile_copy(app.profile_dir)
-        if not specs:
-            warnings.append(f"{app.name}: no recognisable Chromium data at {app.profile_dir}")
-            say(f"[{app.name}] WARNING: nothing to extract")
-            continue
-
-        try:
-            report = execute_copy(specs, app_evidence)
-        except Exception as e:  # noqa: BLE001 - one bad app must not kill the case
-            warnings.append(f"{app.name}: extraction failed ({e}); skipped")
-            say(f"[{app.name}] ERROR: extraction failed: {e}")
-            custody.append(CustodyEvent.NOTE, operator or "image-extractor",
-                           f"{app.name}: extraction failed - {e}")
-            continue
-
-        say(f"[{app.name}] extracted {len(report.written)} files"
-            + (f", skipped {len(report.skipped)}" if report.skipped else ""))
-        for src, reason in report.skipped[:20]:
-            warnings.append(f"{app.name}: could not extract {src} ({reason})")
-        custody.append(
-            CustodyEvent.ARTIFACT_ACQUIRED, operator or "image-extractor",
-            f"{app.name}: {len(report.written)} files extracted, {len(report.skipped)} skipped, "
-            f"from image path {app.profile_dir}",
-            data={"sources": [s.dest_rel for s in specs], "skipped": [s for s, _ in report.skipped[:50]]},
-        )
-        target_apps.append(TargetApp(name=dest_name, user_data_dir=str(app.profile_dir), version=app.version))
+    target_apps = _extract_discovered_apps(
+        [(a.name, a.profile_dir, a.version) for a in found],
+        layout=layout, custody=custody, operator=operator or "image-extractor",
+        say=say, warnings=warnings, provenance="from image path",
+    )
 
     if memory_image_path:
-        say(f"Copying supplied memory image {memory_image_path}")
-        mem_dir = layout.evidence / "_system" / MEMORY
-        mem_dir.mkdir(parents=True, exist_ok=True)
-        dest = mem_dir / "physmem.raw"
-        src = Path(memory_image_path)
-        if src.is_file():
-            shutil.copyfile(src, dest)
-            target_apps.append(TargetApp(name="_system", user_data_dir="(supplied memory image)"))
-            custody.append(CustodyEvent.ARTIFACT_ACQUIRED, operator or "image-extractor",
-                           f"memory image copied from {memory_image_path}")
-        else:
-            warnings.append(f"memory image {memory_image_path} not found")
+        _copy_supplied_memory_image(
+            memory_image_path, layout=layout, custody=custody, operator=operator or "image-extractor",
+            say=say, target_apps=target_apps, warnings=warnings,
+        )
 
-    say("Hashing evidence and building the manifest")
-    now = datetime.now(UTC)
-    entries = []
-    for f in sorted(layout.evidence.rglob("*")):
-        if f.is_file():
-            rel = f.relative_to(layout.evidence).as_posix()
-            entries.append(build_entry(layout.evidence, f, SourceType(source_type_for_path(rel)), now))
-
-    manifest = Manifest(
-        case_id=case_id,
-        collector_version=f"image-extractor-{__version__}",
-        operator=operator or "unknown",
-        host=_image_host(target, str(image_path), image_sha256),
-        started_ts=started, completed_ts=now,
-        target_apps=target_apps, entries=entries,
-        public_key_pem=public_pem.decode(),
+    manifest, fpr = _sign_and_finalize_manifest(
+        case_id=case_id, layout=layout, host=_image_host(target, str(image_path), image_sha256),
+        started=started, target_apps=target_apps, operator=operator or "image-extractor",
+        private_pem=private_pem, public_pem=public_pem,
+        collector_version=f"image-extractor-{__version__}", custody=custody, say=say,
+        source_summary=f"from image {image_sha256[:16]}…",
     )
-    manifest.write(layout.dir, private_pem)
-    fpr = public_key_fingerprint(public_pem)
-    custody.append(CustodyEvent.ACQUISITION_COMPLETE, operator or "image-extractor",
-                   f"{len(entries)} files, {manifest.total_bytes:,} bytes, from image {image_sha256[:16]}…")
-    custody.append(CustodyEvent.MANIFEST_SIGNED, operator or "image-extractor",
-                   f"Ed25519, public key fingerprint {fpr}")
-    say(f"Done. {len(entries)} files signed. Public key fingerprint: {fpr}")
 
     return ImageAcquisitionResult(
-        case_id=case_id, case_dir=layout.dir, file_count=len(entries),
+        case_id=case_id, case_dir=layout.dir, file_count=len(manifest.entries),
         total_bytes=manifest.total_bytes, public_key_fingerprint=fpr,
         image_sha256=image_sha256, apps=[t.name for t in target_apps], warnings=warnings,
+    )
+
+
+def acquire_from_folder(
+    folder_path: str | Path,
+    output_root: str | Path,
+    *,
+    apps: list[str] | None = None,
+    memory_image_path: str | Path | None = None,
+    case_id: str | None = None,
+    operator: str = "",
+    signing_key_pem: bytes | None = None,
+    progress: ProgressFn | None = None,
+) -> ImageAcquisitionResult:
+    """Extract Chromium/Electron profile evidence from a plain folder that
+    already holds one subfolder per app - an examiner's own prior
+    extraction, evidence handed over by someone else, files pulled out of a
+    mount some other way - rather than a disk image file or a folder shaped
+    like an OS root (`open_image`/`acquire_from_image` already handle both
+    of those, via `dissect`'s own directory loader).
+
+    Not "live collection": this reads static files that already exist on
+    disk, the same category of input an image is, just shaped differently -
+    `dd-lab` still never touches a live, running machine's own AppData
+    paths (that stays `dd_collector`'s job).
+
+    No single file to hash as the evidentiary root the way an image has one
+    (`acquire_from_image` hashes the whole image file first) - each copied
+    file gets its own SHA-256 as it's copied instead, recorded in the
+    manifest's `entries` exactly like the live collector's own acquisitions
+    already work; `apps`/`memory_image_path`/etc. all mean the same thing
+    they do for `acquire_from_image`.
+    """
+    say = progress or (lambda _m: None)
+    case_id = case_id or _new_case_id()
+    layout = CaseLayout(output_root, case_id)
+    layout.create_evidence_skeleton()
+    custody = CustodyLog(layout.dir)
+    started = datetime.now(UTC)
+    warnings: list[str] = []
+    folder = Path(folder_path)
+
+    custody.append(
+        CustodyEvent.ACQUISITION_START, operator or "folder-import",
+        f"case {case_id}: importing from folder {folder}",
+        data={"folder_path": str(folder)},
+    )
+
+    private_pem, public_pem = _generate_or_load_signing_key(layout, signing_key_pem, say)
+
+    say("Scanning the folder for Electron/Chromium app profiles")
+    found: list[ImageApp] = discover_apps_in_folder(folder)
+    if apps:
+        found = [a for a in found if any(spec.lower() in a.name.lower() for spec in apps)]
+    if not found:
+        warnings.append("no matching Electron app profiles found in this folder")
+        say("WARNING: no matching app profiles found")
+
+    target_apps = _extract_discovered_apps(
+        [(a.name, a.profile_dir, a.version) for a in found],
+        layout=layout, custody=custody, operator=operator or "folder-import",
+        say=say, warnings=warnings, provenance="from folder path",
+    )
+
+    if memory_image_path:
+        _copy_supplied_memory_image(
+            memory_image_path, layout=layout, custody=custody, operator=operator or "folder-import",
+            say=say, target_apps=target_apps, warnings=warnings,
+        )
+
+    host = AcquisitionHost(
+        hostname="unknown (source: an imported folder, not a live machine or a disk image)",
+        os="unknown", os_version="unknown", username="", timezone=None,
+        source_image=str(folder), source_image_sha256=None,
+    )
+    manifest, fpr = _sign_and_finalize_manifest(
+        case_id=case_id, layout=layout, host=host, started=started, target_apps=target_apps,
+        operator=operator or "folder-import", private_pem=private_pem, public_pem=public_pem,
+        collector_version=f"folder-import-{__version__}", custody=custody, say=say,
+        source_summary=f"from folder {folder}",
+    )
+
+    return ImageAcquisitionResult(
+        case_id=case_id, case_dir=layout.dir, file_count=len(manifest.entries),
+        total_bytes=manifest.total_bytes, public_key_fingerprint=fpr,
+        image_sha256="", apps=[t.name for t in target_apps], warnings=warnings,
     )

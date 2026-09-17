@@ -17,7 +17,7 @@ import platform
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from dd_core.evidence import looks_like_profile
+from dd_core.evidence import iter_profiles_for_entry, looks_like_profile
 
 _WINDOWS_ROOTS = ("APPDATA", "LOCALAPPDATA")
 
@@ -103,33 +103,34 @@ def discover_apps(extra_dirs: list[str | Path] | None = None) -> list[ElectronAp
             roots.append(p)
 
     running = _running_electron()
-    seen: set[Path] = set()
+    # Two separate sets deliberately: an `entry` that IS itself a profile
+    # would otherwise get marked seen before iter_profiles_for_entry() ever
+    # got to return `(entry.name, entry)` for it - silently dropping every
+    # direct-match app the moment its containing directory was recorded.
+    seen_entries: set[Path] = set()
+    seen_profiles: set[Path] = set()
     apps: list[ElectronApp] = []
 
     for root in roots:
         for entry in sorted(_safe_iterdir(root)):
-            if not entry.is_dir() or entry in seen:
+            if not entry.is_dir() or entry in seen_entries:
                 continue
-            profile = entry
-            if not _looks_like_profile(profile):
-                # some apps nest the profile one level down (e.g. <name>/<name>)
-                nested = entry / entry.name
-                if nested.is_dir() and _looks_like_profile(nested):
-                    profile = nested
-                else:
-                    continue
-            seen.add(entry)
+            seen_entries.add(entry)
             key = entry.name.lower().replace(" ", "")
             pids = next((v for k, v in running.items() if key in k or k in key), [])
-            apps.append(
-                ElectronApp(
-                    name=entry.name,
-                    profile_dir=profile,
-                    version=_guess_version(profile),
-                    pids=pids,
-                    running=bool(pids),
+            for name, profile in iter_profiles_for_entry(entry):
+                if profile in seen_profiles:
+                    continue
+                seen_profiles.add(profile)
+                apps.append(
+                    ElectronApp(
+                        name=name,
+                        profile_dir=profile,
+                        version=_guess_version(profile),
+                        pids=pids,
+                        running=bool(pids),
+                    )
                 )
-            )
     return apps
 
 

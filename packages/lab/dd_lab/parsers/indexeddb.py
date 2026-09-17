@@ -70,7 +70,20 @@ def _emit_database(ctx, widb, db_id, source_file) -> Iterator[NormalizedArtifact
         except Exception:
             continue
         for rec in _safe_records(store):
-            locator = f"{db.name}/{store_name}/{_key_repr(rec)}"
+            # ldb_seq_no distinguishes each physical write of the same
+            # logical key - without it, every historical/superseded value
+            # for a repeatedly-updated key (live_only=False deliberately
+            # recovers all of them) hashes to the SAME artifact_id as every
+            # other version, and load_artifacts()'s ON CONFLICT DO NOTHING
+            # silently keeps only one, discarding the rest. Confirmed on
+            # real evidence: 4,007 of 6,899 Slack IndexedDB records for one
+            # app were being dropped this way before this fix - not a
+            # display issue, an actual evidence-loss bug at warehouse-load
+            # time. localstorage.py/sessionstorage.py already include
+            # their own leveldb sequence number in their locators; this was
+            # the one parser that didn't.
+            seq = getattr(rec, "ldb_seq_no", None)
+            locator = f"{db.name}/{store_name}/{_key_repr(rec)}\x1fseq={seq}"
             value = getattr(rec, "value", None)
             deleted = not getattr(rec, "is_live", True)
             if isinstance(value, (dict, list)):

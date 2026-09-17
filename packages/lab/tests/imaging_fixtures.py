@@ -75,3 +75,16 @@ def _plant_profile(mount_point: Path) -> None:
     )
     (slack / "Local Storage" / "leveldb").mkdir(parents=True)
     (slack / "Local State").write_text('{"os_crypt":{"encrypted_key":"xyz"}}')
+
+    # A native (non-Electron) app that embeds Microsoft Edge WebView2 for
+    # part of its UI - confirmed on real evidence (Roblox): the app root
+    # itself has no Electron markers, but a nested EBWebView/Default holds
+    # a genuine, separate Chromium profile.
+    roblox_webview2 = (
+        mount_point / "Users" / "Suspect" / "AppData" / "Local" / "Roblox"
+        / "UniversalApp" / "WebView2" / "EBWebView" / "Default"
+    )
+    (roblox_webview2 / "Local Storage" / "leveldb").mkdir(parents=True)
+    (roblox_webview2 / "Local State").write_text('{"os_crypt":{"encrypted_key":"webview2"}}')
+    roblox_root = mount_point / "Users" / "Suspect" / "AppData" / "Local" / "Roblox"
+    (roblox_root / "frm.cfg").write_text("not electron")

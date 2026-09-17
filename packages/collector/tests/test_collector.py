@@ -106,3 +106,38 @@ def test_locked_file_is_skipped_not_fatal(tmp_path):
         assert report.skipped and "000006.log" in report.skipped[0][0]
     finally:
         os.chmod(locked, 0o644)
+
+
+_ROBLOX_DECOY = Path.home() / "Downloads/decoy/Roblox"
+
+
+@pytest.mark.skipif(not _ROBLOX_DECOY.is_dir(), reason="no local decoy/Roblox evidence to test against")
+def test_discovers_a_real_webview2_embedded_profile():
+    """Real evidence: Roblox's own desktop client has no Electron profile -
+    it isn't Electron - but it embeds Microsoft Edge WebView2 for part of
+    its UI, and that DOES have a real, separately-nested Chromium profile
+    (Local Storage, Cache, ...) a plain root-only scan never finds."""
+    apps = discover_apps(extra_dirs=[str(_ROBLOX_DECOY.parent)])
+    webview2_matches = [a for a in apps if a.name.startswith("Roblox (WebView2")]
+    assert webview2_matches
+    for a in webview2_matches:
+        assert a.profile_dir.is_dir()
+        has_ls = (a.profile_dir / "Local Storage" / "leveldb").is_dir()
+        has_state = (a.profile_dir / "Local State").is_file()
+        assert has_ls or has_state
+
+
+@pytest.mark.skipif(not _ROBLOX_DECOY.is_dir(), reason="no local decoy evidence to test against")
+def test_discovers_a_real_msix_packaged_profile_copied_on_its_own():
+    """Real evidence: a Slack MSIX/UWP Store package folder
+    (91750D7E.Slack_<id>), copied on its own without the surrounding
+    AppData/Local/Packages/ prefix a real image or live machine has - the
+    live-collector's own glob-anchored MSIX handling doesn't apply to a
+    flat evidence folder shaped like this, but iter_profiles_for_entry's
+    MSIX-redirect check still finds it."""
+    apps = discover_apps(extra_dirs=[str(_ROBLOX_DECOY.parent)])
+    slack = [a for a in apps if a.name == "Slack"]
+    assert slack
+    assert (slack[0].profile_dir / "Local Storage" / "leveldb").is_dir() or (
+        slack[0].profile_dir / "Local State"
+    ).is_file()

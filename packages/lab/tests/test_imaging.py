@@ -43,6 +43,11 @@ def test_discover_apps_finds_the_planted_profile(raw_fat_image):
     assert any("discord" in n for n in names)
     # Microsoft-Store-packaged app (AppData/Local/Packages/.../LocalCache/Roaming/<App>)
     assert any("slack" in n for n in names)
+    # native app embedding WebView2 - no Electron markers at its own root,
+    # but a real, separately-nested Chromium profile under EBWebView/Default
+    webview2 = [a for a in apps if "roblox" in a.name.lower() and "webview2" in a.name.lower()]
+    assert webview2
+    assert webview2[0].profile_dir.name == "Default"
 
 
 def test_acquire_from_image_reports_the_examined_hosts_identity_not_the_analysts(tmp_path, raw_fat_image):

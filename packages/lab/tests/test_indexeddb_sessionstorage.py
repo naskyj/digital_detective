@@ -76,6 +76,25 @@ def test_indexeddb_source_file_and_values_are_populated():
     assert any(r.value for r in rows)
 
 
+@pytest.mark.skipif(_idb_profile() is None, reason="no real IndexedDB store available")
+def test_indexeddb_artifact_ids_are_unique():
+    """Real bug found on real evidence: indexeddb.py's locator didn't
+    include the LevelDB sequence number the way localstorage.py's and
+    sessionstorage.py's already did - so every historical/superseded value
+    for a repeatedly-updated key (live_only=False deliberately recovers all
+    of them, not just the current one) hashed to the SAME artifact_id as
+    every other version of that key. load_artifacts()'s ON CONFLICT (
+    artifact_id) DO NOTHING then silently kept only one and discarded the
+    rest at warehouse-load time - real, distinct historical values quietly
+    lost, not a display issue. Confirmed on a real case: 4,007 of 6,899
+    Slack IndexedDB records for one app were being dropped this way."""
+    rows = list(indexeddb.parse(_ctx_for(_idb_profile())))
+    ids = [r.artifact_id for r in rows]
+    assert len(set(ids)) == len(ids), (
+        f"{len(ids) - len(set(ids))} colliding artifact_id(s) out of {len(ids)} rows"
+    )
+
+
 @pytest.mark.skipif(_ss_profile() is None, reason="no real Session Storage store available")
 def test_sessionstorage_does_not_crash_and_uses_the_resilient_opener():
     """Real evidence on this dev machine happens to have zero live

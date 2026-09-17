@@ -27,6 +27,7 @@ def launch(app, host: str, port: int) -> None:
 
     window = webview.create_window("Digital Detective", base, width=1200, height=820)
     window.expose(_make_pick_file(window))
+    window.expose(_make_pick_folder(window))
     webview.start()
     server.should_exit = True
 
@@ -52,3 +53,18 @@ def _make_pick_file(window):
         return result[0] if result else None
 
     return pick_file
+
+
+def _make_pick_folder(window):
+    """Expose a native "choose folder" dialog as `pywebview.api.pick_folder()`
+    — for the image-import path's other two accepted shapes (an OS-root-
+    shaped folder, or a plain folder of already-extracted app subfolders),
+    where a file picker doesn't apply."""
+
+    def pick_folder() -> str | None:
+        import webview
+
+        result = window.create_file_dialog(webview.FileDialog.FOLDER)
+        return result[0] if result else None
+
+    return pick_folder

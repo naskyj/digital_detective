@@ -92,6 +92,44 @@ def test_warehouse_queryable(ingested):
         wh.close()
 
 
+def test_rerun_actually_refreshes_stale_computed_fields(tmp_path):
+    """load_artifacts() is ON CONFLICT (artifact_id) DO NOTHING - an
+    artifact's id is stable (hashed from case_id/source_type/source_file/
+    locator/key, never its computed fields), so a stale value for a field
+    like `deleted` or `category` would otherwise survive "Re-run analysis"
+    forever, since every re-inserted row would just be skipped as a
+    duplicate id. ingest_case() must reset_app() before reloading so a
+    re-run genuinely re-derives its data rather than re-asserting whatever
+    the first run happened to compute. A dedicated case (not the shared
+    module-scoped `ingested` fixture) so mutating the warehouse here can't
+    leak into other tests."""
+    app, profile = _available()
+    case_id = "case_rerun_001"
+    build_sample_case(tmp_path, case_id, app, profile, include=_FAST_SOURCES)
+    first = ingest_case(tmp_path, case_id)
+
+    wh = Warehouse(tmp_path / case_id / "warehouse" / "case.duckdb")
+    try:
+        one = wh.query("SELECT artifact_id FROM artifacts LIMIT 1")[0]["artifact_id"]
+        # corrupt a row exactly the way a pre-fix ingest would have left it -
+        # a value inconsistent with what the current parser would compute
+        wh.con.execute("UPDATE artifacts SET category = 'ZZZ_STALE_MARKER' WHERE artifact_id = ?", [one])
+        stale = wh.query("SELECT category FROM artifacts WHERE artifact_id = ?", [one])
+        assert stale[0]["category"] == "ZZZ_STALE_MARKER"
+    finally:
+        wh.close()
+
+    ingest_case(tmp_path, case_id)  # re-run, same evidence, unchanged case directory
+
+    wh = Warehouse(tmp_path / case_id / "warehouse" / "case.duckdb")
+    try:
+        assert wh.count() == first.artifact_count  # same evidence -> same artifact count
+        row = wh.query("SELECT category FROM artifacts WHERE artifact_id = ?", [one])
+        assert row and row[0]["category"] != "ZZZ_STALE_MARKER"
+    finally:
+        wh.close()
+
+
 @pytest.mark.slow
 def test_full_cache_ingest(tmp_path):
     app, profile = _available()

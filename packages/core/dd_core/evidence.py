@@ -75,6 +75,122 @@ def looks_like_profile(d: Path) -> bool:
     return has_ls or has_cache
 
 
+_WEBVIEW2_MARKER = "EBWebView"
+
+
+def find_webview2_profiles(root: Path, *, max_depth: int = 6) -> list[Path]:
+    """Chromium profiles embedded via Microsoft Edge WebView2, nested
+    somewhere under `root` rather than at `root` itself.
+
+    A growing number of "not Electron" native Windows apps still embed a
+    WebView2 control for part of their UI (an in-app browser, an auth or
+    payment flow, ...) — and WebView2 keeps its own Chromium profile at
+    `<some app-chosen folder>/EBWebView/<profile-name>/...` (almost always
+    profile-name "Default"), completely separate from, and often much
+    deeper than, where an Electron app's profile would sit. `looks_like_
+    profile()` alone misses these entirely, since it only ever checks the
+    directory it's given, not its descendants.
+
+    Confirmed on real evidence: Roblox's desktop client has no Electron
+    profile of its own (it isn't Electron), but its embedded WebView2
+    instance has a full, real profile — Local Storage, Cache, IndexedDB —
+    nested at `Roblox/UniversalApp/WebView2/EBWebView/Default/...` and
+    again per-version at `Roblox/Versions/<hash>/<exe>.WebView2/EBWebView/
+    Default/...`. It contains genuine forensic content (payment/identity-
+    verification domains among them) a top-level-only scan never reaches.
+
+    Depth-bounded (an app can keep several old versioned copies around,
+    e.g. Roblox's `Versions/` folder) rather than an unbounded recursive
+    glob, to keep this a contained cost per already-matched candidate app
+    root — not a scan of the whole image.
+    """
+    found: list[Path] = []
+
+    def walk(d: Path, depth: int) -> None:
+        if depth > max_depth:
+            return
+        try:
+            children = list(d.iterdir())
+        except OSError:
+            return
+        for child in children:
+            try:
+                if not child.is_dir():
+                    continue
+            except OSError:
+                continue
+            if child.name == _WEBVIEW2_MARKER:
+                for prof in _safe_iterdir(child):
+                    try:
+                        if prof.is_dir() and looks_like_profile(prof):
+                            found.append(prof)
+                    except OSError:
+                        continue
+                continue  # nothing profile-shaped lives any deeper inside EBWebView itself
+            walk(child, depth + 1)
+
+    walk(root, 0)
+    return found
+
+
+def _safe_iterdir(d: Path) -> list[Path]:
+    try:
+        return list(d.iterdir())
+    except OSError:
+        return []
+
+
+_MSIX_REDIRECT_ROOTS = ("Roaming", "Local")
+
+
+def iter_profiles_for_entry(entry: Path) -> list[tuple[str, Path]]:
+    """Every (name, profile_dir) found at or under one candidate directory -
+    `entry` itself, one level nested (`<name>/<name>`, some apps do this),
+    an MSIX/UWP Store-package redirect (`entry/LocalCache/{Roaming,Local}/
+    *`), or embedded via WebView2 (possibly more than one, if the app keeps
+    several versioned copies around).
+
+    The one place "is this candidate actually a profile, and exactly
+    where" is decided - the live collector (`dd_collector.discover`),
+    image-based discovery (`dd_lab.imaging.discover`), and folder-based
+    import (`dd_lab.imaging.acquire::discover_apps_in_folder`) all call
+    this instead of each re-implementing the same checks, so a fix or an
+    addition (WebView2 support, this MSIX check) lands in exactly one
+    place for all three acquisition paths at once.
+
+    The MSIX check is a second, independent path to the same layout the
+    image/live-collector discovery globs already anchor directly at
+    (`Users/*/AppData/Local/Packages/*/LocalCache/{Roaming,Local}/*`) - it
+    matters here because a *flat* evidence folder (one subfolder per app,
+    no `AppData/Local/Packages/` prefix to glob against) has no such fixed
+    prefix to anchor on; confirmed on real evidence, a Store-packaged
+    Slack folder copied on its own (`<folder>/<PackageFamilyName>/...`)
+    was invisible to a flat-folder scan without this.
+    """
+    if looks_like_profile(entry):
+        return [(entry.name, entry)]
+    nested = entry / entry.name
+    if nested.is_dir() and looks_like_profile(nested):
+        return [(entry.name, nested)]
+    found = []
+    for root_name in _MSIX_REDIRECT_ROOTS:
+        redirect_root = entry / "LocalCache" / root_name
+        if not redirect_root.is_dir():
+            continue
+        for child in _safe_iterdir(redirect_root):
+            try:
+                if child.is_dir() and looks_like_profile(child):
+                    found.append((child.name, child))
+            except OSError:
+                continue
+    if found:
+        return found
+    for wv in find_webview2_profiles(entry):
+        via = str(wv.parent.parent.relative_to(entry))
+        found.append((f"{entry.name} (WebView2 via {via})", wv))
+    return found
+
+
 # Friendly aliases accepted in `include` (so callers/tests need not know the
 # exact Chromium path).
 _ALIASES = {

@@ -95,6 +95,17 @@ def ingest_case(
     clf = classifier or (Classifier() if classify else None)
     try:
         for app in apps:
+            # load_artifacts() is ON CONFLICT (artifact_id) DO NOTHING - an
+            # artifact's id is stable (hashed from case_id/source_type/
+            # source_file/locator/key, not its computed fields), so without
+            # clearing first, "Re-run analysis" on an already-processed case
+            # would silently keep every artifact's ORIGINAL fields forever,
+            # even after a parser or classifier fix that changes what gets
+            # computed for that same id (the `deleted` flag being exactly
+            # such a case). reset_app() makes a re-run genuinely re-derive
+            # this app's artifacts from the evidence, not just re-assert
+            # unchanged ones.
+            wh.reset_app(app)
             counter = _Counter()
             stream = _counting(parse_app(case_id, layout.evidence, app), counter)
             if classify:

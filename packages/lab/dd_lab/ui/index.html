@@ -149,12 +149,15 @@ function imageImportPanel(){
   const box=el('div',{class:'panel'});
   box.append(el('h2',{style:'margin-top:0'},'Process a Forensic Image'),
     el('div',{class:'hint',style:'margin-bottom:10px'},
-      'Supports raw/dd images (including split segments), VMDK and VHD/VHDX virtual '+
-      'disks, and E01/EWF containers. The image is opened read-only; nothing on it is '+
+      'Accepts a disk image file (raw/dd, including split segments, VMDK, VHD/VHDX, '+
+      'or E01/EWF), a folder already shaped like an OS root (a mounted or extracted '+
+      'image), or a plain folder holding one already-extracted app per subfolder - '+
+      'same field, auto-detected. Everything is opened read-only; nothing here is '+
       'ever modified.'));
 
-  const path=el('input',{placeholder:'/path/to/image.raw or E:\\case.E01',style:'width:420px'});
-  const browsePath=el('button',{class:'sec',onclick:()=>browseForFile(path)},'Browse…');
+  const path=el('input',{placeholder:'/path/to/image.raw, E:\\case.E01, or a folder',style:'width:420px'});
+  const browsePath=el('button',{class:'sec',onclick:()=>browseForFile(path)},'Browse file…');
+  const browseFolder=el('button',{class:'sec',onclick:()=>browseForFolder(path)},'Browse folder…');
   const scanLog=el('div',{class:'hint'});
   const appsBox=el('div',{style:'display:none;margin-top:10px'});
   const checks=[];
@@ -184,7 +187,7 @@ function imageImportPanel(){
   }},'Scan Image');
 
   box.append(el('label',{},'Image path (readable by this machine)'),
-    el('div',{class:'row'}, path, browsePath),
+    el('div',{class:'row'}, path, browsePath, browseFolder),
     el('div',{class:'row',style:'margin-top:8px'}, scanBtn), scanLog, appsBox);
 
   const op=el('input',{placeholder:'e.g. Det. A. Smith',style:'width:300px'});
@@ -245,6 +248,20 @@ async function browseForFile(inputEl,fileTypes){
     const p=await window.pywebview.api.pick_file(fileTypes||null);
     if(p) inputEl.value=p;
   }catch(e){ alert('Could not open the file picker: '+e.message); }
+}
+
+async function browseForFolder(inputEl){
+  // For the image-import path's other two accepted shapes - an OS-root-
+  // shaped folder, or a plain folder of already-extracted app subfolders -
+  // where a file picker doesn't apply.
+  if(!(window.pywebview && window.pywebview.api && window.pywebview.api.pick_folder)){
+    alert('Native folder browsing needs the desktop app window (not a plain browser tab) — type the path instead.');
+    return;
+  }
+  try{
+    const p=await window.pywebview.api.pick_folder();
+    if(p) inputEl.value=p;
+  }catch(e){ alert('Could not open the folder picker: '+e.message); }
 }
 
 async function pollJob(id,logEl,onDone){

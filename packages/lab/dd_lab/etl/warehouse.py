@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     extracted_ts      TIMESTAMP NOT NULL,
     size_bytes        BIGINT NOT NULL,
     value_sha256      VARCHAR NOT NULL,
-    deleted           BOOLEAN NOT NULL DEFAULT FALSE,  -- recovered from a tombstoned/overwritten record
+    deleted           BOOLEAN DEFAULT FALSE,  -- recovered from a tombstoned/overwritten record
     -- classification (filled by the NLP ensemble)
     category          VARCHAR,
     confidence        DOUBLE,
@@ -141,6 +141,18 @@ _JSON_COLUMNS = (
 )
 
 
+#: Columns added to `artifacts` after its first release, applied with
+#: `ADD COLUMN IF NOT EXISTS` so an already-processed case's warehouse
+#: (predating the column) keeps working without a full re-ingest - DuckDB's
+#: `CREATE TABLE IF NOT EXISTS` above does NOT retroactively alter an
+#: existing table, so a new column needs its own explicit migration here or
+#: every real case processed before this line shipped would start throwing
+#: "column not found" on any query that names it.
+_MIGRATIONS = (
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS deleted BOOLEAN DEFAULT FALSE",
+)
+
+
 class Warehouse:
     def __init__(self, db_path: str | Path):
         self.path = Path(db_path)
@@ -148,6 +160,8 @@ class Warehouse:
         _clean_orphaned_load_files(self.path.parent)
         self.con = duckdb.connect(str(self.path))
         self.con.execute(SCHEMA)
+        for stmt in _MIGRATIONS:
+            self.con.execute(stmt)
 
     # ------------------------------------------------------------------ load
 

@@ -1,4 +1,5 @@
-"""Find Electron app profiles inside an opened disk image.
+"""Find Electron app profiles inside an opened disk image, or in a plain
+folder that already holds one subfolder per app.
 
 Mirrors `dd_collector.discover`'s live-machine scan but walks the *image's*
 own directory tree instead of the current process's environment, since the
@@ -6,6 +7,18 @@ image may be a different OS and user set than the machine running the lab.
 A static image has no running processes, so unlike the live collector there
 is no `running`/`pids` on the result — a profile is either present or it
 isn't.
+
+`discover_apps_in_folder` is the third of three discovery entry points
+(live collector, image, folder) that all end up calling `dd_core.evidence
+.iter_profiles_for_entry` for the actual "is this a profile" decision — the
+only thing that differs between them is what candidate directories they
+hand it: a live machine's real AppData roots, an opened image's `Users/*/
+AppData/*` globs, or (here) a plain folder's own immediate children. It
+exists because `dd-lab` never collects evidence live from the machine it
+runs on (that's `dd_collector`'s job) but a directory of evidence someone
+already extracted — by hand, by another tool, from a mounted image - isn't
+"live collection"; it's the same kind of already-static input an image is,
+just shaped differently.
 
 A real multi-partition Windows image is NOT a flat root: `target.fs.path("/")`
 exposes each volume under its own prefix (`c:`, `efi`, `sysvol`, ...) —
@@ -21,9 +34,10 @@ doesn't exist just returns nothing, it isn't an error.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from dd_core.evidence import looks_like_profile
+from dd_core.evidence import iter_profiles_for_entry
 
 if TYPE_CHECKING:
     from dissect.target import Target
@@ -75,7 +89,12 @@ def discover_apps(target: Target) -> list[ImageApp]:
     """Scan every user-profile root on the image for Chromium/Electron
     signatures (`Local State`, or a `Local Storage/leveldb` / `Cache` pair)."""
     root = target.fs.path("/")
-    seen: set[str] = set()
+    # Two separate sets deliberately: an `entry` that IS itself a profile
+    # would otherwise get marked seen before iter_profiles_for_entry() ever
+    # got to return it - silently dropping every direct-match app the
+    # moment its containing directory was recorded.
+    seen_entries: set[str] = set()
+    seen_profiles: set[str] = set()
     apps: list[ImageApp] = []
 
     for pattern in _ROOT_GLOBS:
@@ -90,17 +109,15 @@ def discover_apps(target: Target) -> list[ImageApp]:
             except OSError:
                 continue
             key = str(entry).lower()
-            if key in seen:
+            if key in seen_entries:
                 continue
-            profile = entry
-            if not looks_like_profile(profile):
-                # some apps nest the profile one level down (<name>/<name>)
-                nested = entry / entry.name
-                if not (nested.is_dir() and looks_like_profile(nested)):
+            seen_entries.add(key)
+            for name, profile in iter_profiles_for_entry(entry):
+                pkey = str(profile).lower()
+                if pkey in seen_profiles:
                     continue
-                profile = nested
-            seen.add(key)
-            apps.append(ImageApp(name=entry.name, profile_dir=profile, version=_guess_version(profile)))
+                seen_profiles.add(pkey)
+                apps.append(ImageApp(name=name, profile_dir=profile, version=_guess_version(profile)))
     return apps
 
 
@@ -108,3 +125,32 @@ def find_app(target: Target, name_or_path: str) -> ImageApp | None:
     lowered = name_or_path.lower()
     matches = [a for a in discover_apps(target) if lowered in a.name.lower()]
     return matches[0] if matches else None
+
+
+def discover_apps_in_folder(folder: Path) -> list[ImageApp]:
+    """Scan a plain folder's immediate children for Chromium/Electron
+    profiles - the folder itself is NOT an image or an OS root (dissect's
+    own directory loader, reached via `open_image`, already handles that
+    shape); this is for a folder that holds one subfolder per already-
+    extracted app instead, e.g. `<somewhere>/discord/`, `<somewhere>/
+    Roblox/`, ... side by side."""
+    seen_entries: set[str] = set()
+    seen_profiles: set[str] = set()
+    apps: list[ImageApp] = []
+    for entry in sorted(_safe_iterdir(folder)):
+        try:
+            if not entry.is_dir():
+                continue
+        except OSError:
+            continue
+        key = str(entry).lower()
+        if key in seen_entries:
+            continue
+        seen_entries.add(key)
+        for name, profile in iter_profiles_for_entry(entry):
+            pkey = str(profile).lower()
+            if pkey in seen_profiles:
+                continue
+            seen_profiles.add(pkey)
+            apps.append(ImageApp(name=name, profile_dir=profile, version=_guess_version(profile)))
+    return apps

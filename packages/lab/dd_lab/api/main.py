@@ -137,18 +137,46 @@ def put_settings(body: SettingsIn) -> dict:
 # target, and a live acquisition never depends on anything the lab needs.
 
 
-@app.post("/api/image/list")
-def image_list(body: ImageListIn) -> dict:
-    """Open a disk image and list the Electron/Chromium app profiles found on
-    it — no extraction yet. Fails cleanly (400, not a crash) if the `image`
-    extra isn't installed or the file isn't a recognisable image."""
-    from dd_lab.imaging import ImageUnavailable, discover_apps, open_image
+def _is_real_image(path: str) -> bool:
+    """True if `dissect` can open `path` as an image (a real image file, or
+    a folder shaped like an OS root - its own directory loader handles
+    both). False for anything else, including a plain folder of already-
+    extracted app subfolders - the caller falls back to the folder-import
+    path for those instead of a raised ImageUnavailable."""
+    from dd_lab.imaging import ImageUnavailable, open_image
 
     try:
+        open_image(path)
+        return True
+    except ImageUnavailable:
+        return False
+
+
+def _not_recognised_error(path: str) -> str:
+    return f"{path} is not a recognisable image, OS-root folder, or evidence folder"
+
+
+@app.post("/api/image/list")
+def image_list(body: ImageListIn) -> dict:
+    """List the Electron/Chromium app profiles found at `image_path` — no
+    extraction yet. Accepts a real image file, a folder shaped like an OS
+    root, OR a plain folder holding one subfolder per already-extracted
+    app (three different input shapes, one field) — tries the image/OS-root
+    path first via `dissect`, falls back to a flat folder scan when that
+    doesn't apply and the path is a directory. Fails cleanly (400, not a
+    crash) if neither recognises it, or the `image` extra isn't installed."""
+    from pathlib import Path
+
+    from dd_lab.imaging import discover_apps, discover_apps_in_folder, open_image
+
+    p = Path(body.image_path)
+    if _is_real_image(body.image_path):
         target = open_image(body.image_path)
         apps = discover_apps(target)
-    except ImageUnavailable as e:
-        raise HTTPException(400, str(e)) from e
+    elif p.is_dir():
+        apps = discover_apps_in_folder(p)
+    else:
+        raise HTTPException(400, _not_recognised_error(body.image_path))
     return {
         "apps": [{"name": a.name, "profile_dir": str(a.profile_dir), "version": a.version} for a in apps],
     }
@@ -156,12 +184,19 @@ def image_list(body: ImageListIn) -> dict:
 
 @app.post("/api/image/extract")
 def image_extract(body: ImageExtractIn) -> dict:
-    from dd_lab.imaging import acquire_from_image
+    from pathlib import Path
+
+    from dd_lab.imaging import acquire_from_folder, acquire_from_image
+
+    is_image = _is_real_image(body.image_path)
+    if not is_image and not Path(body.image_path).is_dir():
+        raise HTTPException(400, _not_recognised_error(body.image_path))
 
     def work(progress) -> dict:
         # ImageUnavailable (and anything else) is caught by JobManager and
         # surfaced on the job record — no crash, just a failed job the UI shows.
-        result = acquire_from_image(
+        acquire = acquire_from_image if is_image else acquire_from_folder
+        result = acquire(
             body.image_path, _settings.cases_root,
             apps=body.apps, memory_image_path=body.memory_image_path,
             case_id=body.case_id, operator=body.operator, progress=progress,

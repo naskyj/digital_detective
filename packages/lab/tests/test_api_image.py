@@ -81,3 +81,36 @@ def test_image_extract_produces_a_case_reachable_via_the_normal_api(client, raw_
     got = client.get("/api/cases/api_image_case")
     assert got.status_code == 200
     assert got.json()["integrity"]["ok"] is True
+
+
+@pytest.fixture()
+def evidence_folder(tmp_path) -> Path:
+    """A plain folder holding one already-extracted app subfolder - the
+    third input shape /api/image/list and /api/image/extract accept
+    alongside a real image file and an OS-root-shaped folder."""
+    folder = tmp_path / "extracted_evidence"
+    profile = folder / "Discord"
+    (profile / "Local Storage" / "leveldb").mkdir(parents=True)
+    (profile / "Local State").write_text('{"os_crypt":{"encrypted_key":"abc"}}')
+    return folder
+
+
+def test_image_list_accepts_a_flat_evidence_folder(client, evidence_folder):
+    r = client.post("/api/image/list", json={"image_path": str(evidence_folder)})
+    assert r.status_code == 200
+    names = [a["name"].lower() for a in r.json()["apps"]]
+    assert any("discord" in n for n in names)
+
+
+def test_image_extract_accepts_a_flat_evidence_folder(client, evidence_folder):
+    r = client.post("/api/image/extract", json={
+        "image_path": str(evidence_folder), "operator": "Test Examiner", "case_id": "api_folder_case",
+    })
+    assert r.status_code == 200
+    job = _poll(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+
+    result = job["result"]
+    assert result["case_id"] == "api_folder_case"
+    assert "discord" in [a.lower() for a in result["apps"]]
+    assert result["image_sha256"] == ""
