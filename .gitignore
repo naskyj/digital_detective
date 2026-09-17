@@ -27,10 +27,13 @@ evidence_samples/
 cases/
 
 # Per-case exports from scripts/export_for_labeling.py — derived from real
-# evidence, regenerable from the case + script; never commit the bulk export.
-# A final, manually-curated gold set is a deliberate exception (add it
-# explicitly with `git add -f` if you want that small file tracked).
+# evidence, regenerable from the case + script; never commit the bulk export
+# (as a directory or zipped/archived up for moving around). A final,
+# manually-curated gold set is a deliberate exception (add it explicitly
+# with `git add -f` if you want that small file tracked).
 model/eval/*/
+model/eval/*.zip
+model/eval/*.tar.gz
 *.duckdb
 *.dmp
 *.raw

@@ -635,7 +635,10 @@ function browser(id,cats,fixed){
       ...cols.map(h=>el('th',{title:h==='Conf'?confTitle:''},h)))));
     const tb=el('tbody',{});
     d.rows.forEach(r=>{
-      const cells=[el('td',{},el('span',{class:'pill cat'},r.category||'')),
+      const catCell=el('td',{},el('span',{class:'pill cat'},r.category||''));
+      if(r.deleted) catCell.append(' ',el('span',{class:'pill bad',
+        title:'Recovered from a tombstoned/overwritten LevelDB record, not the current live value'},'deleted'));
+      const cells=[catCell,
         el('td',{title:confTitle},r.confidence!=null?r.confidence.toFixed(2):'')];
       if(!fixed.app) cells.push(el('td',{},r.app));
       if(!fixed.source_type) cells.push(el('td',{},SRC_LABELS[r.source_type]||r.source_type));
@@ -646,7 +649,8 @@ function browser(id,cats,fixed){
         el('td',{class:'mono'},r.key), el('td',{},r.value));
       // the physical evidence file this row came from, on hover - keeps the
       // table from needing its own column for it
-      tb.append(el('tr',{title:r.source_file?'file: '+r.source_file:''},...cells));
+      const rowTitle=(r.deleted?'RECOVERED (deleted record) · ':'')+(r.source_file?'file: '+r.source_file:'');
+      tb.append(el('tr',{title:rowTitle},...cells));
     });
     t.append(tb); out.innerHTML=''; out.append(t);
   }

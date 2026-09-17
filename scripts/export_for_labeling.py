@@ -36,14 +36,14 @@ for pkg in ("core", "lab"):
 
 _FIELDS = [
     "artifact_id", "app", "source_type", "category", "confidence",
-    "key", "value", "text", "record_ts", "source_file", "label",
+    "key", "value", "text", "record_ts", "source_file", "deleted", "label",
 ]
 
 
 def _load_rows(wh, source_type: str) -> list[dict]:
     rows = wh.query(
         "SELECT artifact_id, app, source_type, category, confidence, key, value, "
-        "record_ts, source_file FROM artifacts WHERE source_type = ? ORDER BY app, key",
+        "record_ts, source_file, deleted FROM artifacts WHERE source_type = ? ORDER BY app, key",
         [source_type],
     )
     for r in rows:

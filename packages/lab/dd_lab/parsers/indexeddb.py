@@ -72,15 +72,18 @@ def _emit_database(ctx, widb, db_id, source_file) -> Iterator[NormalizedArtifact
         for rec in _safe_records(store):
             locator = f"{db.name}/{store_name}/{_key_repr(rec)}"
             value = getattr(rec, "value", None)
+            deleted = not getattr(rec, "is_live", True)
             if isinstance(value, (dict, list)):
                 yield from emit_parsed_value(
                     ctx, source_type=SourceType.INDEXEDDB, source_file=source_file,
                     locator=locator, key=f"idb.{db.name}.{store_name}", parsed=value,
+                    deleted=deleted,
                 )
             elif value is not None:
                 yield from emit_value(
                     ctx, source_type=SourceType.INDEXEDDB, source_file=source_file,
                     locator=locator, key=f"idb.{db.name}.{store_name}", raw_value=str(value),
+                    deleted=deleted,
                 )
 
 

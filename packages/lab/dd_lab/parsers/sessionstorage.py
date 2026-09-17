@@ -35,6 +35,7 @@ def parse(ctx: ParseContext) -> Iterator[NormalizedArtifact]:
                     locator=locator,
                     key=f"{host} :: {rec.key}",
                     raw_value=rec.value if rec.value is not None else "",
+                    deleted=rec.is_deleted,
                 )
             except Exception:
                 log.exception("bad Session Storage record in %s", ss_dir)

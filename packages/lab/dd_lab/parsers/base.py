@@ -84,6 +84,7 @@ def make_artifact(
     value: str,
     value_type: ValueType = ValueType.STRING,
     record_ts: datetime | None = None,
+    deleted: bool = False,
 ) -> NormalizedArtifact:
     return NormalizedArtifact(
         artifact_id=NormalizedArtifact.make_id(ctx.case_id, source_type, source_file, locator, key),
@@ -97,6 +98,7 @@ def make_artifact(
         value_type=value_type,
         record_ts=record_ts,
         extracted_ts=datetime.now(UTC),
+        deleted=deleted,
     )
 
 
@@ -128,6 +130,7 @@ def emit_parsed_value(
     key: str,
     parsed: object,
     record_ts: datetime | None = None,
+    deleted: bool = False,
 ) -> Iterator[NormalizedArtifact]:
     """Like `emit_value`, but for a value that's already a parsed Python
     object (dict/list) rather than a raw JSON string - e.g. IndexedDB
@@ -138,7 +141,7 @@ def emit_parsed_value(
         yield make_artifact(
             ctx, source_type=source_type, source_file=source_file,
             locator=f"{locator}#{leaf_path}", key=join_leaf_key(key, leaf_path),
-            value=leaf_value, value_type=leaf_type, record_ts=record_ts,
+            value=leaf_value, value_type=leaf_type, record_ts=record_ts, deleted=deleted,
         )
     if not produced:
         import json as _json
@@ -146,6 +149,7 @@ def emit_parsed_value(
         yield make_artifact(
             ctx, source_type=source_type, source_file=source_file, locator=locator,
             key=key, value=_json.dumps(parsed), value_type=ValueType.JSON, record_ts=record_ts,
+            deleted=deleted,
         )
 
 
@@ -158,17 +162,23 @@ def emit_value(
     key: str,
     raw_value: str,
     record_ts: datetime | None = None,
+    deleted: bool = False,
 ) -> Iterator[NormalizedArtifact]:
     """Emit one artifact for a plain value, or many if the value is a JSON document.
 
     This is the workhorse used by the storage parsers: a Local Storage value that
     happens to be JSON becomes one row per leaf, keyed `<key>.<leaf path>`.
+    `deleted=True` marks every resulting artifact as recovered from a
+    tombstoned/overwritten LevelDB record rather than the current live value
+    (see localstorage.py/sessionstorage.py/indexeddb.py, which already pull
+    these via ccl_chromium_reader's include_deletions/live_only flags but,
+    until this, silently discarded which ones they were).
     """
     parsed = try_parse_json(raw_value)
     if parsed is None:
         yield make_artifact(
             ctx, source_type=source_type, source_file=source_file, locator=locator,
-            key=key, value=raw_value, record_ts=record_ts,
+            key=key, value=raw_value, record_ts=record_ts, deleted=deleted,
         )
         return
     produced = False
@@ -177,12 +187,13 @@ def emit_value(
         yield make_artifact(
             ctx, source_type=source_type, source_file=source_file,
             locator=f"{locator}#{leaf_path}", key=join_leaf_key(key, leaf_path),
-            value=leaf_value, value_type=leaf_type, record_ts=record_ts,
+            value=leaf_value, value_type=leaf_type, record_ts=record_ts, deleted=deleted,
         )
     if not produced:
         yield make_artifact(
             ctx, source_type=source_type, source_file=source_file, locator=locator,
             key=key, value=raw_value, value_type=ValueType.JSON, record_ts=record_ts,
+            deleted=deleted,
         )
 
 

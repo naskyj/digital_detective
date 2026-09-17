@@ -383,7 +383,7 @@ def case_artifacts(
         rows = wh.query(
             f"SELECT app, source_type, category, confidence, key, substr(value,1,300) AS value, "
             f"record_ts, source_file, source_locator, artifact_id, regex_vote, keyword_vote, "
-            f"ner_vote, model_vote, evidence_spans FROM artifacts {clause} "
+            f"ner_vote, model_vote, evidence_spans, deleted FROM artifacts {clause} "
             f"ORDER BY (category != 'GENERAL') DESC, confidence DESC NULLS LAST, key, artifact_id "
             f"LIMIT {int(limit)} OFFSET {int(offset)}",
             list(params),
@@ -532,7 +532,7 @@ def case_artifacts_export(
     from dd_lab.etl.warehouse import Warehouse
 
     fields = ["app", "source_type", "category", "confidence", "key", "value",
-              "record_ts", "source_file", "artifact_id"]
+              "record_ts", "source_file", "artifact_id", "deleted"]
     wh = Warehouse(deps.layout.warehouse)
     try:
         rows = wh.query(

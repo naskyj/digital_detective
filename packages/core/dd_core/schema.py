@@ -50,6 +50,7 @@ class NormalizedArtifact(BaseModel):
     extracted_ts: datetime  # when the parser produced this row
     size_bytes: int = 0
     value_sha256: str = ""
+    deleted: bool = False  # recovered from a tombstoned/overwritten LevelDB record, not the live value
 
     classification: ClassificationResult | None = None
 

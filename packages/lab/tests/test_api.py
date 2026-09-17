@@ -171,8 +171,11 @@ def test_case_lifecycle_via_api(client):
     # just category/confidence - this is what the UI's classification panel
     # and artifact-browser "why" view read.
     row = arts["rows"][0]
-    for col in ("artifact_id", "regex_vote", "keyword_vote", "ner_vote", "model_vote", "evidence_spans"):
+    for col in (
+        "artifact_id", "regex_vote", "keyword_vote", "ner_vote", "model_vote", "evidence_spans", "deleted",
+    ):
         assert col in row
+    assert isinstance(row["deleted"], bool)
 
     clf = client.get("/api/cases/case_api_1/classification").json()
     assert clf["by_category"]

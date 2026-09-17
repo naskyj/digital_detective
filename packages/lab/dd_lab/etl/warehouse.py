@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     extracted_ts      TIMESTAMP NOT NULL,
     size_bytes        BIGINT NOT NULL,
     value_sha256      VARCHAR NOT NULL,
+    deleted           BOOLEAN NOT NULL DEFAULT FALSE,  -- recovered from a tombstoned/overwritten record
     -- classification (filled by the NLP ensemble)
     category          VARCHAR,
     confidence        DOUBLE,
@@ -119,6 +120,7 @@ CREATE OR REPLACE VIEW v_source_breakdown AS
 _CORE_COLS = (
     "artifact_id", "case_id", "app", "source_type", "source_file", "source_locator",
     "key", "value", "value_type", "record_ts", "extracted_ts", "size_bytes", "value_sha256",
+    "deleted",
 )
 _CLASS_COLS = (
     "category", "confidence", "regex_vote", "ner_vote", "keyword_vote", "model_vote",
@@ -132,7 +134,7 @@ _JSON_COLUMNS = (
     ("source_type", "VARCHAR"), ("source_file", "VARCHAR"), ("source_locator", "VARCHAR"),
     ("key", "VARCHAR"), ("value", "VARCHAR"), ("value_type", "VARCHAR"),
     ("record_ts", "TIMESTAMP"), ("extracted_ts", "TIMESTAMP"),
-    ("size_bytes", "BIGINT"), ("value_sha256", "VARCHAR"),
+    ("size_bytes", "BIGINT"), ("value_sha256", "VARCHAR"), ("deleted", "BOOLEAN"),
     ("category", "VARCHAR"), ("confidence", "DOUBLE"), ("regex_vote", "VARCHAR"),
     ("ner_vote", "VARCHAR"), ("keyword_vote", "VARCHAR"), ("model_vote", "VARCHAR"),
     ("evidence_spans", "VARCHAR"), ("classifier_version", "VARCHAR"), ("classified_ts", "TIMESTAMP"),
@@ -198,7 +200,7 @@ class Warehouse:
             "value_type": str(a.value_type),
             "record_ts": a.record_ts.isoformat() if a.record_ts else None,
             "extracted_ts": a.extracted_ts.isoformat(),
-            "size_bytes": a.size_bytes, "value_sha256": a.value_sha256,
+            "size_bytes": a.size_bytes, "value_sha256": a.value_sha256, "deleted": a.deleted,
             "category": str(c.category) if c else None,
             "confidence": c.confidence if c else None,
             "regex_vote": _s(c.regex_vote) if c else None,

@@ -35,6 +35,7 @@ def parse(ctx: ParseContext) -> Iterator[NormalizedArtifact]:
                     locator=locator,
                     key=key,
                     raw_value=rec.value if rec.value is not None else "",
+                    deleted=not rec.is_live,
                 )
             except Exception:
                 log.exception("bad Local Storage record in %s", leveldb_dir)
