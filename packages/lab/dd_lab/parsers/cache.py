@@ -252,7 +252,9 @@ def _entry_size(cache, key: str) -> int | None:
         return None
 
 
-def _describe_entry(ctx: ParseContext, cache, key: str, cache_dir_rel: str, kind: str) -> CacheFileEntry | None:
+def _describe_entry(
+    ctx: ParseContext, cache, key: str, cache_dir_rel: str, kind: str
+) -> CacheFileEntry | None:
     try:
         meta = next((m for m in cache.get_metadata(key) if m), None)
     except Exception:

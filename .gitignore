@@ -25,6 +25,12 @@ model/**/*.safetensors
 model/**/*.bin
 evidence_samples/
 cases/
+
+# Per-case exports from scripts/export_for_labeling.py — derived from real
+# evidence, regenerable from the case + script; never commit the bulk export.
+# A final, manually-curated gold set is a deliberate exception (add it
+# explicitly with `git add -f` if you want that small file tracked).
+model/eval/*/
 *.duckdb
 *.dmp
 *.raw

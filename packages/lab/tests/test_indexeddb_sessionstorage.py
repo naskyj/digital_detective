@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from dd_lab.parsers.base import ParseContext
 from dd_lab.parsers import indexeddb, sessionstorage
+from dd_lab.parsers.base import ParseContext
 
 _IDB_CANDIDATES = [
     Path.home() / "Library/Application Support/Cursor",
