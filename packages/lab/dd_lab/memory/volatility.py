@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -59,17 +60,34 @@ def _pslist_rows(image: Path) -> list[dict] | None:
     return run_plugin(image, "windows.pslist.PsList")
 
 
+_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
+
+
 def _fuzzy_name_match(app_name: str, image_file_name: str) -> bool:
-    """Same convention as dd_collector.discover._running_electron/discover_apps:
-    lowercase, strip a trailing .exe, bidirectional substring containment. A
-    Windows EPROCESS's ImageFileName is capped at 15 chars (kernel-side
-    limit, not ours - e.g. "RobloxPlayerBe"), so containment rather than
-    equality is required either way."""
-    a = app_name.strip().lower()
+    """dd_collector.discover's own _running_electron/discover_apps matching
+    (lowercase, strip a trailing .exe, bidirectional substring containment)
+    works when app_name is a plain app label like "discord". It does NOT
+    work against this project's own SANITISED, possibly source-labelled or
+    WebView2-qualified target-app names actually found in real manifests -
+    e.g. "Roblox__WebView2_via_UniversalApp_WebView2" contains no literal
+    "robloxplayerbe" substring at all, confirmed against the real case
+    (20260915_013847_9be1ee7d)'s manifest. Split on non-alphanumerics into
+    tokens instead, and match if any token (4+ chars, to skip filler like
+    "via") is contained in - or contains - the process name. A useful side
+    effect: this also makes "webview2" itself a token of that label, so
+    Roblox's WebView2-hosted children (msedgewebview2.exe) are directly
+    name-matched too, not just reachable by tree-walking from the root -
+    tree-walking remains the general mechanism for children that share no
+    token with their parent's label (e.g. a generic Chromium helper name)."""
     b = image_file_name.strip().lower().removesuffix(".exe")
-    if not a or not b:
+    if not b:
         return False
-    return a in b or b in a
+    tokens = {t for t in _TOKEN_SPLIT.split(app_name.strip().lower()) if len(t) >= 4}
+    if not tokens:
+        # a short/unsplittable app_name (rare) - fall back to whole-string containment
+        a = app_name.strip().lower()
+        return bool(a) and (a in b or b in a)
+    return any(tok in b or b in tok for tok in tokens)
 
 
 def match_target_processes(image: Path, app_names: list[str]) -> dict[int, str]:

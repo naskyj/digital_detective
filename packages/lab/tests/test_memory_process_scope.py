@@ -53,6 +53,19 @@ def test_fuzzy_name_match_handles_label_prefixed_app_names():
     assert _fuzzy_name_match("suspectlaptop_discord", "Discord.exe")
 
 
+def test_fuzzy_name_match_handles_real_webview2_qualified_names():
+    # the real case's actual manifest target_apps name, verbatim - plain
+    # whole-string containment (the pre-fix implementation) does NOT match
+    # this against "RobloxPlayerBe": there is no literal "robloxplayerbe"
+    # substring anywhere in the label. Token-splitting on "_" is required.
+    label = "Roblox__WebView2_via_UniversalApp_WebView2"
+    assert _fuzzy_name_match(label, "RobloxPlayerBe")
+    # bonus effect of tokenising: "webview2" is itself a token of the label,
+    # so the WebView2-hosted children are directly name-matched too, not
+    # only reachable via tree-walking from the root.
+    assert _fuzzy_name_match(label, "msedgewebview2.exe")
+
+
 def test_name_matching_finds_the_roots():
     with _mock_rows(_REAL_SHAPED_ROWS):
         result = match_target_processes("fake.raw", ["discord", "roblox"])
