@@ -5,7 +5,7 @@ tuning this filter - not invented."""
 
 from __future__ import annotations
 
-from dd_lab.memory.strings import _keep
+from dd_lab.memory.strings import _keep, iter_strings
 
 
 def _kept(s: str) -> bool:
@@ -79,3 +79,10 @@ def test_keeps_evidentiary_json_fields():
 
 def test_keeps_toast_notification_text():
     assert _kept("<text>hey beautiful, can i have your number?</text>")
+
+
+def test_default_cap_covers_a_real_full_ram_image():
+    # real case's physmem.raw kept ~528k strings uncapped across its full
+    # 5.83GiB (measured directly) - the cap must clear that with headroom,
+    # not silently truncate a routine full-RAM capture.
+    assert iter_strings.__defaults__[-1] >= 2_000_000

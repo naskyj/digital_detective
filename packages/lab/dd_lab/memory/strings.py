@@ -130,7 +130,17 @@ def _looks_like_sentence(s: str) -> bool:
     return " " in s and sum(c.islower() for c in s) / len(s) > 0.35
 
 
-def iter_strings(path: str | Path, min_len: int = 6, max_strings: int = 400_000) -> Iterator[str]:
+# 400_000 (this constant's old value, picked with no recorded rationale) was
+# too low: measured against the real case's 5.83GiB physmem.raw, the shape
+# filter above keeps ~89 strings/MiB fairly uniformly across the whole file
+# (80-101/MiB sampled at four points from start to end), i.e. ~528k for that
+# one file - so the old cap was hit ~4.4GiB in, silently never scanning the
+# last ~24% of the image. This is a safety backstop against pathologically
+# large/corrupt input, not a tuned budget - 2,000,000 gives >3x headroom over
+# the real case (covers a uniformly-dense image up to ~22GiB) while still
+# bounding worst-case memory/CPU use. Raise further if larger RAM captures
+# become routine.
+def iter_strings(path: str | Path, min_len: int = 6, max_strings: int = 2_000_000) -> Iterator[str]:
     ascii_re = re.compile(_ASCII_RUN.pattern % min_len)
     utf16_re = re.compile(_UTF16_RUN.pattern % min_len)
     seen: set[str] = set()
