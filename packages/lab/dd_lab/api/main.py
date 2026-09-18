@@ -22,7 +22,7 @@ from dd_lab.agent.runner import run_agent, run_pipeline
 from dd_lab.agent.tools import InvestigationDeps, query_warehouse, search_keyword
 from dd_lab.api.jobs import JobManager
 from dd_lab.api.settings import AppSettings, describe_llm
-from dd_lab.case import CaseMeta, CaseStatus, create_case, list_cases, parse_keywords
+from dd_lab.case import CaseMeta, CaseStatus, EvidenceSourceMeta, create_case, list_cases, parse_keywords
 from dd_lab.verification import verify_cached
 
 log = logging.getLogger("dd_lab.api")
@@ -62,22 +62,22 @@ class SettingsIn(BaseModel):
 
 
 class NewCaseIn(BaseModel):
-    case_id: str
+    case_id: str | None = None  # generated (dd_lab.case.new_case_id) if blank
     name: str
     description: str = ""
     keywords: str = ""
 
 
-class ImageListIn(BaseModel):
-    image_path: str
-
-
-class ImageExtractIn(BaseModel):
-    image_path: str
+class AddSourceIn(BaseModel):
+    source_path: str
+    source_label: str
     apps: list[str] | None = None  # None = every profile found
     memory_image_path: str | None = None
     operator: str = ""
-    case_id: str | None = None
+
+
+class ImageListIn(BaseModel):
+    image_path: str
 
 
 class QueryIn(BaseModel):
@@ -182,35 +182,6 @@ def image_list(body: ImageListIn) -> dict:
     }
 
 
-@app.post("/api/image/extract")
-def image_extract(body: ImageExtractIn) -> dict:
-    from pathlib import Path
-
-    from dd_lab.imaging import acquire_from_folder, acquire_from_image
-
-    is_image = _is_real_image(body.image_path)
-    if not is_image and not Path(body.image_path).is_dir():
-        raise HTTPException(400, _not_recognised_error(body.image_path))
-
-    def work(progress) -> dict:
-        # ImageUnavailable (and anything else) is caught by JobManager and
-        # surfaced on the job record — no crash, just a failed job the UI shows.
-        acquire = acquire_from_image if is_image else acquire_from_folder
-        result = acquire(
-            body.image_path, _settings.cases_root,
-            apps=body.apps, memory_image_path=body.memory_image_path,
-            case_id=body.case_id, operator=body.operator, progress=progress,
-        )
-        return {
-            "case_id": result.case_id, "files": result.file_count,
-            "bytes": result.total_bytes, "fingerprint": result.public_key_fingerprint,
-            "image_sha256": result.image_sha256, "apps": result.apps, "warnings": result.warnings,
-        }
-
-    job_id = _jobs.submit("image_extract", work, case_id=body.case_id)
-    return {"job_id": job_id}
-
-
 # --------------------------------------------------------------------- cases
 
 
@@ -240,22 +211,109 @@ def get_cases() -> dict:
 
 @app.post("/api/cases")
 def post_case(body: NewCaseIn) -> dict:
-    try:
-        meta = create_case(
-            _settings.cases_root, body.case_id, body.name, body.description,
-            parse_keywords(body.keywords),
-        )
-    except FileNotFoundError as e:
-        raise HTTPException(400, str(e)) from e
+    """Create a case's metadata (name/description/keywords) - no evidence
+    required yet. `POST /api/cases/{id}/sources` adds evidence sources to
+    it, at creation time or any time after."""
+    meta = create_case(
+        _settings.cases_root, body.case_id, body.name, body.description,
+        parse_keywords(body.keywords),
+    )
     return meta.model_dump(mode="json")
+
+
+@app.post("/api/cases/{case_id}/sources")
+def add_source(case_id: str, body: AddSourceIn) -> dict:
+    """Add one evidence source (an image, an OS-root folder, or a flat
+    evidence folder - same auto-detection as `/api/image/list`) to a case -
+    its first source, or its Nth. `source_label` prefixes every app this
+    source contributes (see `dd_lab.imaging.acquire.source_app_prefix`) so
+    two sources' identically-named apps (two people's "discord") land in
+    separate evidence folders instead of silently merging into one.
+
+    Reuses the case's EXISTING signing key when one is already there (a 2nd+
+    source) rather than generating a new one, which would otherwise change
+    the case's signing identity out from under its own chain of custody -
+    the one thing that made adding a source through the old
+    `/api/image/extract` unsafe to do more than once per case by hand."""
+    from pathlib import Path
+
+    from dd_lab.imaging import acquire_from_folder, acquire_from_image
+
+    layout = _layout(case_id)
+    meta = CaseMeta.load_or_none(layout)
+    if meta is None:
+        raise HTTPException(404, "case not found - create it first with POST /api/cases")
+    if _jobs.active_for(case_id):
+        raise HTTPException(409, "a job is already running for this case")
+
+    is_image = _is_real_image(body.source_path)
+    if not is_image and not Path(body.source_path).is_dir():
+        raise HTTPException(400, _not_recognised_error(body.source_path))
+
+    from dd_lab.imaging.acquire import source_app_prefix
+
+    new_prefix = source_app_prefix(body.source_label)
+    clashing = next(
+        (s for s in meta.sources if s.label != body.source_label
+         and source_app_prefix(s.label) == new_prefix),
+        None,
+    )
+    if clashing:
+        raise HTTPException(
+            400,
+            f'"{body.source_label}" sanitises to the same evidence-folder prefix as this '
+            f'case\'s existing source "{clashing.label}" - their apps would land in the same '
+            f"folders and merge. Use a more distinct label.",
+        )
+
+    existing_key = layout.dir / "keys" / "collector_key.pem"
+    signing_key_pem = existing_key.read_bytes() if existing_key.is_file() else None
+
+    def work(progress) -> dict:
+        acquire = acquire_from_image if is_image else acquire_from_folder
+        result = acquire(
+            body.source_path, _settings.cases_root,
+            apps=body.apps, memory_image_path=body.memory_image_path,
+            case_id=case_id, operator=body.operator, signing_key_pem=signing_key_pem,
+            source_label=body.source_label, progress=progress,
+        )
+        m = CaseMeta.load_or_none(layout) or meta
+        m.sources.append(EvidenceSourceMeta(
+            label=body.source_label, kind="image" if is_image else "folder",
+            path=body.source_path, operator=body.operator, apps=result.apps,
+        ))
+        if m.status == CaseStatus.NEW:
+            m.status = CaseStatus.COMPLETED  # evidence exists now; "Run analysis" is the next step
+        m.save(layout)
+        return {
+            "case_id": result.case_id, "files": result.file_count,
+            "bytes": result.total_bytes, "fingerprint": result.public_key_fingerprint,
+            "image_sha256": result.image_sha256, "apps": result.apps, "warnings": result.warnings,
+        }
+
+    job_id = _jobs.submit("add_source", work, case_id=case_id)
+    return {"job_id": job_id}
 
 
 @app.get("/api/cases/{case_id}")
 def get_case(case_id: str) -> dict:
     layout = _layout(case_id)
+    meta = CaseMeta.load_or_none(layout)
     if not layout.manifest.is_file():
-        raise HTTPException(404, "case not found")
-    meta = CaseMeta.load_or_none(layout) or CaseMeta(case_id=case_id, name=case_id)
+        if meta is None:
+            raise HTTPException(404, "case not found")
+        # A case can now exist with metadata and no evidence yet - sources
+        # are added over time (POST .../sources), not necessarily all at
+        # creation - so this is a normal state to render, not an error.
+        return {
+            "meta": meta.model_dump(mode="json"),
+            "integrity": None,
+            "evidence": {"apps": [], "files": 0, "bytes": 0, "acquired": None, "host": None},
+            "warehouse": None,
+            "reports": [],
+            "active_job": _jobs.active_for(case_id) or _last_job(case_id),
+        }
+    meta = meta or CaseMeta(case_id=case_id, name=case_id)
     manifest = Manifest.read(layout.dir)
     v, verified_ts = verify_cached(_settings.cases_root, case_id)
 
@@ -377,7 +435,30 @@ def case_artifact_tree(case_id: str) -> dict:
         apps.setdefault(r["app"], []).append({"source_type": r["source_type"], "n": r["n"]})
         totals[r["app"]] = totals.get(r["app"], 0) + r["n"]
     ordered = sorted(apps, key=lambda a: totals[a], reverse=True)
-    return {"apps": [{"app": a, "total": totals[a], "sources": apps[a]} for a in ordered]}
+    meta = CaseMeta.load_or_none(deps.layout)
+    return {
+        "apps": [
+            {"app": a, "total": totals[a], "sources": apps[a],
+             "source_label": _source_label_for_app(a, meta.sources if meta else [])}
+            for a in ordered
+        ],
+    }
+
+
+def _source_label_for_app(app: str, sources: list[EvidenceSourceMeta]) -> str | None:
+    """Which registered evidence source (if any) produced this `app` entry
+    - matched by the exact prefix `acquire_from_image`/`acquire_from_folder`
+    gave its apps (see `source_app_prefix`), not by trying to reverse-parse
+    a label back out of the (already-sanitised) app string. None for an app
+    from a case with no labelled sources (every case before this feature,
+    and any case whose apps were added with `source_label` left blank) -
+    the UI renders those exactly as before, no source-grouping level."""
+    from dd_lab.imaging.acquire import source_app_prefix
+
+    for s in sources:
+        if app.startswith(source_app_prefix(s.label)):
+            return s.label
+    return None
 
 
 def _derive_cache_url(source_locator: str) -> str:

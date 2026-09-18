@@ -104,7 +104,7 @@
 <nav>
   <div class="brand">🔍 Digital Detective</div>
   <a data-view="dashboard">Dashboard</a>
-  <a data-view="import">Import</a>
+  <a data-view="import">New Case</a>
   <a data-view="cases">Cases</a>
   <a data-view="settings">Settings</a>
   <div class="foot" id="jobs"></div>
@@ -177,104 +177,201 @@ async function vDashboard(m){
 }
 
 async function vImport(m){
-  // This application never collects evidence live from the machine it runs
-  // on. Evidence is brought in two ways: a case produced by the dedicated
-  // field-collection utility, or a forensic image processed below.
-  m.innerHTML=''; m.append(el('h1',{},'Import Evidence'));
+  // Case creation and evidence import used to be two disconnected flows
+  // (Import produced a case_id with no name/keywords; Cases's "New case"
+  // then attached those to evidence that already had to exist) - one
+  // unified flow now: name the case, add one or more evidence sources
+  // (each independently typed Image/Folder and labelled), submit once.
+  // More sources can always be added later from the case's own page.
+  m.innerHTML=''; m.append(el('h1',{},'New Case'));
   m.append(el('div',{class:'hint',style:'margin-bottom:14px'},
-    'This application does not perform live collection on the machine it runs on. '+
-    'A case is brought in either as evidence already acquired by the field '+
-    'collection utility, or by processing a forensic image directly, below.'));
-  m.append(imageImportPanel());
+    'This application does not perform live collection on the machine it runs on - '+
+    'every evidence source here is either a disk/memory image or a folder of '+
+    'evidence someone already extracted, opened read-only.'));
+  m.append(newCasePanel());
 }
 
-function imageImportPanel(){
-  const box=el('div',{class:'panel'});
-  box.append(el('h2',{style:'margin-top:0'},'Process a Forensic Image'),
-    el('div',{class:'hint',style:'margin-bottom:10px'},
-      'Accepts a disk image file (raw/dd, including split segments, VMDK, VHD/VHDX, '+
-      'or E01/EWF), a folder already shaped like an OS root (a mounted or extracted '+
-      'image), or a plain folder holding one already-extracted app per subfolder - '+
-      'same field, auto-detected. Everything is opened read-only; nothing here is '+
-      'ever modified.'));
+// One evidence-source input: type toggle (Image / Folder - they go through
+// different acquisition code, dissect vs a flat-folder copy, and warrant
+// different hints/browse buttons), path, and a label (best-effort
+// suggested from the path, always editable - "mix of both, make it
+// intuitive"). Shared by the New Case wizard (one or more rows) and the
+// case page's "+ Add evidence source" (a single instance).
+function sourceRow(onRemove){
+  const box=el('div',{class:'panel',style:'margin-top:10px;background:#fafafa'});
+  let kind='image';
+  const path=el('input',{placeholder:'/path/to/image.raw, E:\\case.E01, or an OS-root folder',style:'flex:1;min-width:220px'});
+  const label=el('input',{placeholder:'e.g. Suspect Laptop, Victim Phone — optional for a single-source case',style:'width:320px'});
+  let labelTouched=false;
+  label.addEventListener('input',()=>{labelTouched=true;});
+  path.addEventListener('change',()=>{
+    if(labelTouched || label.value.trim()) return;
+    const base=(path.value.trim().split(/[\\/]/).pop()||'')
+      .replace(/\.(e01|raw|dd|img|001|vmdk|vhd|vhdx)$/i,'');
+    if(base) label.value=base;
+  });
 
-  const path=el('input',{placeholder:'/path/to/image.raw, E:\\case.E01, or a folder',style:'width:420px'});
-  const browsePath=el('button',{class:'sec',onclick:()=>browseForFile(path)},'Browse file…');
-  const browseFolder=el('button',{class:'sec',onclick:()=>browseForFolder(path)},'Browse folder…');
+  const imgBtn=el('button',{class:'sec'},'Image');
+  const folderBtn=el('button',{class:'ghost'},'Folder');
+  const browseFile=el('button',{class:'ghost',onclick:()=>browseForFile(path)},'Browse…');
+  const browseFolderBtn=el('button',{class:'ghost',style:'display:none',onclick:()=>browseForFolder(path)},'Browse…');
+  function setKind(k){
+    kind=k;
+    imgBtn.className = k==='image'?'sec':'ghost';
+    folderBtn.className = k==='folder'?'sec':'ghost';
+    browseFile.style.display = k==='image'?'inline-block':'none';
+    browseFolderBtn.style.display = k==='folder'?'inline-block':'none';
+    path.placeholder = k==='image'
+      ? '/path/to/image.raw, E:\\case.E01, or an OS-root-shaped folder'
+      : 'a folder holding one already-extracted app per subfolder';
+  }
+  imgBtn.onclick=()=>setKind('image'); folderBtn.onclick=()=>setKind('folder');
+
+  const scanBtn=el('button',{class:'ghost'},'Preview apps (optional)');
   const scanLog=el('div',{class:'hint'});
-  const appsBox=el('div',{style:'display:none;margin-top:10px'});
+  const appsBox=el('div',{style:'display:none;margin-top:8px'});
   const checks=[];
-
-  const scanBtn=el('button',{class:'sec',onclick:async()=>{
-    if(!path.value.trim()) return alert('Enter an image path first.');
-    scanBtn.disabled=true; scanBtn.innerHTML='<span class="spin" style="border-color:#0003;border-top-color:#333"></span>Scanning…';
-    scanLog.innerHTML='<span class="spin" style="border-color:#0003;border-top-color:#333"></span>Opening the image and searching for application profiles — this can take a moment on a large image.';
-    appsBox.style.display='none'; appsBox.innerHTML=''; checks.length=0;
-    state.unsavedWork='The image scan';
+  scanBtn.onclick=async()=>{
+    if(!path.value.trim()) return alert('Enter a path first.');
+    scanBtn.disabled=true; scanBtn.textContent='Scanning…';
+    scanLog.textContent=''; appsBox.style.display='none'; appsBox.innerHTML=''; checks.length=0;
     try{
       const d=await api('/image/list',{method:'POST',body:JSON.stringify({image_path:path.value.trim()})});
-      scanLog.textContent='';
-      if(!d.apps.length){ scanLog.textContent='No supported application profiles were found on this image.'; }
+      if(!d.apps.length) scanLog.textContent='No supported application profiles were found.';
       else{
         appsBox.style.display='block';
         d.apps.forEach(a=>{
           const cb=el('input',{type:'checkbox',checked:''}); checks.push([cb,a]);
-          appsBox.append(el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:6px'},
-            cb, el('span',{},el('b',{},a.name), a.version?' v'+a.version:''),
-            el('span',{class:'muted mono',style:'flex:1;text-align:right'},a.profile_dir)));
+          appsBox.append(el('label',{style:'display:flex;gap:8px;align-items:center;margin-top:4px;color:var(--fg)'},
+            cb, el('span',{},a.name, a.version?' v'+a.version:''),
+            el('span',{class:'muted mono',style:'flex:1;text-align:right;font-size:10px'},a.profile_dir)));
         });
       }
-    }catch(e){ scanLog.textContent='The image could not be opened: '+e.message; }
-    state.unsavedWork=null;
-    scanBtn.disabled=false; scanBtn.textContent='Scan Image';
-  }},'Scan Image');
+    }catch(e){ scanLog.textContent='Could not open: '+e.message; }
+    scanBtn.disabled=false; scanBtn.textContent='Preview apps (optional)';
+  };
 
-  box.append(el('label',{},'Image path (readable by this machine)'),
-    el('div',{class:'row'}, path, browsePath, browseFolder),
-    el('div',{class:'row',style:'margin-top:8px'}, scanBtn), scanLog, appsBox);
+  const statusLog=el('div',{class:'log',style:'display:none;margin-top:8px'});
+  const rowHeader=el('div',{class:'row'}, imgBtn, folderBtn, el('span',{style:'flex:1'}));
+  if(onRemove){
+    const removeBtn=el('button',{class:'ghost',style:'color:var(--bad)',onclick:()=>{box.remove();onRemove();}},'✕ Remove');
+    rowHeader.append(removeBtn);
+  }
+  box.append(rowHeader,
+    el('label',{},'Path'), el('div',{class:'row'}, path, browseFile, browseFolderBtn),
+    el('label',{},'Label (who/what this source is from)'), label,
+    el('div',{class:'row',style:'margin-top:6px'}, scanBtn), scanLog, appsBox, statusLog);
+  setKind('image');
 
+  return {
+    el: box, statusLog,
+    value(){
+      const chosen = checks.length ? checks.filter(([c])=>c.checked).map(([,a])=>a.name) : null;
+      return {path: path.value.trim(), label: label.value.trim(), apps: chosen};
+    },
+  };
+}
+
+function newCasePanel(){
+  const box=el('div',{class:'panel'});
+  box.append(el('h2',{style:'margin-top:0'},'Case details'));
+
+  const name=el('input',{placeholder:'e.g. Discord DM review',style:'width:420px'});
+  const desc=el('textarea',{placeholder:'optional'});
+  const kw=el('textarea',{placeholder:'gift card, payment, username_of_interest'});
   const op=el('input',{placeholder:'e.g. Det. A. Smith',style:'width:300px'});
-  const memImg=el('input',{placeholder:'optional',style:'width:420px'});
-  const browseMemImg=el('button',{class:'sec',onclick:()=>browseForFile(
-    memImg,['Memory dumps (*.raw;*.dmp;*.mem;*.bin)','All files (*.*)'])},'Browse…');
-  const cid=el('input',{placeholder:'generated automatically if left blank',style:'width:300px'});
   box.append(
-    el('label',{},'Operator name (recorded in the chain of custody)'), op,
-    el('label',{},'Memory image (optional — a full-RAM capture acquired separately)'),
-    el('div',{class:'row'}, memImg, browseMemImg),
-    el('label',{},'Case ID (optional)'), cid);
+    el('label',{},'Case name'), name,
+    el('label',{},'Description (optional)'), desc,
+    el('label',{},'Investigation keywords (comma or newline separated)'), kw,
+    el('label',{},'Operator name (recorded in the chain of custody)'), op);
+
+  box.append(el('h2',{},'Evidence sources'),
+    el('div',{class:'hint',style:'margin-bottom:4px'},
+      'A disk/memory image, or a folder of evidence already extracted - add as many as '+
+      'this case needs (a suspect\'s laptop AND a victim\'s phone, say). More can be '+
+      'added later from the case page too.'));
+  const sourcesWrap=el('div',{});
+  const rows=[];
+  function addRow(){
+    const r=sourceRow(rows.length>0 ? ()=>{const i=rows.indexOf(r); if(i>=0) rows.splice(i,1);} : null);
+    rows.push(r); sourcesWrap.append(r.el);
+  }
+  addRow();
+  box.append(sourcesWrap,
+    el('button',{class:'sec',style:'margin-top:8px',onclick:addRow},'+ Add another source'));
 
   const bgHint=el('div',{class:'hint',style:'display:none;margin-top:8px'},
     'Running in the background — this page can be left safely; progress is also '+
     'shown in the sidebar and on the Cases page.');
-  const log=el('div',{class:'log',style:'display:none;margin-top:8px'});
-  const done=el('div',{style:'display:none;margin-top:12px'});
-  const btn=el('button',{class:'primary',style:'margin-top:16px',onclick:async()=>{
-    if(!path.value.trim()) return alert('Enter an image path first.');
-    const chosen = checks.length ? checks.filter(([c])=>c.checked).map(([,a])=>a.name) : null;
-    if(checks.length && !chosen.length) return alert('Select at least one application, or scan the image first.');
-    btn.disabled=true; btn.innerHTML='<span class="spin"></span>Starting…';
-    log.style.display='block'; log.textContent=''; done.style.display='none'; bgHint.style.display='none';
+  const createBtn=el('button',{class:'primary',style:'margin-top:16px',onclick:async()=>{
+    if(!name.value.trim()) return alert('Case name is required.');
+    const sourceValues=rows.map((r,i)=>({row:r, ...r.value()})).filter(v=>v.path);
+    createBtn.disabled=true; createBtn.innerHTML='<span class="spin"></span>Creating case…';
+    bgHint.style.display='none';
+    let caseId;
     try{
-      const r=await api('/image/extract',{method:'POST',body:JSON.stringify({
-        image_path:path.value.trim(), apps:chosen, operator:op.value,
-        memory_image_path:memImg.value||null, case_id:cid.value||null})});
-      btn.innerHTML='<span class="spin"></span>Processing…'; bgHint.style.display='block';
-      const j=await pollJob(r.job_id,log);
-      if(j && j.status==='done' && j.result){
-        done.style.display='block'; done.innerHTML='';
-        done.append(
-          el('b',{},`Case ${j.result.case_id} created`),
-          el('div',{class:'hint'},`${j.result.files} files · ${(j.result.bytes/1e6).toFixed(1)} MB · `+
-            `image checksum ${j.result.image_sha256.slice(0,16)}… · signing key ${j.result.fingerprint}` +
-            (j.result.warnings?.length?` · ${j.result.warnings.length} warning(s)`:'')),
-          el('button',{style:'margin-top:8px',onclick:()=>{state.newCaseId=j.result.case_id;go('cases');}},
-            'Create a case from this →'));
-      }
-    }catch(e){ log.textContent+='\nCould not start: '+e.message; }
-    btn.disabled=false; btn.textContent='Extract from Image';
-  }},'Extract from Image');
-  box.append(btn, bgHint, log, done);
+      const meta=await api('/cases',{method:'POST',body:JSON.stringify({
+        name:name.value.trim(), description:desc.value, keywords:kw.value})});
+      caseId=meta.case_id;
+    }catch(e){
+      alert('Could not create the case: '+e.message);
+      createBtn.disabled=false; createBtn.textContent='Create case'; return;
+    }
+    bgHint.style.display='block';
+    for(let i=0;i<sourceValues.length;i++){
+      const sv=sourceValues[i];
+      createBtn.innerHTML=`<span class="spin"></span>Adding source ${i+1}/${sourceValues.length}…`;
+      sv.row.statusLog.style.display='block'; sv.row.statusLog.textContent='Starting…';
+      try{
+        const r=await api(`/cases/${encodeURIComponent(caseId)}/sources`,{method:'POST',body:JSON.stringify({
+          source_path:sv.path, source_label:sv.label, apps:sv.apps,
+          memory_image_path:null, operator:op.value})});
+        await pollJob(r.job_id, sv.row.statusLog);
+      }catch(e){ sv.row.statusLog.textContent='Could not start: '+e.message; }
+    }
+    go('case', caseId);
+  }},'Create case');
+  box.append(createBtn, bgHint);
+  return box;
+}
+
+// A case's persistent "+ Add evidence source" - the same sourceRow() the
+// New Case wizard uses, but a single instance, collapsed until clicked,
+// posting straight to this case's own /sources endpoint. Evidence can
+// arrive well after a case is created (a second device, a later warrant
+// return), not only at creation time - this is what makes that "ongoing",
+// not a one-shot wizard.
+function addSourcePanel(id, onAdded){
+  const box=el('div',{class:'panel'});
+  const openBtn=el('button',{class:'sec'},'+ Add evidence source');
+  const formWrap=el('div',{style:'display:none;margin-top:10px'});
+  openBtn.onclick=()=>{
+    if(formWrap.style.display==='none'){
+      formWrap.style.display='block'; formWrap.innerHTML='';
+      const op=el('input',{placeholder:'e.g. Det. A. Smith',style:'width:300px'});
+      const row=sourceRow(null);
+      const submitBtn=el('button',{class:'primary',style:'margin-top:10px',onclick:async()=>{
+        const v=row.value();
+        if(!v.path) return alert('Enter a path first.');
+        submitBtn.disabled=true; submitBtn.innerHTML='<span class="spin"></span>Adding…';
+        row.statusLog.style.display='block'; row.statusLog.textContent='Starting…';
+        try{
+          const r=await api(`/cases/${encodeURIComponent(id)}/sources`,{method:'POST',body:JSON.stringify({
+            source_path:v.path, source_label:v.label, apps:v.apps,
+            memory_image_path:null, operator:op.value})});
+          await pollJob(r.job_id, row.statusLog);
+          onAdded();
+        }catch(e){
+          row.statusLog.textContent='Could not start: '+e.message;
+          submitBtn.disabled=false; submitBtn.textContent='Add source';
+        }
+      }},'Add source');
+      formWrap.append(el('label',{},'Operator name (recorded in the chain of custody)'), op,
+        row.el, submitBtn);
+    } else formWrap.style.display='none';
+  };
+  box.append(openBtn, formWrap);
   return box;
 }
 
@@ -323,32 +420,16 @@ async function pollJob(id,logEl,onDone){
 }
 
 async function vCases(m){
+  // Case creation lives on its own page now (nav: "New Case") - one
+  // unified flow of name + evidence sources together, rather than a form
+  // duplicated here too. This page is just the list + a pointer there.
   const d=await api('/cases');
-  m.innerHTML=''; m.append(el('h1',{},'Cases'));
-  const pre = state.newCaseId; state.newCaseId=null;
-  const cidI=el('input',{id:'ncid',placeholder:'the acquired evidence folder name',style:'width:300px',value:pre||''});
-  const createBtn=el('button',{class:'primary',style:'margin-top:14px',onclick:async(e)=>{
-    const cid=cidI.value.trim(), name=$('#nname').value.trim();
-    if(!cid||!name) return alert('Case ID and name are required.');
-    const btn=e.target;
-    btn.disabled=true; btn.innerHTML='<span class="spin"></span>Creating…';
-    try{
-      await api('/cases',{method:'POST',body:JSON.stringify({case_id:cid,name,
-        keywords:$('#nkw').value,description:$('#ndesc').value})});
-      go('case',cid);
-    }catch(err){ alert(err.message); btn.disabled=false; btn.textContent='Create case'; }
-  }},'Create case');
-  m.append(el('div',{class:'panel'},
-    el('b',{},'New case'),
-    el('div',{class:'hint'},'A case pairs an acquired evidence folder with a name and the keywords you want investigated. The Case ID must match a folder already present in the cases directory (Settings).'),
-    el('label',{},'Case ID'), cidI,
-    el('label',{},'Case name'), el('input',{id:'nname',placeholder:'e.g. Discord DM review',style:'width:420px'}),
-    el('label',{},'Investigation keywords (comma or newline separated)'),
-    el('textarea',{id:'nkw',placeholder:'gift card, payment, username_of_interest'}),
-    el('label',{},'Description (optional)'), el('textarea',{id:'ndesc'}),
-    createBtn));
-  m.append(el('h2',{},'All cases'));
-  if(!d.cases.length) m.append(el('div',{class:'panel hint'},'None yet.'));
+  m.innerHTML='';
+  m.append(el('div',{class:'row'},
+    el('h1',{style:'margin:0'},'Cases'), el('span',{style:'flex:1'}),
+    el('button',{class:'primary',onclick:()=>go('import')},'+ New Case')));
+  if(!d.cases.length) m.append(el('div',{class:'panel hint'},
+    'None yet. Click "+ New Case" above to create one.'));
   d.cases.forEach(cs=>{
     const incomplete = cs.status==='error' && (cs.last_message||'').includes('incomplete acquisition');
     m.append(el('div',{class:'panel'},
@@ -384,7 +465,7 @@ async function vCase(m){
         ? 'There is no signed manifest.json in this folder — the acquisition did not finish. Re-run the collector for this case (close the target apps first so their databases aren’t locked).'
         : e.message),
       el('div',{class:'row',style:'margin-top:10px'},
-        el('button',{class:'sec',onclick:()=>go('import')},'Go to Import'),
+        el('button',{class:'sec',onclick:()=>go('import')},'Go to New Case'),
         el('button',{class:'ghost',onclick:()=>go('cases')},'Back to Cases'))));
     return;
   }
@@ -393,53 +474,79 @@ async function vCase(m){
   const job=d.active_job;
   const running = job && (job.status==='queued'||job.status==='running');
   const processed = !!w;
+  const hasEvidence = d.evidence.apps.length > 0;
 
   m.innerHTML='';
   m.append(el('div',{class:'row'},
     el('h1',{style:'margin:0'},d.meta.name),
     el('span',{class:'muted mono'},id)));
 
-  // --- evidence + integrity -------------------------------------------------
-  const integ = el('div',{class:'row',style:'margin-top:10px'});
-  if(iv.ok){
-    integ.append(el('span',{class:'pill ok'},'✓ integrity verified'),
-      el('span',{class:'muted'},'checked '+ago(iv.verified_ts)),
-      el('button',{class:'ghost',onclick:async(e)=>{
-        e.target.textContent='checking…'; e.target.disabled=true;
-        try{ await api('/cases/'+id+'/verify',{method:'POST'}); go('case',id); }
-        catch(x){ alert(x.message); e.target.disabled=false; e.target.textContent='re-check'; }
-      }},'re-check'));
-  } else {
-    integ.append(el('span',{class:'pill bad'},'⚠ INTEGRITY FAILED'),
-      el('span',{class:'muted'},`${iv.issues.length} issue(s) — signature valid: ${iv.signature_valid}`));
+  // --- evidence sources - the human-facing registry (label/kind/when
+  // added), separate from the signed manifest's own record of what's
+  // actually there. Shown whenever there's at least one, whether or not
+  // the case has been through "Run analysis" yet. -------------------------
+  if(d.meta.sources && d.meta.sources.length){
+    m.append(el('div',{class:'panel'},
+      el('b',{},'Evidence sources'),
+      ...d.meta.sources.map(s=>el('div',{class:'hint',style:'margin-top:4px'},
+        `${s.label || '(no label)'} — ${s.kind} — ${s.apps.length} app(s) — `+
+        `added ${ago(s.added_ts)}${s.operator?' by '+s.operator:''}`))));
   }
-  m.append(el('div',{class:'panel'},
-    integ,
-    el('div',{class:'hint'},
-      `${iv.files} files · ${d.evidence.apps.join(', ')} · `+
-      `${(d.evidence.bytes/1e6).toFixed(1)} MB · acquired on ${d.evidence.host}`),
-    d.meta.keywords.length?el('div',{class:'hint'},'keywords: '+d.meta.keywords.join(', ')):'',
-    !iv.ok?el('div',{class:'scroll',style:'margin-top:8px'},
-      tbl(iv.issues,['kind','path','expected','actual'])):''));
 
-  // These three read straight off the evidence directory, so they work
-  // whether or not "Run analysis" has happened yet. Once the case is
-  // processed they move into the explorer's left nav below (so they aren't
-  // duplicated); until then they're shown here on their own.
-  if(!processed && d.evidence.apps.length){
-    const preAppSel=el('select',{}, ...d.evidence.apps.map(a=>el('option',{value:a},a)));
-    const preFilesWrap=el('div',{});
-    function renderPreFiles(){
-      preFilesWrap.innerHTML='';
-      preFilesWrap.append(cacheFilesPanel(id, preAppSel.value),
-        localStorageFilesPanel(id, preAppSel.value), databaseFilesPanel(id, preAppSel.value));
+  // --- evidence + integrity -------------------------------------------------
+  if(hasEvidence){
+    const integ = el('div',{class:'row',style:'margin-top:10px'});
+    if(iv.ok){
+      integ.append(el('span',{class:'pill ok'},'✓ integrity verified'),
+        el('span',{class:'muted'},'checked '+ago(iv.verified_ts)),
+        el('button',{class:'ghost',onclick:async(e)=>{
+          e.target.textContent='checking…'; e.target.disabled=true;
+          try{ await api('/cases/'+id+'/verify',{method:'POST'}); go('case',id); }
+          catch(x){ alert(x.message); e.target.disabled=false; e.target.textContent='re-check'; }
+        }},'re-check'));
+    } else {
+      integ.append(el('span',{class:'pill bad'},'⚠ INTEGRITY FAILED'),
+        el('span',{class:'muted'},`${iv.issues.length} issue(s) — signature valid: ${iv.signature_valid}`));
     }
-    preAppSel.onchange=renderPreFiles;
-    m.append(el('div',{class:'panel',style:'margin-bottom:0'},
-      el('label',{},'App'), preAppSel));
-    m.append(preFilesWrap);
-    renderPreFiles();
+    m.append(el('div',{class:'panel'},
+      integ,
+      el('div',{class:'hint'},
+        `${iv.files} files · ${d.evidence.apps.join(', ')} · `+
+        `${(d.evidence.bytes/1e6).toFixed(1)} MB · acquired on ${d.evidence.host}`),
+      d.meta.keywords.length?el('div',{class:'hint'},'keywords: '+d.meta.keywords.join(', ')):'',
+      !iv.ok?el('div',{class:'scroll',style:'margin-top:8px'},
+        tbl(iv.issues,['kind','path','expected','actual'])):''));
+
+    // These three read straight off the evidence directory, so they work
+    // whether or not "Run analysis" has happened yet. Once the case is
+    // processed they move into the explorer's left nav below (so they
+    // aren't duplicated); until then they're shown here on their own.
+    if(!processed){
+      const preAppSel=el('select',{}, ...d.evidence.apps.map(a=>el('option',{value:a},a)));
+      const preFilesWrap=el('div',{});
+      function renderPreFiles(){
+        preFilesWrap.innerHTML='';
+        preFilesWrap.append(cacheFilesPanel(id, preAppSel.value),
+          localStorageFilesPanel(id, preAppSel.value), databaseFilesPanel(id, preAppSel.value));
+      }
+      preAppSel.onchange=renderPreFiles;
+      m.append(el('div',{class:'panel',style:'margin-bottom:0'},
+        el('label',{},'App'), preAppSel));
+      m.append(preFilesWrap);
+      renderPreFiles();
+    }
+  } else {
+    m.append(el('div',{class:'panel'},
+      el('b',{},'No evidence yet'),
+      el('div',{class:'hint'},'Add an evidence source below to get started - a disk/memory image, '+
+        'or a folder of evidence someone already extracted.'),
+      d.meta.keywords.length?el('div',{class:'hint',style:'margin-top:6px'},'keywords: '+d.meta.keywords.join(', ')):''));
   }
+
+  // --- add another evidence source, any time - not just at creation ------
+  m.append(addSourcePanel(id, ()=>go('case', id)));
+
+  if(!hasEvidence) return;  // nothing to run/explore yet
 
   // --- the primary action panel ------------------------------------------
   const actions=el('div',{class:'panel'});
@@ -535,12 +642,17 @@ async function caseExplorer(id, w){
   }
   const expandedApps = new Set();  // collapsed by default; persists across renderNav() calls
   const expandedSources = new Set();  // "app/source_type" keys, same idea one level down
+  const expandedLabels = new Set();  // evidence-source labels, same idea one level UP (multi-source cases)
   function toggleExpand(app){
     if(expandedApps.has(app)) expandedApps.delete(app); else expandedApps.add(app);
     renderNav();
   }
   function toggleSourceExpand(k){
     if(expandedSources.has(k)) expandedSources.delete(k); else expandedSources.add(k);
+    renderNav();
+  }
+  function toggleLabelExpand(l){
+    if(expandedLabels.has(l)) expandedLabels.delete(l); else expandedLabels.add(l);
     renderNav();
   }
 
@@ -556,48 +668,79 @@ async function caseExplorer(id, w){
     return overviewPanel(id, w);
   }
 
+  // One app's rendering (itself + its source_types + their Files/Artifacts
+  // children) - shared by the flat (no source label) case and the grouped
+  // (multi-source case, indented one level under its label) case, so the
+  // two don't drift into two different nav behaviours.
+  function renderAppRow(a, baseIndent){
+    const s=state.explorerSelection;
+    const appActiveBelow = (s.type==='source' || FILES_PANEL_FN[s.type]) && s.app===a.app;
+    const isOpen = expandedApps.has(a.app) || appActiveBelow;
+    const row = navRow(a.app, a.total, s.type==='source'&&s.app===a.app&&!s.source_type,
+      ()=>select({type:'source', app:a.app, source_type:null}), baseIndent, isOpen?'▾':'▸');
+    row.querySelector('.nav-chevron').onclick = (e)=>{ e.stopPropagation(); toggleExpand(a.app); };
+    nav.append(row);
+    if(!isOpen) return;
+    a.sources.forEach(src=>{
+      const filesType = FILES_PANEL_TYPE[src.source_type];
+      const artifactsActive = s.type==='source' && s.app===a.app && s.source_type===src.source_type;
+      if(!filesType){
+        nav.append(navRow(SRC_LABELS[src.source_type]||src.source_type, src.n, artifactsActive,
+          ()=>select({type:'source', app:a.app, source_type:src.source_type}), baseIndent+1));
+        return;
+      }
+      // A source_type with a raw-files view: two children, Files (physical
+      // files - every content type, not just what got parsed) and
+      // Artifacts (the parsed content, same as every other source_type).
+      const filesActive = s.type===filesType && s.app===a.app;
+      const srcKey=a.app+'/'+src.source_type;
+      const srcOpen = expandedSources.has(srcKey) || filesActive || artifactsActive;
+      const srcRow = navRow(SRC_LABELS[src.source_type]||src.source_type, src.n, false,
+        ()=>toggleSourceExpand(srcKey), baseIndent+1, srcOpen?'▾':'▸');
+      srcRow.querySelector('.nav-chevron').onclick=(e)=>{e.stopPropagation(); toggleSourceExpand(srcKey);};
+      nav.append(srcRow);
+      if(!srcOpen) return;
+      nav.append(navRow('Files', null, filesActive, ()=>select({type:filesType, app:a.app}), baseIndent+2));
+      nav.append(navRow('Artifacts', null, artifactsActive,
+        ()=>select({type:'source', app:a.app, source_type:src.source_type}), baseIndent+2));
+    });
+  }
+
   function renderNav(){
     nav.innerHTML='';
     const s=state.explorerSelection;
     nav.append(el('div',{style:'font-weight:700;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:2px 0 8px'},'Explore'));
     nav.append(navRow('Overview', null, s.type==='overview', ()=>select({type:'overview'}), 0));
     nav.append(el('div',{style:'height:1px;background:var(--line);margin:10px 0'}));
+
+    // Apps with no evidence-source label (every case before this feature,
+    // and any source whose label was left blank) render flat, exactly as
+    // before. Labelled apps group under their source's label one level up
+    // - a multi-source case (a suspect's laptop AND a victim's phone, say)
+    // reads as "Suspect Laptop -> discord -> ..." / "Victim Phone ->
+    // discord -> ...", not one flat list where two people's same-named
+    // apps sit side by side with nothing distinguishing them.
+    const unlabelled = tree.apps.filter(a=>!a.source_label);
+    const labelled = new Map();  // label -> [apps]
     tree.apps.forEach(a=>{
-      // Collapsed by default (a dropdown, not an always-expanded dump);
-      // stays open once toggled, and auto-opens for the app currently
-      // being browsed so navigating into one of its sources doesn't hide it.
-      const appActiveBelow = (s.type==='source' || FILES_PANEL_FN[s.type]) && s.app===a.app;
-      const isOpen = expandedApps.has(a.app) || appActiveBelow;
-      const row = navRow(a.app, a.total, s.type==='source'&&s.app===a.app&&!s.source_type,
-        ()=>select({type:'source', app:a.app, source_type:null}), 0, isOpen?'▾':'▸');
-      const chevron = row.querySelector('.nav-chevron');
-      chevron.onclick = (e)=>{ e.stopPropagation(); toggleExpand(a.app); };
-      nav.append(row);
-      if(!isOpen) return;
-      a.sources.forEach(src=>{
-        const filesType = FILES_PANEL_TYPE[src.source_type];
-        const artifactsActive = s.type==='source' && s.app===a.app && s.source_type===src.source_type;
-        if(!filesType){
-          nav.append(navRow(SRC_LABELS[src.source_type]||src.source_type, src.n, artifactsActive,
-            ()=>select({type:'source', app:a.app, source_type:src.source_type}), 1));
-          return;
-        }
-        // A source with a raw-files view: two children, Files (physical
-        // files - every content type, not just what got parsed) and
-        // Artifacts (the parsed content, same as every other source).
-        const filesActive = s.type===filesType && s.app===a.app;
-        const srcKey=a.app+'/'+src.source_type;
-        const srcOpen = expandedSources.has(srcKey) || filesActive || artifactsActive;
-        const srcRow = navRow(SRC_LABELS[src.source_type]||src.source_type, src.n, false,
-          ()=>toggleSourceExpand(srcKey), 1, srcOpen?'▾':'▸');
-        srcRow.querySelector('.nav-chevron').onclick=(e)=>{e.stopPropagation(); toggleSourceExpand(srcKey);};
-        nav.append(srcRow);
-        if(!srcOpen) return;
-        nav.append(navRow('Files', null, filesActive, ()=>select({type:filesType, app:a.app}), 2));
-        nav.append(navRow('Artifacts', null, artifactsActive,
-          ()=>select({type:'source', app:a.app, source_type:src.source_type}), 2));
-      });
+      if(!a.source_label) return;
+      if(!labelled.has(a.source_label)) labelled.set(a.source_label, []);
+      labelled.get(a.source_label).push(a);
     });
+
+    unlabelled.forEach(a=>renderAppRow(a, 0));
+
+    labelled.forEach((apps, label)=>{
+      const total = apps.reduce((n,a)=>n+a.total, 0);
+      const anyActiveBelow = apps.some(a=>
+        (s.type==='source' || FILES_PANEL_FN[s.type]) && s.app===a.app);
+      const isOpen = expandedLabels.has(label) || anyActiveBelow;
+      const row = navRow(label, total, false, ()=>toggleLabelExpand(label), 0, isOpen?'▾':'▸');
+      row.querySelector('.nav-chevron').onclick=(e)=>{e.stopPropagation(); toggleLabelExpand(label);};
+      nav.append(row);
+      if(isOpen) apps.forEach(a=>renderAppRow(a, 1));
+    });
+
     if(!tree.apps.length) nav.append(el('div',{class:'hint'},'No artifact breakdown available.'));
   }
 

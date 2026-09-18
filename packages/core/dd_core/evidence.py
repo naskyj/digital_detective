@@ -63,6 +63,19 @@ DENYLIST = frozenset({
     "ScriptCache",
 })
 
+def safe_name(name: str) -> str:
+    """A filesystem/`app`-field-safe version of an arbitrary string -
+    letters/digits/`-_.` kept, everything else (including "/", so no
+    surprise nested directories or path traversal from a "../.." label)
+    collapsed to "_". The one place this sanitisation happens - both
+    `dd_lab.imaging.acquire` (building an evidence-source's on-disk folder
+    name and its `TargetApp.name`) and the API layer that later needs to
+    recognise that same name (matching a multi-source case's app entries
+    back to the investigator-supplied label that produced them) call this
+    exact function, so they can never drift apart on what "safe" means."""
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in name).strip("_") or "app"
+
+
 def looks_like_profile(d: Path) -> bool:
     """Does `d` look like a Chromium/Electron profile directory? Shared by the
     live collector (`dd_collector.discover`) and image-based extraction

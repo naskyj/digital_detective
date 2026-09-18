@@ -7,13 +7,23 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from dd_core.casedir import CaseLayout
+
+
+def new_case_id() -> str:
+    """A fresh, sortable case_id - the one place this is generated for
+    `dd_lab` (imaging/acquire.py reuses this instead of keeping its own
+    copy). `dd_collector` intentionally keeps its own independent copy - it
+    never depends on `dd_lab`."""
+    return f"{datetime.now(UTC):%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}"
 
 
 class CaseStatus(StrEnum):
@@ -22,6 +32,27 @@ class CaseStatus(StrEnum):
     COMPLETED = "completed"
     STOPPED = "stopped"
     ERROR = "error"
+
+
+class EvidenceSourceMeta(BaseModel):
+    """One evidence source added to a case - a case can have several (e.g.
+    a suspect's laptop image AND a victim's phone extraction, correlated in
+    one investigation). Purely a human-facing registry for the UI ("this
+    case has N sources", pre-filling the Add-source form) - unsigned, lives
+    in case.json alongside the rest of CaseMeta, not in the signed
+    manifest.json (which stays the sole evidentiary source of truth for
+    what evidence actually exists; this is just labels/bookkeeping on top).
+    `label` is the same string `acquire_from_image`/`acquire_from_folder`'s
+    `source_label` param used to prefix this source's app names
+    ("<label> / <app name>") - kept here so the UI can show it without
+    having to reverse-parse it back out of an app name."""
+
+    label: str
+    kind: Literal["image", "folder"]
+    path: str
+    operator: str = ""
+    added_ts: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    apps: list[str] = Field(default_factory=list)
 
 
 class CaseMeta(BaseModel):
@@ -33,6 +64,7 @@ class CaseMeta(BaseModel):
     created_ts: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_ts: datetime = Field(default_factory=lambda: datetime.now(UTC))
     last_message: str = ""
+    sources: list[EvidenceSourceMeta] = Field(default_factory=list)
 
     def save(self, layout: CaseLayout) -> None:
         self.updated_ts = datetime.now(UTC)
@@ -56,13 +88,21 @@ def parse_keywords(raw: str) -> list[str]:
 
 
 def create_case(
-    cases_root: str | Path, case_id: str, name: str, description: str = "", keywords: list[str] | None = None
+    cases_root: str | Path, case_id: str | None, name: str,
+    description: str = "", keywords: list[str] | None = None,
 ) -> CaseMeta:
+    """Create a case's metadata - `case_id` generated with `new_case_id()`
+    if not given. No evidence is required to exist yet: a case is now a
+    valid, visible thing (`CaseStatus.NEW`) the moment it has a name, and
+    evidence sources are added to it afterwards (possibly much afterwards -
+    "ongoing", not a one-shot wizard) via the imaging acquisition functions
+    targeting this same case_id. This used to require a signed manifest to
+    already exist (metadata could only be ATTACHED to evidence someone
+    already collected) - dropped so case creation and evidence import don't
+    have to happen in that order any more.
+    """
+    case_id = case_id or new_case_id()
     layout = CaseLayout(cases_root, case_id)
-    if not layout.manifest.is_file():
-        raise FileNotFoundError(
-            f"no signed manifest at {layout.dir} — import the collected case first"
-        )
     meta = CaseMeta(
         case_id=case_id, name=name, description=description, keywords=keywords or []
     )
