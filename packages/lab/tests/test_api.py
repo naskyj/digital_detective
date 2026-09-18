@@ -209,6 +209,44 @@ def test_case_lifecycle_via_api(client):
     assert audit["custody"] and audit["audit"]
 
 
+def test_artifacts_search_matches_source_locator(client):
+    """The `q` filter must also match source_locator, not just key/value -
+    added so a process-detail view can find every string carved from one
+    PID ("pid<PID>:string#n" locators, see dd_lab/memory/analyze.py)
+    without a dedicated endpoint. Load one hand-built artifact directly
+    (bypassing the slow full-ingest job) whose key/value do NOT contain the
+    search term at all - only its locator does."""
+    from datetime import UTC, datetime
+
+    from dd_core.casedir import CaseLayout
+    from dd_core.enums import SourceType, ValueType
+    from dd_core.schema import NormalizedArtifact
+    from dd_lab.etl.warehouse import Warehouse
+
+    from dd_lab.api import main as main_mod
+
+    layout = CaseLayout(main_mod._settings.cases_root, "case_api_1")
+    wh = Warehouse(layout.warehouse)
+    try:
+        wh.load_artifacts([NormalizedArtifact(
+            artifact_id="test-pid-locator-artifact",
+            case_id="case_api_1", app="discord", source_type=SourceType.MEMORY_STRING,
+            source_file="_system/memory/physmem.raw#pid14380",
+            source_locator="pid14380:string#7",
+            key="mem.string", value="totally unrelated text content",
+            value_type=ValueType.STRING, extracted_ts=datetime.now(UTC),
+        )])
+    finally:
+        wh.close()
+
+    hit = client.get("/api/cases/case_api_1/artifacts", params={"q": "pid14380:"}).json()
+    assert hit["total"] == 1
+    assert hit["rows"][0]["artifact_id"] == "test-pid-locator-artifact"
+
+    miss = client.get("/api/cases/case_api_1/artifacts", params={"q": "pid99999:"}).json()
+    assert miss["total"] == 0
+
+
 def test_cache_files_route_works_without_a_run(client):
     """Unlike /artifacts, the cache-file browser reads straight off the
     evidence directory - it must work before "Run analysis" has ever

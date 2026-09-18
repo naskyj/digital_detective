@@ -486,8 +486,12 @@ def case_artifacts(
             where.append(f"{col} = ?")
             params.append(val)
     if q:
-        where.append("(key ILIKE ? OR value ILIKE ?)")
-        params += [f"%{q}%", f"%{q}%"]
+        # source_locator is included so a process detail view can filter
+        # memory_string rows down to one PID (locators are "pid<PID>:string#n"
+        # for process-scoped carving - see dd_lab/memory/analyze.py) without
+        # a dedicated endpoint; it's also just generally useful to search.
+        where.append("(key ILIKE ? OR value ILIKE ? OR source_locator ILIKE ?)")
+        params += [f"%{q}%", f"%{q}%", f"%{q}%"]
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     from dd_lab.etl.warehouse import Warehouse
 
@@ -692,8 +696,12 @@ def case_artifacts_export(
             where.append(f"{col} = ?")
             params.append(val)
     if q:
-        where.append("(key ILIKE ? OR value ILIKE ?)")
-        params += [f"%{q}%", f"%{q}%"]
+        # source_locator is included so a process detail view can filter
+        # memory_string rows down to one PID (locators are "pid<PID>:string#n"
+        # for process-scoped carving - see dd_lab/memory/analyze.py) without
+        # a dedicated endpoint; it's also just generally useful to search.
+        where.append("(key ILIKE ? OR value ILIKE ? OR source_locator ILIKE ?)")
+        params += [f"%{q}%", f"%{q}%", f"%{q}%"]
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     from dd_lab.etl.warehouse import Warehouse
 

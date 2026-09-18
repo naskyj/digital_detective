@@ -122,6 +122,11 @@
 <script>
 const $ = (s,r=document)=>r.querySelector(s);
 const el = (t,a={},...k)=>{const e=document.createElement(t);for(const[x,v]of Object.entries(a)){if(x==='class')e.className=v;else if(x==='html')e.innerHTML=v;else if(x.startsWith('on'))e.addEventListener(x.slice(2),v);else e.setAttribute(x,v);}k.flat().forEach(c=>e.append(c?.nodeType?c:document.createTextNode(c??'')));return e;};
+// Standard SQL string-literal escaping (double embedded single quotes) for
+// the handful of places that build a SQL string client-side to send to the
+// read-only /query endpoint (server-side enforces SELECT-only + no writes,
+// this is just correctness for app names containing a literal apostrophe).
+const sqlQuote = s => "'" + String(s).replace(/'/g,"''") + "'";
 const loadingView = (msg)=>el('div',{class:'center-loading'},el('div',{class:'spin-lg'}),el('div',{},msg||'Loading…'));
 const api = async (p,opt)=>{const r=await fetch('/api'+p,opt&&{...opt,headers:{'Content-Type':'application/json',...(opt.headers||{})}});if(!r.ok)throw new Error((await r.json().catch(()=>({detail:r.statusText}))).detail);return r.headers.get('content-type')?.includes('json')?r.json():r.text();};
 const state = {view:'dashboard', arg:null, unsavedWork:null};
@@ -150,10 +155,10 @@ async function pollActiveJobs(){
 }
 setInterval(pollActiveJobs, 3000);
 
-const _loadingMsg = {case:'Opening case…', report:'Loading report…', audit:'Loading audit trail…', cases:'Loading cases…', import:'Loading…', settings:'Loading settings…', dashboard:'Loading…', cacheentry:'Opening cache entry…'};
+const _loadingMsg = {case:'Opening case…', report:'Loading report…', audit:'Loading audit trail…', cases:'Loading cases…', import:'Loading…', settings:'Loading settings…', dashboard:'Loading…', cacheentry:'Opening cache entry…', processdetail:'Opening process…'};
 async function render(){
   const m=$('#main'); m.innerHTML=''; m.append(loadingView(_loadingMsg[state.view]));
-  try{ await ({dashboard:vDashboard,import:vImport,cases:vCases,case:vCase,report:vReport,audit:vAudit,settings:vSettings,cacheentry:vCacheEntry}[state.view]||vDashboard)(m); }
+  try{ await ({dashboard:vDashboard,import:vImport,cases:vCases,case:vCase,report:vReport,audit:vAudit,settings:vSettings,cacheentry:vCacheEntry,processdetail:vProcessDetail}[state.view]||vDashboard)(m); }
   catch(e){ m.innerHTML=''; m.append(el('div',{class:'panel'},'Error: '+e.message)); }
 }
 
@@ -710,8 +715,17 @@ const SRC_LABELS = {
 // tooling normally gives you. Not every source_type has one (IndexedDB,
 // Session Storage, Preferences, ... don't yet) - those stay a single leaf
 // that goes straight to Artifacts, same as before.
-const FILES_PANEL_TYPE = {cache:'cachefiles', local_storage:'lsfiles', cookies:'dbfiles'};
-const FILES_PANEL_FN = {cachefiles:cacheFilesPanel, lsfiles:localStorageFilesPanel, dbfiles:databaseFilesPanel};
+//
+// memory_process is a different shape from the other three: cache/local_storage/
+// cookies read straight off physical evidence files still sitting on disk, but a
+// process's own memory was extracted, carved, and deleted during analysis (see
+// dd_lab/memory/analyze.py) - there's no file left to re-open. Its "Files" view
+// (processesPanel) instead pivots the warehouse's own memory_process rows (one
+// flat key=value row per Volatility pslist/cmdline column today) into one row
+// per process, and clicking a process opens a dedicated detail page rather than
+// an iframe over a re-read file.
+const FILES_PANEL_TYPE = {cache:'cachefiles', local_storage:'lsfiles', cookies:'dbfiles', memory_process:'processes'};
+const FILES_PANEL_FN = {cachefiles:cacheFilesPanel, lsfiles:localStorageFilesPanel, dbfiles:databaseFilesPanel, processes:processesPanel};
 
 async function caseExplorer(id, w){
   const nav=el('div',{class:'panel',style:'width:240px;flex-shrink:0;align-self:flex-start;position:sticky;top:0;max-height:calc(100vh - 140px);overflow:auto'});
@@ -1019,7 +1033,10 @@ function browser(id,cats,fixed){
   const cat=el('select',{}, el('option',{value:''},'all categories'), ...cats.map(c=>el('option',{value:c},c)));
   const appSel = fixed.app ? null : el('select',{}, el('option',{value:''},'all apps'));
   const srcSel = fixed.source_type ? null : el('select',{}, el('option',{value:''},'all sources'));
-  const q=el('input',{placeholder:'search key or value',style:'flex:1;min-width:180px'});
+  // fixed.q: an initial search term the caller pins (e.g. a process detail
+  // view jumping here pre-filtered to "pid<PID>:" so only that process's
+  // carved strings show) - still a normal, editable search box after that.
+  const q=el('input',{placeholder:'search key or value',style:'flex:1;min-width:180px',value:fixed.q||''});
   const count=el('div',{class:'hint'});
   const out=el('div',{class:'scroll',style:'margin-top:10px'});
   const pagWrap=el('div',{});
@@ -1366,6 +1383,111 @@ function databaseFilesPanel(id, app){
     out);
   load();
   return wrap;
+}
+
+function processesPanel(id, app){
+  // memory_process rows are flat, one row per Volatility column (pslist AND
+  // cmdline share this source_type - both keyed "mem.process.*"/"mem.cmdline.*")
+  // - pivot them into one row per process, by PID, before rendering. Unlike
+  // the disk Files panels this reads the warehouse (via the normal artifacts
+  // endpoint), not a re-opened physical file: a process's own memory was
+  // extracted, carved, and deleted during analysis (dd_lab/memory/analyze.py),
+  // there's nothing left on disk to re-read.
+  const wrap=el('div',{class:'panel'});
+  const out=el('div',{class:'scroll',style:'margin-top:10px'});
+  const hint=el('div',{class:'hint',style:'margin-bottom:8px'});
+
+  function pivotByPid(rows){
+    const locatorPid=new Map();
+    rows.forEach(r=>{ if(r.key.endsWith('.PID')) locatorPid.set(r.source_locator, r.value); });
+    const byPid=new Map();
+    rows.forEach(r=>{
+      const pid=locatorPid.get(r.source_locator);
+      if(pid==null) return;  // a stray column with no PID sibling in its own row
+      const col=r.key.slice(r.key.lastIndexOf('.')+1);
+      if(!byPid.has(pid)) byPid.set(pid, {pid});
+      byPid.get(pid)[col]=r.value;
+    });
+    return [...byPid.values()].sort((a,b)=>Number(a.pid)-Number(b.pid));
+  }
+
+  async function load(){
+    out.innerHTML='<div class="muted" style="padding:10px">loading…</div>';
+    // the normal /artifacts endpoint strips source_locator (an internal
+    // encoding no other UI column needs) before returning rows, but this
+    // panel's whole pivot-by-PID trick depends on it - so this reads the
+    // warehouse's own read-only query endpoint directly instead, with an
+    // explicit LIMIT (the endpoint auto-appends its own 200-row cap unless
+    // the SQL already has one).
+    const sql = `SELECT key, value, source_locator FROM artifacts WHERE app = ${sqlQuote(app)} `+
+      `AND source_type = 'memory_process' LIMIT 5000`;
+    let d;
+    try{
+      d=await api('/cases/'+id+'/query',{method:'POST',body:JSON.stringify({sql})});
+      if(!d.ok) throw new Error(d.error||'query failed');
+    }catch(e){ out.innerHTML=''; out.append(el('div',{class:'hint'},'Could not load: '+e.message)); return; }
+    const procs=pivotByPid(d.rows);
+    if(!procs.length){
+      out.innerHTML='';
+      out.append(el('div',{class:'hint'},
+        'No process records for this app - Volatility may not have run (needs the `vol` '+
+        'CLI on the analysis machine and a full RAM image), or nothing matched this app.'));
+      return;
+    }
+    hint.textContent=`${procs.length.toLocaleString()} process(es) from this app's memory analysis`;
+    const t=el('table',{style:'table-layout:fixed;width:100%'},el('thead',{},el('tr',{},
+      ...['PID','Image name','PPID','Created',''].map(h=>el('th',{},h)))));
+    const tb=el('tbody',{});
+    procs.forEach(p=>{
+      tb.append(el('tr',{style:'cursor:pointer',title:'Click to view this process\'s details and carved memory strings',
+        onclick:()=>{ state.processTarget={caseId:id, app, proc:p}; go('processdetail'); }},
+        el('td',{class:'mono'},p.pid),
+        el('td',{style:'overflow:hidden;text-overflow:ellipsis;white-space:nowrap'},p.ImageFileName||''),
+        el('td',{class:'mono'},p.PPID||''),
+        el('td',{},p.CreateTime||''),
+        el('td',{},el('button',{class:'ghost'},'View →'))));
+    });
+    t.append(tb); out.innerHTML=''; out.append(t);
+  }
+  wrap.append(el('h2',{style:'margin-top:0'},app+' → Memory Processes → Files'),
+    el('div',{class:'hint',style:'margin-bottom:8px'},
+      'Every process Volatility found belonging to this app (root matches plus every '+
+      'spawned descendant) - click one to see its full details and the memory strings '+
+      'carved from its own memory specifically, not the whole image.'),
+    hint, out);
+  load();
+  return wrap;
+}
+
+async function vProcessDetail(m){
+  const t=state.processTarget;
+  m.innerHTML='';
+  if(!t){
+    m.append(el('div',{class:'panel'},'Nothing selected — go back to the case and open a process.'),
+      el('button',{class:'sec',onclick:()=>go('cases')},'← Back to Cases'));
+    return;
+  }
+  const p=t.proc;
+  m.append(el('div',{class:'row',style:'margin-bottom:10px'},
+    el('button',{class:'sec',onclick:()=>go('case',t.caseId)},'←  Back to case')));
+  m.append(el('h1',{},p.ImageFileName||('PID '+p.pid)),
+    el('div',{class:'muted mono',style:'margin-bottom:14px'},t.app+' · PID '+p.pid));
+
+  const DETAIL_COLS=[['pid','PID'],['PPID','Parent PID'],['ImageFileName','Image name'],
+    ['CreateTime','Created'],['ExitTime','Exited'],['Threads','Threads'],['Handles','Handles'],
+    ['SessionId','Session'],['Wow64','WoW64'],['Offset(V)','Offset (V)'],
+    ['Process','Command line: process'],['Args','Command line: args']];
+  const dl=el('div',{class:'panel',style:'margin-bottom:16px'});
+  DETAIL_COLS.forEach(([k,label])=>{
+    if(p[k]==null || p[k]==='') return;
+    dl.append(el('div',{class:'row',style:'padding:4px 0;border-bottom:1px solid var(--line)'},
+      el('div',{class:'muted',style:'width:170px;flex-shrink:0'},label),
+      el('div',{class:'mono',style:'word-break:break-all'},String(p[k]))));
+  });
+  m.append(dl);
+
+  m.append(el('h2',{},'Strings carved from this process’s memory'));
+  m.append(browser(t.caseId, [], {app:t.app, source_type:'memory_string', q:'pid'+p.pid+':'}));
 }
 
 async function vAudit(m){
