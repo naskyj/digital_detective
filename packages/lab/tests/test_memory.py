@@ -40,6 +40,87 @@ def test_iter_strings_finds_planted(tmp_path):
     assert any("kim@example.com" in s for s in found)  # utf-16
 
 
+def test_iter_memory_artifacts_uses_process_scoped_carving_when_matched(tmp_path):
+    """When Volatility finds a matching process, the whole flat image must
+    NOT be carved directly - only the extracted per-process dump - and the
+    resulting rows carry the matched app, not the image's pseudo-app."""
+    from unittest.mock import patch
+
+    from dd_core.casedir import CaseLayout
+    from dd_lab.memory.analyze import iter_memory_artifacts
+
+    layout = CaseLayout(tmp_path, "case1")
+    mem_dir = layout.evidence / "_system" / "memory"
+    mem_dir.mkdir(parents=True)
+    dump_path = mem_dir / "physmem.raw"
+    _fake_dump(dump_path)  # whole-image content - must not surface in this test's output
+
+    proc_dump = tmp_path / "extracted_proc.dmp"
+    proc_dump.write_bytes(b"\x00" * 4096 + b"discord process only content marker 1234" + b"\x00" * 64)
+
+    with (
+        patch("dd_lab.memory.analyze.vol_available", return_value=True),
+        patch("dd_lab.memory.analyze.analyse_image", return_value=iter(())) as analyse,
+        patch("dd_lab.memory.analyze.match_target_processes", return_value={4242: "discord"}),
+        patch("dd_lab.memory.analyze.dump_process_memory", return_value=proc_dump) as dump_mem,
+    ):
+        artifacts = list(iter_memory_artifacts("case1", layout, [("_system", dump_path)], ["discord"]))
+
+    analyse.assert_called_once()  # the structural plugins still run on the whole image
+    dump_mem.assert_called_once()
+    assert artifacts
+    assert all(a.app == "discord" for a in artifacts)  # not "_system"
+    assert any("discord process only content marker" in a.value for a in artifacts)
+    assert not any("Bearer eyJ" in a.value for a in artifacts)  # whole-image content absent
+    assert not proc_dump.exists()  # cleaned up right after carving
+
+
+def test_iter_memory_artifacts_falls_back_to_whole_image_when_nothing_matched(tmp_path):
+    from unittest.mock import patch
+
+    from dd_core.casedir import CaseLayout
+    from dd_lab.memory.analyze import iter_memory_artifacts
+
+    layout = CaseLayout(tmp_path, "case1")
+    mem_dir = layout.evidence / "_system" / "memory"
+    mem_dir.mkdir(parents=True)
+    dump_path = mem_dir / "physmem.raw"
+    _fake_dump(dump_path)
+
+    with (
+        patch("dd_lab.memory.analyze.vol_available", return_value=True),
+        patch("dd_lab.memory.analyze.analyse_image", return_value=iter(())),
+        patch("dd_lab.memory.analyze.match_target_processes", return_value={}),
+    ):
+        artifacts = list(iter_memory_artifacts("case1", layout, [("_system", dump_path)], ["discord"]))
+
+    assert artifacts
+    assert all(a.app == "_system" for a in artifacts)
+    assert any("Bearer eyJ" in a.value for a in artifacts)
+
+
+def test_iter_memory_artifacts_skips_matching_when_vol_unavailable(tmp_path):
+    from unittest.mock import patch
+
+    from dd_core.casedir import CaseLayout
+    from dd_lab.memory.analyze import iter_memory_artifacts
+
+    layout = CaseLayout(tmp_path, "case1")
+    mem_dir = layout.evidence / "_system" / "memory"
+    mem_dir.mkdir(parents=True)
+    dump_path = mem_dir / "physmem.raw"
+    _fake_dump(dump_path)
+
+    with (
+        patch("dd_lab.memory.analyze.vol_available", return_value=False),
+        patch("dd_lab.memory.analyze.match_target_processes") as mtp,
+    ):
+        artifacts = list(iter_memory_artifacts("case1", layout, [("_system", dump_path)], ["discord"]))
+
+    mtp.assert_not_called()  # no point matching processes vol can't extract anyway
+    assert all(a.app == "_system" for a in artifacts)
+
+
 def test_analyze_memory_loads_and_classifies(tmp_path):
     # minimal signed case so a warehouse can exist
     from tests.sample_case import build_sample_case

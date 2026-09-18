@@ -29,6 +29,13 @@ class ElectronApp:
     version: str | None = None
     pids: list[int] = field(default_factory=list)
     running: bool = False
+    # the real OS process image name the pids were matched against (e.g.
+    # "discord.exe") - NOT the same as `name` (the profile-folder-derived
+    # display label, e.g. "Discord"). Recorded so a signed manifest's
+    # ProcessRef carries something a human/tool can actually cross-reference
+    # against a live or memory-image process list, rather than repeating the
+    # display label for every pid.
+    process_name: str | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -37,6 +44,7 @@ class ElectronApp:
             "version": self.version,
             "pids": self.pids,
             "running": self.running,
+            "process_name": self.process_name,
         }
 
 
@@ -117,7 +125,9 @@ def discover_apps(extra_dirs: list[str | Path] | None = None) -> list[ElectronAp
                 continue
             seen_entries.add(entry)
             key = entry.name.lower().replace(" ", "")
-            pids = next((v for k, v in running.items() if key in k or k in key), [])
+            matched_process_name, pids = next(
+                ((k, v) for k, v in running.items() if key in k or k in key), (None, [])
+            )
             for name, profile in iter_profiles_for_entry(entry):
                 if profile in seen_profiles:
                     continue
@@ -129,6 +139,7 @@ def discover_apps(extra_dirs: list[str | Path] | None = None) -> list[ElectronAp
                         version=_guess_version(profile),
                         pids=pids,
                         running=bool(pids),
+                        process_name=matched_process_name,
                     )
                 )
     return apps

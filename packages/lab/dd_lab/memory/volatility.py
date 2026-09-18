@@ -55,6 +55,103 @@ def run_plugin(image: Path, plugin: str, timeout: int = 900) -> list[dict] | Non
         return None
 
 
+def _pslist_rows(image: Path) -> list[dict] | None:
+    return run_plugin(image, "windows.pslist.PsList")
+
+
+def _fuzzy_name_match(app_name: str, image_file_name: str) -> bool:
+    """Same convention as dd_collector.discover._running_electron/discover_apps:
+    lowercase, strip a trailing .exe, bidirectional substring containment. A
+    Windows EPROCESS's ImageFileName is capped at 15 chars (kernel-side
+    limit, not ours - e.g. "RobloxPlayerBe"), so containment rather than
+    equality is required either way."""
+    a = app_name.strip().lower()
+    b = image_file_name.strip().lower().removesuffix(".exe")
+    if not a or not b:
+        return False
+    return a in b or b in a
+
+
+def match_target_processes(image: Path, app_names: list[str]) -> dict[int, str]:
+    """PID -> matched app name, for every process belonging to one of
+    `app_names` *or* spawned (directly or transitively) by one such process.
+
+    Both name-matching and tree-walking are needed, neither alone is enough -
+    confirmed against a real case: an Electron app's own child renderer/GPU/
+    utility processes usually keep the same image name (name-matching alone
+    would work there), but a Roblox capture's WebView2-hosted children run as
+    `msedgewebview2.exe` - only reachable by walking the tree from the
+    matched root - while orphaned helper processes (e.g. a
+    "DiscordSystemHelper" whose parent already exited by capture time) are
+    only reachable by name-matching, since tree-walking never reaches them.
+
+    Returns {} (not None) if vol fails, there are no rows, or nothing
+    matches - callers should treat that as "fall back to whole-image carving",
+    not as an error.
+    """
+    rows = _pslist_rows(image)
+    if not rows:
+        return {}
+
+    by_pid: dict[int, dict] = {}
+    children: dict[int, list[int]] = {}
+    for row in rows:
+        pid, ppid = row.get("PID"), row.get("PPID")
+        if not isinstance(pid, int):
+            continue
+        by_pid[pid] = row
+        if isinstance(ppid, int):
+            children.setdefault(ppid, []).append(pid)
+
+    pid_to_app: dict[int, str] = {}
+
+    # 1. name-matching, every row independently (catches orphaned helpers)
+    for pid, row in by_pid.items():
+        name = str(row.get("ImageFileName") or "")
+        for app in app_names:
+            if _fuzzy_name_match(app, name):
+                pid_to_app.setdefault(pid, app)
+                break
+
+    # 2. tree-walk from every matched root (catches non-obviously-named
+    # children, e.g. Roblox's WebView2 host + its own renderer fan-out)
+    roots = list(pid_to_app.items())
+    for root_pid, app in roots:
+        stack = list(children.get(root_pid, []))
+        while stack:
+            pid = stack.pop()
+            pid_to_app.setdefault(pid, app)
+            stack.extend(children.get(pid, []))
+
+    return pid_to_app
+
+
+def dump_process_memory(image: Path, pid: int, out_dir: Path, timeout: int = 900) -> Path | None:
+    """Extract one process's resident virtual address space to a flat file
+    under `out_dir`, via `windows.memmap.Memmap --pid <pid> --dump` (confirmed
+    against a real image: produces `<out_dir>/pid.<pid>.dmp`, a file
+    `iter_strings()` can run against unmodified). Never raises - same
+    swallow-and-log convention as `run_plugin`; returns None on any failure
+    so callers can fall back cleanly."""
+    try:
+        proc = subprocess.run(
+            ["vol", "-q", "-o", str(out_dir), "-f", str(image),
+             "windows.memmap.Memmap", "--pid", str(pid), "--dump"],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        log.warning("vol memmap --pid %d failed: %s", pid, e)
+        return None
+    if proc.returncode != 0:
+        log.warning("vol memmap --pid %d exit %d: %s", pid, proc.returncode, proc.stderr[:300])
+        return None
+    dump = out_dir / f"pid.{pid}.dmp"
+    if not dump.is_file() or dump.stat().st_size == 0:
+        log.warning("vol memmap --pid %d produced no output", pid)
+        return None
+    return dump
+
+
 def analyse_image(
     case_id: str, app: str, image: Path, evidence_root: Path
 ) -> Iterator[NormalizedArtifact]:

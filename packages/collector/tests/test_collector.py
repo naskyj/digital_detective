@@ -75,6 +75,38 @@ def test_acquisition_produces_verifiable_case(tmp_path):
     assert any("copying profile" in m for m in logs)
 
 
+def test_process_ref_records_the_real_process_name_not_the_display_label(tmp_path):
+    """Regression: ProcessRef.name used to repeat the app's friendly display
+    label (e.g. "Discord") for every pid instead of the real OS process name
+    - useless for cross-referencing against a live or memory-image process
+    list later. ElectronApp.process_name (set by discover_apps() from the
+    matched psutil process-name key) must flow through instead."""
+    profile = _a_profile()
+    app = ElectronApp(name="Display Label", profile_dir=profile, pids=[4242], process_name="realproc")
+    result = acquire([app], tmp_path, operator="op", sources=_FAST)
+
+    from dd_core.manifest import Manifest
+
+    manifest = Manifest.read(result.case_dir)
+    target = next(t for t in manifest.target_apps if t.processes)
+    assert target.processes[0].pid == 4242
+    assert target.processes[0].name == "realproc"  # not "Display Label"
+
+
+def test_process_ref_falls_back_to_display_label_when_process_name_unset(tmp_path):
+    # discover_apps() leaves process_name=None when nothing running matched -
+    # acquire() must still record *something* usable rather than a blank name.
+    profile = _a_profile()
+    app = ElectronApp(name="Display Label", profile_dir=profile, pids=[4242])
+    result = acquire([app], tmp_path, operator="op", sources=_FAST)
+
+    from dd_core.manifest import Manifest
+
+    manifest = Manifest.read(result.case_dir)
+    target = next(t for t in manifest.target_apps if t.processes)
+    assert target.processes[0].name == "Display Label"
+
+
 def test_source_is_not_modified(tmp_path):
     profile = _a_profile()
     prefs = profile / "Preferences"

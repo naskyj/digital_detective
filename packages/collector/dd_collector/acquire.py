@@ -187,7 +187,7 @@ def acquire(
         target_apps.append(
             TargetApp(
                 name=dest_name, user_data_dir=str(app.profile_dir), version=app.version,
-                processes=[ProcessRef(pid=pid, name=app.name) for pid in app.pids],
+                processes=[ProcessRef(pid=pid, name=app.process_name or app.name) for pid in app.pids],
             )
         )
 
