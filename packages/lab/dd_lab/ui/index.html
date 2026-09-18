@@ -785,8 +785,7 @@ function browser(id,cats,fixed){
   const q=el('input',{placeholder:'search key or value',style:'flex:1;min-width:180px'});
   const count=el('div',{class:'hint'});
   const out=el('div',{class:'scroll',style:'margin-top:10px'});
-  const prevBtn=el('button',{class:'sec'},'← Prev');
-  const nextBtn=el('button',{class:'sec'},'Next →');
+  const pagWrap=el('div',{});
   const dlBtn=el('a',{class:'ghost',style:'text-decoration:none;padding:8px 8px;cursor:pointer'},'⬇ Download CSV');
 
   // available columns for THIS view, and which of them the user currently
@@ -833,12 +832,12 @@ function browser(id,cats,fixed){
         ...cols.map(c=>artifactCell(c,r))));
     });
     t.append(tb); out.innerHTML=''; out.append(t);
+    pagWrap.innerHTML='';
     if(lastD){
       count.textContent = lastD.total
         ? `showing ${offset+1}–${offset+lastD.shown} of ${lastD.total.toLocaleString()} matching`
         : 'no matching artifacts';
-      prevBtn.disabled = offset<=0;
-      nextBtn.disabled = offset+lastD.shown>=lastD.total;
+      pagWrap.append(paginationBar(offset, limit, lastD.total, newOffset=>{offset=newOffset; load();}));
     }
   }
   async function load(){
@@ -858,8 +857,6 @@ function browser(id,cats,fixed){
   cat.onchange=()=>{offset=0; load();};
   if(appSel) appSel.onchange=()=>{offset=0; load();};
   if(srcSel) srcSel.onchange=()=>{offset=0; load();};
-  prevBtn.onclick=()=>{offset=Math.max(0,offset-limit); load();};
-  nextBtn.onclick=()=>{offset+=limit; load();};
   let tmo; q.oninput=()=>{clearTimeout(tmo);tmo=setTimeout(()=>{offset=0; load();},300);};
   const heading = fixed.app
     ? fixed.source_type ? `${fixed.app} → ${SRC_LABELS[fixed.source_type]||fixed.source_type}` : `${fixed.app} → all sources`
@@ -867,8 +864,7 @@ function browser(id,cats,fixed){
   wrap.append(el('div',{class:'row'},
       el('h2',{style:'margin:0'},heading), el('span',{style:'flex:1'}), colPicker, dlBtn),
     el('div',{class:'row',style:'margin-top:8px'},cat, ...(appSel?[appSel]:[]), ...(srcSel?[srcSel]:[]), q),
-    count, out,
-    el('div',{class:'row',style:'margin-top:8px'}, prevBtn, nextBtn));
+    count, out, pagWrap);
   load();
   return wrap;
 }
@@ -878,6 +874,40 @@ function fmtBytes(n){
   if(n<1024) return n+' B';
   if(n<1048576) return (n/1024).toFixed(1)+' KB';
   return (n/1048576).toFixed(1)+' MB';
+}
+
+// Shared First/Prev/[page numbers]/Next/Last control, used everywhere a
+// list is paginated (the artifact table, cache/local-storage/database file
+// listings, a Local Storage file's own record dump). `goto(newOffset)` is
+// the caller's job - it re-fetches/re-renders at that offset; this only
+// works out which offset each button means. Rebuilt fresh on every render
+// (same pattern as everything else here) rather than patched in place.
+function paginationBar(offset, limit, total, goto){
+  const bar=el('div',{class:'row',style:'margin-top:8px;flex-wrap:wrap;gap:4px'});
+  if(!total) return bar;
+  const lastPage=Math.max(0, Math.ceil(total/limit)-1);
+  const curPage=Math.min(lastPage, Math.floor(offset/limit));
+  function btn(label,page,opts={}){
+    return el('button',{class:opts.active?'primary':'sec',
+      style:'padding:6px 11px;font-size:12.5px'+(opts.active?'':';opacity:.85'),
+      disabled:!!opts.disabled, onclick:()=>goto(page*limit)}, label);
+  }
+  bar.append(btn('« First',0,{disabled:curPage<=0}));
+  bar.append(btn('‹ Prev',Math.max(0,curPage-1),{disabled:curPage<=0}));
+  const WINDOW=2;
+  const start=Math.max(0,curPage-WINDOW), end=Math.min(lastPage,curPage+WINDOW);
+  if(start>0){
+    bar.append(btn('1',0));
+    if(start>1) bar.append(el('span',{class:'muted',style:'padding:0 2px'},'…'));
+  }
+  for(let p=start;p<=end;p++) bar.append(btn(String(p+1),p,{active:p===curPage}));
+  if(end<lastPage){
+    if(end<lastPage-1) bar.append(el('span',{class:'muted',style:'padding:0 2px'},'…'));
+    bar.append(btn(String(lastPage+1),lastPage));
+  }
+  bar.append(btn('Next ›',Math.min(lastPage,curPage+1),{disabled:curPage>=lastPage}));
+  bar.append(btn('Last »',lastPage,{disabled:curPage>=lastPage}));
+  return bar;
 }
 
 function cacheFilesPanel(id, app){
@@ -893,8 +923,7 @@ function cacheFilesPanel(id, app){
   const q=el('input',{placeholder:'search URL or key',style:'flex:1;min-width:180px'});
   const count=el('div',{class:'hint'});
   const out=el('div',{class:'scroll',style:'margin-top:10px'});
-  const prevBtn=el('button',{class:'sec'},'← Prev');
-  const nextBtn=el('button',{class:'sec'},'Next →');
+  const pagWrap=el('div',{});
   let offset=0; const limit=100; let total=0;
 
   async function load(){
@@ -908,8 +937,8 @@ function cacheFilesPanel(id, app){
     count.textContent = total
       ? `showing ${offset+1}–${offset+d.shown} of ${total.toLocaleString()}`
       : 'no cache entries found for this app (the cache may be empty, or not part of this evidence copy)';
-    prevBtn.disabled = offset<=0;
-    nextBtn.disabled = offset+d.shown>=total;
+    pagWrap.innerHTML='';
+    pagWrap.append(paginationBar(offset, limit, total, newOffset=>{offset=newOffset; load();}));
 
     const t=el('table',{},el('thead',{},el('tr',{},
       ...['Filename','Kind','URL','Content Type','Size','Request Time','Status',''].map(h=>el('th',{},h)))));
@@ -935,16 +964,13 @@ function cacheFilesPanel(id, app){
     });
     t.append(tb); out.innerHTML=''; out.append(t);
   }
-  prevBtn.onclick=()=>{offset=Math.max(0,offset-limit); load();};
-  nextBtn.onclick=()=>{offset+=limit; load();};
   let tmo; q.oninput=()=>{clearTimeout(tmo); tmo=setTimeout(()=>{offset=0; load();},300);};
   wrap.append(el('h2',{style:'margin-top:0'},app+' → Cache → Files'),
     el('div',{class:'hint',style:'margin-bottom:8px'},
       'Every entry in the HTTP disk cache and the Cache API, every content type included - '+
       'the same view a tool like ChromeCacheView gives, built on the same evidence copy '+
       'everything else here reads from.'),
-    el('div',{class:'row'}, q), count, out,
-    el('div',{class:'row',style:'margin-top:8px'}, prevBtn, nextBtn));
+    el('div',{class:'row'}, q), count, out, pagWrap);
   load();
   return wrap;
 }
@@ -986,31 +1012,39 @@ function localStorageFilesPanel(id, app){
       ...['Filename','Kind','Size','Records',''].map(h=>el('th',{},h)))));
     const tb=el('tbody',{});
     d.files.forEach(f=>{
-      const recBox=el('div',{style:'display:none;padding:8px 0'});
+      // Records render into their own capped, independently-scrolling box
+      // (max-height, not the unbounded default) - otherwise opening one
+      // file's up-to-100-row record dump inline could push every OTHER
+      // file's row far enough down the page to look like it vanished.
+      const recTable=el('div',{style:'max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:6px'});
+      const recHint=el('div',{class:'hint',style:'margin:8px 0 6px'});
+      const recPag=el('div',{});
+      const recBox=el('div',{style:'display:none;padding:8px 0'},recHint,recTable,recPag);
       let recOffset=0; const recLimit=100;
       async function loadRecords(){
-        recBox.innerHTML='<div class="muted">loading…</div>';
+        recTable.innerHTML='<div class="muted" style="padding:8px">loading…</div>';
         const rp=new URLSearchParams({app, file:f.filename, limit:String(recLimit), offset:String(recOffset)});
         const rd=await api('/cases/'+id+'/localstorage-files/open?'+rp);
-        recBox.innerHTML='';
-        recBox.append(el('div',{class:'hint'},
-          `showing ${recOffset+1}–${recOffset+rd.shown} of ${rd.total.toLocaleString()} record(s) in ${f.filename}`+
-          (rd.truncated?' — file ended early (a corrupt/partial record was hit)':'')));
-        recBox.append(tbl(rd.records,['key','value','state','seq']));
-        const nav=el('div',{class:'row',style:'margin-top:6px'});
-        const pv=el('button',{class:'ghost',disabled:recOffset<=0,onclick:()=>{recOffset=Math.max(0,recOffset-recLimit);loadRecords();}},'← Prev');
-        const nx=el('button',{class:'ghost',disabled:recOffset+rd.shown>=rd.total,onclick:()=>{recOffset+=recLimit;loadRecords();}},'Next →');
-        nav.append(pv,nx); recBox.append(nav);
+        recHint.textContent=`showing ${recOffset+1}–${recOffset+rd.shown} of ${rd.total.toLocaleString()} record(s) in ${f.filename}`+
+          (rd.truncated?' — file ended early (a corrupt/partial record was hit)':'');
+        recTable.innerHTML=''; recTable.append(tbl(rd.records,['key','value','state','seq']));
+        recPag.innerHTML=''; recPag.append(paginationBar(recOffset, recLimit, rd.total,
+          newOffset=>{recOffset=newOffset; loadRecords();}));
       }
-      const row=el('tr',{style:'cursor:pointer',onclick:()=>{
-        if(recBox.style.display==='none'){ recOffset=0; recBox.style.display='block'; loadRecords(); }
-        else recBox.style.display='none';
+      const chevron=el('span',{style:'display:inline-block;width:14px;text-align:center;opacity:.7'},'▸');
+      const toggleLabel=el('span',{},'Open');
+      const row=el('tr',{style:'cursor:pointer',title:'Click to expand/collapse this file\'s raw records',onclick:()=>{
+        const opening = recBox.style.display==='none';
+        recBox.style.display = opening?'block':'none';
+        chevron.textContent = opening?'▾':'▸';
+        toggleLabel.textContent = opening?'Close':'Open';
+        if(opening){ recOffset=0; loadRecords(); }
       }},
         el('td',{class:'mono'},f.filename),
         el('td',{},f.kind),
         el('td',{},fmtBytes(f.size_bytes)),
         el('td',{},f.record_count!=null?f.record_count.toLocaleString()+(f.truncated?' (partial)':''):'—'),
-        el('td',{},'Open'));
+        el('td',{},chevron,' ',toggleLabel));
       tb.append(row);
       const recRow=el('tr',{}); recRow.append(el('td',{colspan:'5'},recBox)); tb.append(recRow);
     });
@@ -1043,30 +1077,34 @@ function databaseFilesPanel(id, app){
       ...['File','Table','Rows',''].map(h=>el('th',{},h)))));
     const tb=el('tbody',{});
     d.files.forEach(f=>f.tables.forEach(tbl_=>{
-      const rowBox=el('div',{style:'display:none;padding:8px 0'});
+      const rowTable=el('div',{style:'max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:6px'});
+      const rowHint=el('div',{class:'hint',style:'margin:8px 0 6px'});
+      const rowPag=el('div',{});
+      const rowBox=el('div',{style:'display:none;padding:8px 0'},rowHint,rowTable,rowPag);
       let rOffset=0; const rLimit=100;
       async function loadRows(){
-        rowBox.innerHTML='<div class="muted">loading…</div>';
+        rowTable.innerHTML='<div class="muted" style="padding:8px">loading…</div>';
         const rp=new URLSearchParams({app, path:f.path, table:tbl_.table, limit:String(rLimit), offset:String(rOffset)});
         const rd=await api('/cases/'+id+'/db-files/open?'+rp);
-        rowBox.innerHTML='';
-        rowBox.append(el('div',{class:'hint'},
-          `showing ${rOffset+1}–${rOffset+rd.rows.length} of ${rd.total.toLocaleString()} row(s)`));
+        rowHint.textContent=`showing ${rOffset+1}–${rOffset+rd.rows.length} of ${rd.total.toLocaleString()} row(s)`;
         const rt=el('table',{},el('thead',{},el('tr',{},...rd.columns.map(c=>el('th',{},c)))));
         const rtb=el('tbody',{});
         rd.rows.forEach(row=>rtb.append(el('tr',{},...row.map(v=>el('td',{class:'mono'},v)))));
-        rt.append(rtb); rowBox.append(rt);
-        const nav=el('div',{class:'row',style:'margin-top:6px'});
-        const pv=el('button',{class:'ghost',disabled:rOffset<=0,onclick:()=>{rOffset=Math.max(0,rOffset-rLimit);loadRows();}},'← Prev');
-        const nx=el('button',{class:'ghost',disabled:rOffset+rd.rows.length>=rd.total,onclick:()=>{rOffset+=rLimit;loadRows();}},'Next →');
-        nav.append(pv,nx); rowBox.append(nav);
+        rt.append(rtb); rowTable.innerHTML=''; rowTable.append(rt);
+        rowPag.innerHTML=''; rowPag.append(paginationBar(rOffset, rLimit, rd.total,
+          newOffset=>{rOffset=newOffset; loadRows();}));
       }
-      const row=el('tr',{style:'cursor:pointer',onclick:()=>{
-        if(rowBox.style.display==='none'){ rOffset=0; rowBox.style.display='block'; loadRows(); }
-        else rowBox.style.display='none';
+      const chevron=el('span',{style:'display:inline-block;width:14px;text-align:center;opacity:.7'},'▸');
+      const toggleLabel=el('span',{},'Open');
+      const row=el('tr',{style:'cursor:pointer',title:'Click to expand/collapse this table\'s raw rows',onclick:()=>{
+        const opening = rowBox.style.display==='none';
+        rowBox.style.display = opening?'block':'none';
+        chevron.textContent = opening?'▾':'▸';
+        toggleLabel.textContent = opening?'Close':'Open';
+        if(opening){ rOffset=0; loadRows(); }
       }},
         el('td',{class:'mono'},f.filename), el('td',{},tbl_.table),
-        el('td',{},tbl_.row_count.toLocaleString()), el('td',{},'Open'));
+        el('td',{},tbl_.row_count.toLocaleString()), el('td',{},chevron,' ',toggleLabel));
       tb.append(row);
       const dataRow=el('tr',{}); dataRow.append(el('td',{colspan:'4'},rowBox)); tb.append(dataRow);
     }));
