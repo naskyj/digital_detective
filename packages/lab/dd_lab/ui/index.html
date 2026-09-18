@@ -27,6 +27,13 @@
   button.ghost{background:transparent;color:var(--accent2);padding:8px 8px}
   button.danger{background:var(--bad)}
   button:disabled{opacity:.45;cursor:not-allowed}
+  /* a real switchable option (Image/Folder), not a button that merely
+     looks like a hyperlink (.ghost) sitting next to one that doesn't -
+     the selected side uses the app's own accent colour (same as an
+     active nav row), the other a plain but still obviously-clickable
+     solid button. */
+  button.toggle-btn{background:#e8e8ea;color:#27272a}
+  button.toggle-btn.active{background:var(--accent2);color:#fff}
   .hint{font-size:12px;color:var(--muted);margin-top:6px}
   .spin{display:inline-block;width:12px;height:12px;border:2px solid #fff6;border-top-color:#fff;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px;margin-right:6px}
   @keyframes sp{to{transform:rotate(360deg)}}
@@ -143,10 +150,10 @@ async function pollActiveJobs(){
 }
 setInterval(pollActiveJobs, 3000);
 
-const _loadingMsg = {case:'Opening case…', report:'Loading report…', cases:'Loading cases…', import:'Loading…', settings:'Loading settings…', dashboard:'Loading…', cacheentry:'Opening cache entry…'};
+const _loadingMsg = {case:'Opening case…', report:'Loading report…', audit:'Loading audit trail…', cases:'Loading cases…', import:'Loading…', settings:'Loading settings…', dashboard:'Loading…', cacheentry:'Opening cache entry…'};
 async function render(){
   const m=$('#main'); m.innerHTML=''; m.append(loadingView(_loadingMsg[state.view]));
-  try{ await ({dashboard:vDashboard,import:vImport,cases:vCases,case:vCase,report:vReport,settings:vSettings,cacheentry:vCacheEntry}[state.view]||vDashboard)(m); }
+  try{ await ({dashboard:vDashboard,import:vImport,cases:vCases,case:vCase,report:vReport,audit:vAudit,settings:vSettings,cacheentry:vCacheEntry}[state.view]||vDashboard)(m); }
   catch(e){ m.innerHTML=''; m.append(el('div',{class:'panel'},'Error: '+e.message)); }
 }
 
@@ -211,14 +218,20 @@ function sourceRow(onRemove){
     if(base) label.value=base;
   });
 
-  const imgBtn=el('button',{class:'sec'},'Image');
-  const folderBtn=el('button',{class:'ghost'},'Folder');
-  const browseFile=el('button',{class:'ghost',onclick:()=>browseForFile(path)},'Browse…');
-  const browseFolderBtn=el('button',{class:'ghost',style:'display:none',onclick:()=>browseForFolder(path)},'Browse…');
+  // A real toggle, not two buttons that happen to sit together: the
+  // selected one uses the app's own solid accent colour (same as an
+  // active nav row), the other stays a plain, still-obviously-clickable
+  // secondary button - "ghost" (transparent, link-coloured text) reads as
+  // a hyperlink rather than a switchable option, which is why the
+  // unselected side wasn't registering as clickable.
+  const imgBtn=el('button',{class:'toggle-btn active'},'📀  Image');
+  const folderBtn=el('button',{class:'toggle-btn'},'📁  Folder');
+  const browseFile=el('button',{class:'sec',onclick:()=>browseForFile(path)},'Browse…');
+  const browseFolderBtn=el('button',{class:'sec',style:'display:none',onclick:()=>browseForFolder(path)},'Browse…');
   function setKind(k){
     kind=k;
-    imgBtn.className = k==='image'?'sec':'ghost';
-    folderBtn.className = k==='folder'?'sec':'ghost';
+    imgBtn.className = 'toggle-btn'+(k==='image'?' active':'');
+    folderBtn.className = 'toggle-btn'+(k==='folder'?' active':'');
     browseFile.style.display = k==='image'?'inline-block':'none';
     browseFolderBtn.style.display = k==='folder'?'inline-block':'none';
     path.placeholder = k==='image'
@@ -251,6 +264,10 @@ function sourceRow(onRemove){
     scanBtn.disabled=false; scanBtn.textContent='Preview apps (optional)';
   };
 
+  const memImg=el('input',{placeholder:'optional — a full-RAM capture acquired separately',style:'flex:1;min-width:220px'});
+  const browseMemImg=el('button',{class:'sec',onclick:()=>browseForFile(
+    memImg,['Memory dumps (*.raw;*.dmp;*.mem;*.bin)','All files (*.*)'])},'Browse…');
+
   const statusLog=el('div',{class:'log',style:'display:none;margin-top:8px'});
   const rowHeader=el('div',{class:'row'}, imgBtn, folderBtn, el('span',{style:'flex:1'}));
   if(onRemove){
@@ -260,6 +277,7 @@ function sourceRow(onRemove){
   box.append(rowHeader,
     el('label',{},'Path'), el('div',{class:'row'}, path, browseFile, browseFolderBtn),
     el('label',{},'Label (who/what this source is from)'), label,
+    el('label',{},'Memory image (optional)'), el('div',{class:'row'}, memImg, browseMemImg),
     el('div',{class:'row',style:'margin-top:6px'}, scanBtn), scanLog, appsBox, statusLog);
   setKind('image');
 
@@ -267,7 +285,8 @@ function sourceRow(onRemove){
     el: box, statusLog,
     value(){
       const chosen = checks.length ? checks.filter(([c])=>c.checked).map(([,a])=>a.name) : null;
-      return {path: path.value.trim(), label: label.value.trim(), apps: chosen};
+      return {path: path.value.trim(), label: label.value.trim(), apps: chosen,
+        memoryImagePath: memImg.value.trim()||null};
     },
   };
 }
@@ -309,7 +328,7 @@ function newCasePanel(){
   const bgHint=el('div',{class:'hint',style:'display:none;margin-top:8px'},
     'Running in the background — this page can be left safely; progress is also '+
     'shown in the sidebar and on the Cases page.');
-  const createBtn=el('button',{class:'primary',style:'margin-top:16px',onclick:async()=>{
+  const createBtn=el('button',{class:'primary',style:'display:block;margin-top:20px',onclick:async()=>{
     if(!name.value.trim()) return alert('Case name is required.');
     const sourceValues=rows.map((r,i)=>({row:r, ...r.value()})).filter(v=>v.path);
     createBtn.disabled=true; createBtn.innerHTML='<span class="spin"></span>Creating case…';
@@ -331,7 +350,7 @@ function newCasePanel(){
       try{
         const r=await api(`/cases/${encodeURIComponent(caseId)}/sources`,{method:'POST',body:JSON.stringify({
           source_path:sv.path, source_label:sv.label, apps:sv.apps,
-          memory_image_path:null, operator:op.value})});
+          memory_image_path:sv.memoryImagePath, operator:op.value})});
         await pollJob(r.job_id, sv.row.statusLog);
       }catch(e){ sv.row.statusLog.textContent='Could not start: '+e.message; }
     }
@@ -364,7 +383,7 @@ function addSourcePanel(id, onAdded){
         try{
           const r=await api(`/cases/${encodeURIComponent(id)}/sources`,{method:'POST',body:JSON.stringify({
             source_path:v.path, source_label:v.label, apps:v.apps,
-            memory_image_path:null, operator:op.value})});
+            memory_image_path:v.memoryImagePath, operator:op.value})});
           await pollJob(r.job_id, row.statusLog);
           onAdded();
         }catch(e){
@@ -430,7 +449,7 @@ async function vCases(m){
   // duplicated here too. This page is just the list + a pointer there.
   const d=await api('/cases');
   m.innerHTML='';
-  m.append(el('div',{class:'row'},
+  m.append(el('div',{class:'row',style:'margin-bottom:18px'},
     el('h1',{style:'margin:0'},'Cases'), el('span',{style:'flex:1'}),
     el('button',{class:'primary',onclick:()=>go('import')},'+ New Case')));
   if(!d.cases.length) m.append(el('div',{class:'panel hint'},
@@ -591,7 +610,7 @@ async function vCase(m){
       el('button',{class:'sec',onclick:e=>startRun(e.target)},'↻  Re-run analysis'),
       el('button',{class:'sec',onclick:()=>document.getElementById('browser')
         ?.scrollIntoView({behavior:'smooth'})},'🔍  Browse artifacts'),
-      el('button',{class:'ghost',onclick:()=>showAudit(id)},'📋  Audit trail')),
+      el('button',{class:'ghost',onclick:()=>go('audit',id)},'📋  Audit trail')),
       el('div',{class:'hint'},
         `${w.artifacts.toLocaleString()} artifacts · ${w.high_priority} high-priority · `+
         (job&&job.updated_ts?'analysed '+ago(job.updated_ts):'')),
@@ -1279,17 +1298,20 @@ function databaseFilesPanel(id, app){
   return wrap;
 }
 
-async function showAudit(id){
-  document.getElementById('audit-section')?.remove();  // else a second click duplicates everything below
+async function vAudit(m){
+  // Its own page (like Report), not appended to the bottom of the case
+  // page - it used to just scroll the case page down, which gave no clear
+  // sign anything had actually happened, easy to miss entirely.
+  const id=state.arg;
   const d=await api('/cases/'+id+'/audit');
-  const sec=el('div',{id:'audit-section'});
-  sec.append(
-    el('h2',{},'Chain of custody'),
+  m.innerHTML='';
+  m.append(el('div',{class:'row',style:'margin-bottom:10px'},
+    el('button',{class:'sec',onclick:()=>go('case',id)},'←  Back to case')));
+  m.append(el('h1',{},'Audit trail'), el('div',{class:'muted mono',style:'margin-bottom:14px'},id));
+  m.append(el('h2',{},'Chain of custody'),
     el('div',{class:'panel scroll'}, tbl(d.custody,['seq','ts','event','actor','detail'])),
     el('h2',{},'Analysis audit'),
     el('div',{class:'panel scroll'}, tbl(d.audit,['seq','ts','kind','name','detail'])));
-  $('#main').append(sec);
-  window.scrollTo(0,document.body.scrollHeight);
 }
 function tbl(rows,cols){
   const t=el('table',{},el('thead',{},el('tr',{},...cols.map(c=>el('th',{},c)))));
