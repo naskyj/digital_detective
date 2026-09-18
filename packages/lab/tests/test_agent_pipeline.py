@@ -93,3 +93,58 @@ def test_query_warehouse_rejects_writes(case):
     good = query_warehouse(deps, "SELECT category, count(*) c FROM artifacts GROUP BY 1")
     assert good["ok"] is True
     assert good["row_count"] >= 1
+
+
+def test_pipeline_runs_memory_analysis_exactly_once(tmp_path_factory, monkeypatch):
+    """Regression: run_pipeline() used to analyse memory twice - once inside
+    ingest_case() (its analyze_memory=True default), once more via the
+    explicit run_memory_analysis step - re-scanning the whole dump and
+    re-running every Volatility plugin a second time for nothing (the
+    warehouse's ON CONFLICT DO NOTHING silently dropped the duplicate rows).
+    Also checks the final summary's totals still include the memory pass,
+    since it no longer arrives folded into ingest_case()'s own count."""
+    import dd_lab.memory as mem_pkg
+
+    app, profile = _available() or (None, None)
+    if app is None:
+        pytest.skip("no Electron profile available")
+
+    root = tmp_path_factory.mktemp("cases_mem")
+    cid = "case_agent_mem_001"
+    blob = b"\x00" * 4096 + b"hey are you free to chat after school tomorrow" + b"\x00" * 64
+    build_sample_case(root, cid, app, profile, include=_FAST, memory_dumps={"dump.raw": blob})
+    from dd_core.casedir import CaseLayout
+
+    meta = CaseMeta(case_id=cid, name="Test Investigation")
+    meta.save(CaseLayout(root, cid))
+
+    calls = []
+    real_analyze_memory = mem_pkg.analyze_memory
+
+    def _spy(*a, **kw):
+        calls.append((a, kw))
+        return real_analyze_memory(*a, **kw)
+
+    monkeypatch.setattr(mem_pkg, "analyze_memory", _spy)
+
+    outcome = run_pipeline(root, cid, enable_judge=False)
+    assert outcome.ok
+    assert len(calls) == 1, f"analyze_memory called {len(calls)} times, expected exactly once"
+
+    deps = InvestigationDeps(cases_root=root, case_id=cid)
+    strings_row = query_warehouse(
+        deps, "SELECT count(*) c FROM artifacts WHERE source_type = 'memory_string'"
+    )
+    assert strings_row["ok"]
+    assert strings_row["rows"][0]["c"] > 0  # the memory pass actually loaded rows, not skipped
+
+    # the final summary's total must include ALL memory rows (string-carved,
+    # plus Volatility's if `vol` happens to be installed here), not just the
+    # disk-parsed ones - ingest_case()'s own count no longer folds them in.
+    disk_only = query_warehouse(
+        deps, "SELECT count(*) c FROM artifacts WHERE source_type NOT LIKE 'memory%'"
+    )["rows"][0]["c"]
+    mem_total = query_warehouse(
+        deps, "SELECT count(*) c FROM artifacts WHERE source_type LIKE 'memory%'"
+    )["rows"][0]["c"]
+    assert f"{disk_only + mem_total:,} artifacts" in outcome.summary

@@ -125,6 +125,13 @@ def run_ingest(deps: InvestigationDeps, apps: list[str] | None = None) -> dict:
         result = ingest_case(
             deps.cases_root, deps.case_id,
             actor="agent", classifier=deps.classifier,
+            # memory analysis is its own explicit step (run_memory_analysis,
+            # called separately by both run_pipeline and the LLM agent) -
+            # ingest_case()'s own analyze_memory=True default would otherwise
+            # run it here too, silently duplicating the memory-image scan and
+            # every Volatility plugin call for nothing (the second pass's
+            # rows all get rejected by the warehouse's ON CONFLICT DO NOTHING).
+            analyze_memory=False,
         )
     except IntegrityError as e:
         return {"ok": False, "error": f"integrity check failed: {e}"}
@@ -153,6 +160,7 @@ def run_memory_analysis(deps: InvestigationDeps) -> dict:
         "dumps": result.dumps,
         "artifacts_added": result.artifact_count,
         "volatility_used": result.volatility_used,
+        "by_category": result.by_category,
     }
 
 

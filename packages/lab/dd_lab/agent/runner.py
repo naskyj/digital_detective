@@ -127,9 +127,17 @@ def run_pipeline(
         deps.state.save()
         deps.audit.append("run_end", "deterministic", "complete")
         _set_status(deps, CaseStatus.COMPLETED, "analysis complete")
+        # run_ingest() no longer folds memory analysis in (that's the
+        # run_memory_analysis step above, kept separate to avoid running it
+        # twice) - so the final total has to combine both steps' counts
+        # itself, or it would silently undercount by the entire memory pass.
+        total_artifacts = ingest["artifact_count"] + (mem.get("artifacts_added", 0) if mem.get("ok") else 0)
+        by_category = dict(ingest["by_category"])
+        for cat, n in mem.get("by_category", {}).items():
+            by_category[cat] = by_category.get(cat, 0) + n
         summary = (
-            f"{ingest['artifact_count']:,} artifacts across {list(ingest['per_app'])}; "
-            f"categories: {ingest['by_category']}. Report: {report['report_path']}"
+            f"{total_artifacts:,} artifacts across {list(ingest['per_app'])}; "
+            f"categories: {by_category}. Report: {report['report_path']}"
         )
         deps.notify("Analysis complete")
         return RunOutcome(case_id, True, report["report_path"], summary)
