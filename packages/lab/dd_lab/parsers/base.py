@@ -39,7 +39,7 @@ __all__ = [
     "CACHE", "CODE_CACHE", "COOKIES", "COOKIES_LEGACY", "INDEXEDDB", "LOCAL_STATE",
     "LOCAL_STORAGE", "MEMORY", "PREFERENCES", "SERVICE_WORKER_CACHE", "SESSION_STORAGE",
     "ParseContext", "emit_parsed_value", "emit_value", "join_leaf_key", "make_artifact",
-    "open_leveldb_resilient",
+    "open_leveldb_resilient", "seq_from_locator",
 ]
 
 # Values longer than this are truncated in the `value` column (full hash is kept).
@@ -199,21 +199,82 @@ def emit_value(
         )
 
 
+def seq_from_locator(locator: str) -> int | None:
+    """The LevelDB sequence number embedded in a locator ending
+    "...\\x1fseq=<N>" - localstorage.py, sessionstorage.py and indexeddb.py
+    all use this exact convention (independently, but identically) to keep
+    every historical/tombstoned version of a repeatedly-written key as its
+    own artifact instead of colliding on one artifact_id (see the indexeddb
+    collision bug this fixed). It's the ONLY recency signal available for
+    these three source_types: none of them set `record_ts` - LevelDB itself
+    carries no wall-clock timestamp per write, only this monotonic per-store
+    counter. This is what a "latest version of this key" feature (the
+    artifact-browser API's `latest` column, the labelling export's `latest`
+    column) compares across rows sharing an (app, key) to find the current
+    one. None when the locator doesn't use this convention (cache doesn't -
+    see cache.py's raw_key_from_locator/cache_offset_from_locator instead)
+    or the reader didn't expose a sequence number for this record.
+
+    emit_value()/emit_parsed_value() append their own "#<leaf_path>" suffix
+    AFTER this (locator=f"{locator}#{leaf_path}", above) for every row a
+    JSON value flattens into - e.g. "...seq=1233#$" for a value whose path
+    is the root ("$", see jsonflat.py) - so that suffix has to be stripped
+    BEFORE looking for the number, or every such row silently fails int()
+    and falls back to None (confirmed on real evidence: this cost 59 of 581
+    real Local Storage keys multiple false "latest" rows before it was
+    stripped here)."""
+    if "#" in locator:
+        locator = locator.split("#", 1)[0]
+    marker = "\x1fseq="
+    if marker not in locator:
+        return None
+    try:
+        return int(locator.rsplit(marker, 1)[1])
+    except ValueError:
+        return None
+
+
+def _copy_leveldb_dir_excluding(leveldb_dir: Path, exclude: set[str]) -> Path | None:
+    """A temp copy of `leveldb_dir` with the named files (by `.name`)
+    omitted. None if nothing got copied (nothing to open)."""
+    tmp_dir = Path(tempfile.mkdtemp(prefix="dd_leveldb_"))
+    copied_any = False
+    for f in leveldb_dir.iterdir():
+        if f.is_file() and f.name not in exclude:
+            shutil.copy2(f, tmp_dir / f.name)
+            copied_any = True
+    if not copied_any:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None
+    return tmp_dir
+
+
 def open_leveldb_resilient[T](
     leveldb_dir: Path, opener: Callable[[Path], T]
 ) -> tuple[T | None, Path | None]:
     """Open a LevelDB directory with `opener(leveldb_dir)`; on failure, retry
-    against a copy with the `.log` (write-ahead log) file(s) dropped.
+    excluding the `.log` (write-ahead log) file(s) - one at a time first,
+    then all of them together as a last resort.
 
     Confirmed on real evidence (a live-acquired disk image), not hypothetical:
     a `.log` can end mid-write, or — very commonly — end with zero-byte block
     padding, and `ccl_chromium_reader`'s log-block reader treats an
     unrecognised block type as fatal (`ccl_leveldb.py::LogFile._get_batches`,
     `raise ValueError()  # Cannot happen` — it can, and did) which aborts
-    opening the WHOLE store, not just the log. Retrying without the `.log`
-    recovers everything already compacted into `.ldb`/`.sst` files — real data
-    loss is then limited to whatever was still only in the WAL, instead of
-    losing the entire store over one bad log file.
+    opening the WHOLE store, not just the log.
+
+    A store can have MORE THAN ONE `.log` file (compaction rotates them) and
+    only one of them need be corrupt - confirmed on real evidence: a real
+    Discord Local Storage store had two, exactly one of which failed to
+    parse on its own. Dropping every `.log` file the moment any ONE of them
+    is bad (the original strategy here) silently loses whatever was live-only
+    in the OTHER, perfectly readable one too - real data with nothing wrong
+    with it, discarded for no reason. So each `.log` file is excluded on its
+    own first, to isolate exactly the bad one(s) and keep every other; only
+    if no single-exclusion attempt opens does this fall back to dropping all
+    of them together (recovers everything already compacted into `.ldb`
+    files - real data loss is then limited to whatever was still only in the
+    WAL, instead of losing the entire store over one bad log file).
 
     Returns `(obj_or_None, cleanup_dir_or_None)` — the caller must
     `shutil.rmtree(cleanup_dir, ignore_errors=True)` after it's done with the
@@ -224,18 +285,24 @@ def open_leveldb_resilient[T](
         return opener(leveldb_dir), None
     except Exception:
         log.warning(
-            "could not open leveldb at %s; retrying without its .log file(s) "
-            "(compacted data only)", leveldb_dir, exc_info=True,
+            "could not open leveldb at %s; retrying with its .log file(s) "
+            "excluded one at a time, then all together", leveldb_dir, exc_info=True,
         )
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="dd_leveldb_"))
-    copied_any = False
-    for f in leveldb_dir.iterdir():
-        if f.is_file() and f.suffix.lower() != ".log":
-            shutil.copy2(f, tmp_dir / f.name)
-            copied_any = True
-    if not copied_any:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+    log_names = sorted(f.name for f in leveldb_dir.iterdir() if f.is_file() and f.suffix.lower() == ".log")
+    for bad in log_names:
+        tmp_dir = _copy_leveldb_dir_excluding(leveldb_dir, {bad})
+        if tmp_dir is None:
+            continue
+        try:
+            obj = opener(tmp_dir)
+            log.warning("recovered %s by excluding only %s (its other .log file(s) kept)", leveldb_dir, bad)
+            return obj, tmp_dir
+        except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    tmp_dir = _copy_leveldb_dir_excluding(leveldb_dir, set(log_names))
+    if tmp_dir is None:
         return None, None
     try:
         return opener(tmp_dir), tmp_dir

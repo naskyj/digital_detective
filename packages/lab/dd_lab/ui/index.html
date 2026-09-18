@@ -43,6 +43,49 @@
   .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;background:#e4e4e7}
   .pill.ok{background:#dcfce7;color:var(--ok)}.pill.bad{background:#fee2e2;color:var(--bad)}
   .pill.cat{background:#eef2ff;color:#3730a3}
+  /* one colour per ArtifactCategory (dd_core.enums) - CREDENTIAL/PAYMENT_INFO
+     warm+alarming (most sensitive), GENERAL neutral grey (the "nothing
+     special" default), the rest spread across cool hues so any two
+     adjacent categories in a table read as visibly different at a glance. */
+  .pill.cat-CREDENTIAL{background:#fee2e2;color:#991b1b}
+  .pill.cat-PAYMENT_INFO{background:#ffedd5;color:#9a3412}
+  .pill.cat-LOCATION_INFO{background:#fef3c7;color:#92400e}
+  .pill.cat-USER{background:#ede9fe;color:#5b21b6}
+  .pill.cat-CHAT_CONTENT{background:#dbeafe;color:#1e40af}
+  .pill.cat-GROUP_DETAIL{background:#cffafe;color:#155e75}
+  .pill.cat-GAME_DETAIL{background:#d1fae5;color:#065f46}
+  .pill.cat-NETWORK_DETAIL{background:#e0f2fe;color:#075985}
+  .pill.cat-SYSTEM_DETAIL{background:#e2e8f0;color:#334155}
+  .pill.cat-TIMESTAMP{background:#ccfbf1;color:#115e59}
+  .pill.cat-GENERAL{background:#e4e4e7;color:#3f3f46}
+  /* the artifact table itself: many optional columns can exceed the panel's
+     width, so the table is left to its natural (wider-than-container) size -
+     the existing .scroll wrapper's overflow:auto already scrolls both axes,
+     so this just stops columns from being squeezed/wrapped into tall rows. */
+  table.artifacts{width:max-content;min-width:100%}
+  table.artifacts td,table.artifacts th{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  table.artifacts td.wrap{white-space:normal;word-break:break-word}
+  table.artifacts tbody tr{cursor:pointer}
+  table.artifacts tbody tr:hover{background:#fafafa}
+  /* column show/hide picker: a small floating checklist under its toggle button */
+  .colpicker{position:relative}
+  .colpanel{position:absolute;top:calc(100% + 4px);left:0;z-index:30;background:#fff;
+    border:1px solid var(--line);border-radius:8px;padding:10px 12px;box-shadow:0 6px 20px rgba(0,0,0,.14);
+    min-width:170px;max-height:320px;overflow:auto}
+  .colpanel label{display:flex;align-items:center;gap:7px;font-size:12.5px;padding:3px 0;cursor:pointer;white-space:nowrap}
+  .colpanel input{margin:0}
+  /* row-detail modal: click any row for its full, untruncated fields */
+  .modal-overlay{position:fixed;inset:0;background:rgba(17,17,20,.4);display:flex;
+    align-items:center;justify-content:center;z-index:100;padding:24px}
+  .modal-box{background:#fff;border-radius:12px;padding:22px 26px;max-width:760px;width:100%;
+    max-height:84vh;overflow:auto;box-shadow:0 16px 50px rgba(0,0,0,.3);position:relative}
+  .modal-close{position:absolute;top:14px;right:16px;background:transparent;color:var(--muted);
+    border:0;font-size:18px;cursor:pointer;padding:2px 6px}
+  .modal-close:hover{color:var(--fg)}
+  .modal-field{margin:12px 0}
+  .modal-field .l{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  .modal-field .v{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;white-space:pre-wrap;
+    word-break:break-word;margin-top:3px}
   .bar{height:16px;background:var(--accent2);border-radius:3px;min-width:2px}
   .barrow{display:grid;grid-template-columns:140px 1fr 60px;gap:8px;align-items:center;margin:3px 0;font-size:12px}
   .log{background:#0b0b0d;color:#c7f5c7;font:11px/1.45 ui-monospace,Menlo,monospace;padding:10px;border-radius:7px;max-height:230px;overflow:auto;white-space:pre-wrap}
@@ -599,13 +642,104 @@ async function vReport(m){
     style:'width:100%;height:calc(100vh - 110px);border:1px solid var(--line);border-radius:8px;background:#fff'}));
 }
 
+// Every optional artifact-table column, in display order. `always` columns
+// can't be hidden; the rest are togglable via the "Columns" picker and
+// remembered (COL_PREF_KEY, one flat preference shared across every view -
+// a column only ever shows up in views where `need` says it's relevant, so
+// one global "I want to see Filename when it's available" preference is
+// enough, no per-view storage needed). `need(fixed)` says which fixed
+// (app/source_type) contexts a column can even apply to - e.g. `url` only
+// ever has data on cache rows.
+const COL_PREF_KEY = 'dd_artifact_columns';
+const ARTIFACT_COLS = [
+  {k:'category', label:'Category', always:true},
+  {k:'confidence', label:'Conf', def:true,
+    title:'Classification confidence (0–1) — how sure the rule/keyword/NER/model ensemble was '+
+      'that this row belongs to its category. Higher is more certain.'},
+  {k:'app', label:'App', def:true, need:f=>!f.app},
+  {k:'source_type', label:'Source', def:true, need:f=>!f.source_type},
+  {k:'record_ts', label:'Time', def:true},
+  {k:'key', label:'Key', def:true},
+  {k:'value', label:'Value', always:true, wrap:true},
+  {k:'source_file', label:'File', def:true,
+    title:'The physical evidence file this row was read from'},
+  {k:'url', label:'URL', def:true, need:f=>!f.source_type||f.source_type==='cache'},
+  {k:'filename', label:'Filename', def:false, need:f=>!f.source_type||f.source_type==='cache',
+    title:'A human-readable name guessed from the URL — NOT the physical file (see File)'},
+  {k:'cache_offset', label:'Offset', def:false, need:f=>!f.source_type||f.source_type==='cache',
+    title:'Byte offset into File backing this row'},
+  {k:'latest', label:'Latest', def:true,
+    need:f=>!f.source_type||['local_storage','session_storage','indexeddb'].includes(f.source_type),
+    title:'Whether this is the CURRENT value of its key, or a superseded historical one (kept, not dropped)'},
+  {k:'artifact_id', label:'Artifact ID', def:false},
+];
+
+function catPill(r){
+  const span=el('span',{class:'pill cat cat-'+(r.category||'')},r.category||'');
+  if(!r.deleted) return span;
+  return [span,' ',el('span',{class:'pill bad',
+    title:'Recovered from a tombstoned/overwritten LevelDB record, not the current live value'},'deleted')];
+}
+
+function artifactCell(col,r){
+  switch(col.k){
+    case 'category': return el('td',{},...[].concat(catPill(r)));
+    case 'confidence': return el('td',{title:col.title},r.confidence!=null?r.confidence.toFixed(2):'');
+    case 'app': return el('td',{},r.app);
+    case 'source_type': return el('td',{},SRC_LABELS[r.source_type]||r.source_type);
+    case 'record_ts': return el('td',{title:r.record_ts||''},r.record_ts?ago(r.record_ts):'');
+    case 'key': return el('td',{class:'mono'},r.key);
+    case 'value': return el('td',{class:'wrap'},r.value);
+    case 'source_file': return el('td',{title:r.source_file||''},r.source_file||'');
+    case 'url': return el('td',{title:r.url||''},r.url||'');
+    case 'filename': return el('td',{},r.filename||'');
+    case 'cache_offset': return el('td',{},r.cache_offset!=null?String(r.cache_offset):'');
+    case 'latest': return el('td',{},r.latest==null?'':(r.latest
+      ? el('span',{class:'pill ok'},'latest') : el('span',{class:'pill'},'older')));
+    case 'artifact_id': return el('td',{class:'mono'},r.artifact_id);
+    default: return el('td',{},'');
+  }
+}
+
+function loadColumnPrefs(){
+  try{
+    const saved=JSON.parse(localStorage.getItem(COL_PREF_KEY)||'null');
+    if(Array.isArray(saved)) return new Set(saved);
+  }catch(e){/* corrupt/blocked storage - fall through to defaults */}
+  return new Set(ARTIFACT_COLS.filter(c=>c.def).map(c=>c.k));
+}
+function saveColumnPrefs(set){
+  try{ localStorage.setItem(COL_PREF_KEY, JSON.stringify([...set])); }catch(e){/* best-effort */}
+}
+
+async function showArtifactDetail(caseId, artifactId){
+  const overlay=el('div',{class:'modal-overlay',onclick:e=>{if(e.target===overlay) overlay.remove();}});
+  const close=el('button',{class:'modal-close',onclick:()=>overlay.remove()},'✕');
+  const box=el('div',{class:'modal-box'},close,el('div',{class:'muted'},'loading…'));
+  overlay.append(box); document.body.append(overlay);
+  let r;
+  try{ r=await api('/cases/'+caseId+'/artifacts/'+encodeURIComponent(artifactId)); }
+  catch(e){ box.append(el('div',{class:'hint'},'Could not load: '+e.message)); return; }
+  const fields=[
+    ['Category',r.category],['Confidence',r.confidence!=null?r.confidence.toFixed(2):null],
+    ['App',r.app],['Source',SRC_LABELS[r.source_type]||r.source_type],['Time',r.record_ts],
+    ['Deleted',r.deleted?'yes — recovered from a tombstoned/overwritten record, not the live value':null],
+    ['Key',r.key],['Value',r.value],['File',r.source_file],['URL',r.url],['Filename',r.filename],
+    ['Cache Offset',r.cache_offset],
+    ['Latest',r.latest==null?null:(r.latest?'yes — the current value':'no — superseded by a later write')],
+    ['Artifact ID',r.artifact_id],
+  ].filter(([,v])=>v!=null && v!=='');
+  box.innerHTML=''; box.append(close, el('h3',{style:'margin:0 0 14px'},'Artifact detail'));
+  fields.forEach(([l,v])=>box.append(el('div',{class:'modal-field'},
+    el('div',{class:'l'},l), el('div',{class:'v'},String(v)))));
+}
+
 function browser(id,cats,fixed){
   // `fixed` (from the case explorer's left nav) pins app and/or source_type
   // - which app/source to look at is chosen there, tree-style, rather than
   // from dropdowns here. With nothing fixed (unused currently, kept for
   // re-use) it falls back to picker dropdowns for both.
   fixed = fixed || {};
-  const showUrl = fixed.source_type === 'cache';
   const wrap=el('div',{class:'panel'});
   const cat=el('select',{}, el('option',{value:''},'all categories'), ...cats.map(c=>el('option',{value:c},c)));
   const appSel = fixed.app ? null : el('select',{}, el('option',{value:''},'all apps'));
@@ -616,7 +750,31 @@ function browser(id,cats,fixed){
   const prevBtn=el('button',{class:'sec'},'← Prev');
   const nextBtn=el('button',{class:'sec'},'Next →');
   const dlBtn=el('a',{class:'ghost',style:'text-decoration:none;padding:8px 8px;cursor:pointer'},'⬇ Download CSV');
-  let facetsLoaded=false, offset=0; const limit=100;
+
+  // available columns for THIS view, and which of them the user currently
+  // wants visible (a shared preference across every view - see ARTIFACT_COLS)
+  const available = ARTIFACT_COLS.filter(c=>!c.need || c.need(fixed));
+  let prefs = loadColumnPrefs();
+  function visibleCols(){ return available.filter(c=>c.always || prefs.has(c.k)); }
+
+  const colBtn=el('button',{class:'sec'},'Columns ▾');
+  const colPanel=el('div',{class:'colpanel'});
+  colPanel.hidden=true;
+  available.filter(c=>!c.always).forEach(c=>{
+    const cb=el('input',{type:'checkbox'});
+    cb.checked=prefs.has(c.k);
+    cb.onchange=()=>{
+      if(cb.checked) prefs.add(c.k); else prefs.delete(c.k);
+      saveColumnPrefs(prefs); renderTable();
+    };
+    colPanel.append(el('label',{title:c.title||''},cb,c.label));
+  });
+  colBtn.onclick=e=>{ e.stopPropagation(); colPanel.hidden=!colPanel.hidden; };
+  colPanel.onclick=e=>e.stopPropagation();
+  document.addEventListener('click',()=>{colPanel.hidden=true;});
+  const colPicker=el('div',{class:'colpicker'},colBtn,colPanel);
+
+  let facetsLoaded=false, offset=0, lastRows=[], lastD=null; const limit=100;
   function currentParams(){
     const p=new URLSearchParams();
     if(cat.value)p.set('category',cat.value);
@@ -624,6 +782,26 @@ function browser(id,cats,fixed){
     if(fixed.source_type) p.set('source_type',fixed.source_type); else if(srcSel.value) p.set('source_type',srcSel.value);
     if(q.value)p.set('q',q.value);
     return p;
+  }
+  function renderTable(){
+    const cols=visibleCols();
+    const t=el('table',{class:'artifacts'},el('thead',{},el('tr',{},
+      ...cols.map(c=>el('th',{title:c.title||''},c.label)))));
+    const tb=el('tbody',{});
+    lastRows.forEach(r=>{
+      const rowTitle=(r.deleted?'RECOVERED (deleted record) · ':'')+(r.source_file?'file: '+r.source_file:'')+
+        ' · click for full detail';
+      tb.append(el('tr',{title:rowTitle,onclick:()=>showArtifactDetail(id,r.artifact_id)},
+        ...cols.map(c=>artifactCell(c,r))));
+    });
+    t.append(tb); out.innerHTML=''; out.append(t);
+    if(lastD){
+      count.textContent = lastD.total
+        ? `showing ${offset+1}–${offset+lastD.shown} of ${lastD.total.toLocaleString()} matching`
+        : 'no matching artifacts';
+      prevBtn.disabled = offset<=0;
+      nextBtn.disabled = offset+lastD.shown>=lastD.total;
+    }
   }
   async function load(){
     out.innerHTML='<div class="muted" style="padding:10px">loading…</div>';
@@ -636,40 +814,8 @@ function browser(id,cats,fixed){
       if(srcSel) d.facets.source_types.forEach(s=>srcSel.append(el('option',{value:s},s)));
       facetsLoaded=true;
     }
-    count.textContent = d.total
-      ? `showing ${offset+1}–${offset+d.shown} of ${d.total.toLocaleString()} matching`
-      : 'no matching artifacts';
-    prevBtn.disabled = offset<=0;
-    nextBtn.disabled = offset+d.shown>=d.total;
-    const cols=['Category','Conf'];
-    if(!fixed.app) cols.push('App');
-    if(!fixed.source_type) cols.push('Source');
-    if(showUrl) cols.push('URL');
-    cols.push('Time','Key','Value');
-    const confTitle='Classification confidence (0–1) — how sure the rule/keyword/NER/model '+
-      'ensemble was that this row belongs to its category. Higher is more certain.';
-    const t=el('table',{},el('thead',{},el('tr',{},
-      ...cols.map(h=>el('th',{title:h==='Conf'?confTitle:''},h)))));
-    const tb=el('tbody',{});
-    d.rows.forEach(r=>{
-      const catCell=el('td',{},el('span',{class:'pill cat'},r.category||''));
-      if(r.deleted) catCell.append(' ',el('span',{class:'pill bad',
-        title:'Recovered from a tombstoned/overwritten LevelDB record, not the current live value'},'deleted'));
-      const cells=[catCell,
-        el('td',{title:confTitle},r.confidence!=null?r.confidence.toFixed(2):'')];
-      if(!fixed.app) cells.push(el('td',{},r.app));
-      if(!fixed.source_type) cells.push(el('td',{},SRC_LABELS[r.source_type]||r.source_type));
-      if(showUrl) cells.push(el('td',{class:'mono',title:r.url||'',
-        style:'max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'},r.url||''));
-      cells.push(
-        el('td',{title:r.record_ts||''},r.record_ts?ago(r.record_ts):''),
-        el('td',{class:'mono'},r.key), el('td',{},r.value));
-      // the physical evidence file this row came from, on hover - keeps the
-      // table from needing its own column for it
-      const rowTitle=(r.deleted?'RECOVERED (deleted record) · ':'')+(r.source_file?'file: '+r.source_file:'');
-      tb.append(el('tr',{title:rowTitle},...cells));
-    });
-    t.append(tb); out.innerHTML=''; out.append(t);
+    lastRows=d.rows; lastD=d;
+    renderTable();
   }
   cat.onchange=()=>{offset=0; load();};
   if(appSel) appSel.onchange=()=>{offset=0; load();};
@@ -681,7 +827,7 @@ function browser(id,cats,fixed){
     ? fixed.source_type ? `${fixed.app} → ${SRC_LABELS[fixed.source_type]||fixed.source_type}` : `${fixed.app} → all sources`
     : 'Artifact browser';
   wrap.append(el('div',{class:'row'},
-      el('h2',{style:'margin:0'},heading), el('span',{style:'flex:1'}), dlBtn),
+      el('h2',{style:'margin:0'},heading), el('span',{style:'flex:1'}), colPicker, dlBtn),
     el('div',{class:'row',style:'margin-top:8px'},cat, ...(appSel?[appSel]:[]), ...(srcSel?[srcSel]:[]), q),
     count, out,
     el('div',{class:'row',style:'margin-top:8px'}, prevBtn, nextBtn));

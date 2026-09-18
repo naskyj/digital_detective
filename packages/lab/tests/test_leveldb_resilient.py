@@ -55,6 +55,38 @@ def test_retries_without_log_file_on_failure(tmp_path):
     assert (cleanup / "MANIFEST-000001").is_file()  # manifest kept
 
 
+def test_only_the_bad_log_file_is_excluded_not_every_log_file(tmp_path):
+    """Real bug found on real evidence: a real Discord Local Storage store
+    had TWO .log files (000029.log, 000031.log), and only 000029.log
+    actually failed to parse - 000031.log opened fine completely on its
+    own. The original strategy dropped every .log file the moment ANY ONE
+    of them failed, silently losing 000031.log's real, live records (an
+    auth token among them, confirmed via a second tool's independent
+    extraction of the same evidence) for no reason - there was nothing
+    wrong with that file. This is what the fix guards: excluding files one
+    at a time first, so a genuinely fine .log file survives even when a
+    sibling one doesn't."""
+    (tmp_path / "000029.log").write_bytes(b"corrupt-wal-data")
+    (tmp_path / "000031.log").write_bytes(b"perfectly-fine-wal-data")
+    (tmp_path / "000027.ldb").write_bytes(b"compacted-sst-data")
+
+    attempts: list[Path] = []
+
+    def opener(d: Path):
+        attempts.append(d)
+        if (d / "000029.log").exists():
+            raise ValueError("simulated: corrupt .log block type")
+        return f"opened:{d}"
+
+    obj, cleanup = open_leveldb_resilient(tmp_path, opener)
+
+    assert obj is not None and obj.startswith("opened:")
+    assert cleanup is not None
+    assert not (cleanup / "000029.log").exists()  # the bad one excluded
+    assert (cleanup / "000031.log").read_bytes() == b"perfectly-fine-wal-data"  # the GOOD one kept
+    assert (cleanup / "000027.ldb").is_file()
+
+
 def test_gives_up_cleanly_when_still_failing_without_log(tmp_path):
     (tmp_path / "000029.log").write_bytes(b"corrupt")
     (tmp_path / "000027.ldb").write_bytes(b"also-corrupt-somehow")

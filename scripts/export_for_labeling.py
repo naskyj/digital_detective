@@ -64,37 +64,9 @@ _CACHE_FIELDS = [
 ]
 
 
-def _seq_from_locator(locator: str) -> int | None:
-    """The LevelDB sequence number embedded in a locator ending
-    "...\\x1fseq=<N>" - localstorage.py, sessionstorage.py and indexeddb.py
-    all use this exact convention (independently, but identically) to keep
-    every historical/tombstoned version of a repeatedly-written key as its
-    own artifact instead of colliding on one artifact_id (see the indexeddb
-    collision bug fixed earlier this session). It's the ONLY recency signal
-    available for these three source_types: none of them set `record_ts` -
-    LevelDB itself carries no wall-clock timestamp per write, only this
-    monotonic per-store counter. None when the locator doesn't use this
-    convention (cache doesn't - see _raw_cache_key/_cache_offset instead)
-    or the reader didn't expose a sequence number for this record.
-
-    emit_value()/emit_parsed_value() append their own "#<leaf_path>" suffix
-    AFTER this (locator=f"{locator}#{leaf_path}", base.py) for every row a
-    JSON value flattens into - e.g. "...seq=1233#$" for a value whose path
-    is the root ("$", see jsonflat.py) - so that suffix has to be stripped
-    BEFORE looking for the number, the same way _raw_cache_key strips it,
-    or every such row silently fails int() and falls back to None here."""
-    if "#" in locator:
-        locator = locator.split("#", 1)[0]
-    marker = "\x1fseq="
-    if marker not in locator:
-        return None
-    try:
-        return int(locator.rsplit(marker, 1)[1])
-    except ValueError:
-        return None
-
-
 def _load_rows(wh, source_type: str) -> list[dict]:
+    from dd_lab.parsers.base import seq_from_locator
+
     rows = wh.query(
         "SELECT artifact_id, app, source_type, category, confidence, key, value, "
         "record_ts, source_file, deleted, source_locator FROM artifacts WHERE source_type = ? "
@@ -115,7 +87,7 @@ def _load_rows(wh, source_type: str) -> list[dict]:
     best_seq: dict[tuple[str, str], int] = {}
     seqs: dict[str, int | None] = {}
     for r in rows:
-        seq = _seq_from_locator(r["source_locator"])
+        seq = seq_from_locator(r["source_locator"])
         seqs[r["artifact_id"]] = seq
         if seq is not None:
             k = (r["app"], r["key"])
@@ -129,39 +101,6 @@ def _load_rows(wh, source_type: str) -> list[dict]:
         r["text"] = f"[{r['source_type']}] {r['key']} = {r['value']}"
         r["label"] = ""  # fill in with the true category before scoring
     return rows
-
-
-def _raw_cache_key(locator: str) -> str:
-    """Recover the original Chromium cache key from one of the locator shapes
-    cache.py produces (`key`, `key @file:offset`, `key @file:offset::body`,
-    or `...::body#leaf.path`) so every row belonging to the same cache entry -
-    its url/status/content-type/timestamps AND its (separately-located) body -
-    groups back together. Meta and body streams can live at different
-    physical offsets for the same key (see cache.py's `_location`), so
-    grouping by locator prefix alone doesn't work; this strips exactly the
-    suffixes cache.py adds, in the order it adds them."""
-    s = locator
-    if "#" in s:
-        s = s.split("#", 1)[0]
-    if s.endswith("::body"):
-        s = s[: -len("::body")]
-    if " @" in s:
-        s = s.split(" @", 1)[0]
-    return s
-
-
-def _cache_offset(locator: str) -> str:
-    """The byte offset backing THIS row's own stream (meta or body), i.e.
-    the number after the physical filename in ` @file:offset` - empty when
-    cache.py couldn't resolve a physical location for this stream (never
-    fatal there, so not an error here either). Per-row, not per-entry: a
-    row's own locator, not the group's - see the `source_file` comment in
-    `_load_cache_rows`."""
-    if " @" not in locator:
-        return ""
-    after = locator.split(" @", 1)[1]  # "file:offset[::body[#leaf.path]]"
-    file_and_offset = after.split("::", 1)[0]
-    return file_and_offset.rsplit(":", 1)[-1] if ":" in file_and_offset else ""
 
 
 # Row order within one surviving cache entry: identifying context first
@@ -187,9 +126,11 @@ def _load_cache_rows(wh) -> list[dict]:
         "SELECT artifact_id, app, source_type, category, confidence, key, value, "
         "record_ts, source_file, deleted, source_locator FROM artifacts WHERE source_type = 'cache'"
     )
+    from dd_lab.parsers.cache import cache_offset_from_locator, raw_key_from_locator, url_filename_hint
+
     groups: dict[tuple[str, str], list[dict]] = {}
     for r in rows:
-        groups.setdefault((r["app"], _raw_cache_key(r["source_locator"])), []).append(r)
+        groups.setdefault((r["app"], raw_key_from_locator(r["source_locator"])), []).append(r)
 
     kept: list[tuple[str, str, list[dict]]] = []
     for (app, raw_key), group in groups.items():
@@ -199,13 +140,12 @@ def _load_cache_rows(wh) -> list[dict]:
         url = next((g["value"] for g in group if g["key"] == "cache.url"), raw_key)
         kept.append((app, url, group))
 
-    from dd_lab.parsers.cache import url_filename_hint
-
     out: list[dict] = []
     for _app, url, group in sorted(kept, key=lambda t: (t[0], t[1])):
         filename = url_filename_hint(url)
         for r in sorted(group, key=lambda g: (_CACHE_FIELD_ORDER.get(g["key"], 5), g["key"])):
-            r["cache_offset"] = _cache_offset(r["source_locator"])
+            offset = cache_offset_from_locator(r["source_locator"])
+            r["cache_offset"] = "" if offset is None else offset
             del r["source_locator"]
             r["filename"] = filename  # human-readable, guessed from the URL - NOT the physical file above
             r["url"] = url  # the entry's URL, on every row - not just the cache.url row

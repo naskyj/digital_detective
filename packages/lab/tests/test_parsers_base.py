@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 from dd_core.enums import SourceType
-from dd_lab.parsers.base import ParseContext, emit_parsed_value, emit_value, join_leaf_key
+from dd_lab.parsers.base import ParseContext, emit_parsed_value, emit_value, join_leaf_key, seq_from_locator
 
 
 def _ctx() -> ParseContext:
@@ -144,3 +144,21 @@ def test_emit_parsed_value_matches_emit_value_for_the_same_document():
 def test_emit_parsed_value_array_of_arrays():
     keys = _parsed_keys([["a", "b"], ["c", "d"]])
     assert keys == ["idb.db.store[0][0]", "idb.db.store[0][1]", "idb.db.store[1][0]", "idb.db.store[1][1]"]
+
+
+def test_seq_from_locator_strips_leaf_path_suffix_first():
+    """Real bug found on real evidence: emit_value()/emit_parsed_value()
+    append "#<leaf_path>" AFTER the "...seq=<N>" locator localstorage.py/
+    sessionstorage.py/indexeddb.py build (e.g. "...seq=1233#$" for a value
+    whose flattened path is the root) - parsing the number without
+    stripping that suffix first raises inside int() and silently falls
+    back to None, which a "latest version of this key" feature treats as
+    'nothing to compare against' and marks every such row latest
+    unconditionally, regardless of whether a newer version of the same key
+    exists. Cost 59 of 581 real Local Storage keys in a real case multiple
+    false latest=True rows before this fix."""
+    assert seq_from_locator("host\x1fkey\x1fseq=1233#$") == 1233
+    assert seq_from_locator("host\x1fkey\x1fseq=1233#some.leaf[0]") == 1233
+    assert seq_from_locator("host\x1fkey\x1fseq=1233") == 1233  # no leaf suffix at all
+    assert seq_from_locator("db/store/k1") is None  # no seq= convention at all (e.g. cache)
+    assert seq_from_locator("host\x1fkey\x1fseq=None") is None  # reader didn't expose one

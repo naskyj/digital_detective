@@ -381,11 +381,9 @@ def case_artifact_tree(case_id: str) -> dict:
 
 
 def _derive_cache_url(source_locator: str) -> str:
-    from dd_lab.parsers.cache import url_from_cache_key
+    from dd_lab.parsers.cache import raw_key_from_locator, url_from_cache_key
 
-    # source_locator for a cache row is "<raw cache key> @<file>:<offset>[::body[#leaf]]"
-    # (see cache.py::_emit_entry) - the key is always the part before " @".
-    return url_from_cache_key(source_locator.split(" @", 1)[0])
+    return url_from_cache_key(raw_key_from_locator(source_locator))
 
 
 @app.get("/api/cases/{case_id}/artifacts")
@@ -429,15 +427,67 @@ def case_artifacts(
             "source_types": [r["source_type"] for r in wh.query(
                 "SELECT DISTINCT source_type FROM artifacts ORDER BY source_type")],
         }
+        _enrich_artifact_rows(wh, rows)
     finally:
         wh.close()
-    # A cache row's URL isn't its own column - it's packed into source_locator
-    # (see _derive_cache_url) - surfaced here so the UI can show it without
-    # needing to know that encoding itself.
-    for r in rows:
-        r["url"] = _derive_cache_url(r["source_locator"]) if r["source_type"] == "cache" else None
-        del r["source_locator"]
     return {"rows": rows, "total": total, "shown": len(rows), "facets": facets}
+
+
+def _enrich_artifact_rows(wh, rows: list[dict]) -> None:
+    """Add the derived columns the table/CSV export need beyond what the
+    warehouse stores directly, then drop `source_locator` (an internal
+    encoding no UI/export column should need to know) - the single place
+    both `/artifacts` and `/artifacts/export.csv` get this from, so they
+    never drift apart on what a cache/local-storage/... row's extra
+    columns actually mean.
+
+    cache rows get `url`/`cache_offset`/`filename` (see cache.py);
+    local_storage/session_storage/indexeddb rows get `latest` - True for
+    the row holding the CURRENT value of its (app, key), by LevelDB
+    sequence number (the only recency signal these three have - none of
+    them set record_ts). Historical rows are marked, not dropped: a prior
+    value is real evidence, not noise (see this session's `deleted` flag
+    work) - `latest` just makes "the current one" findable. Computed
+    across EVERY row for the relevant (app, source_type) pairs, not just
+    the ones on this page/in this filtered view - the current value of a
+    key might not be on the page being rendered right now.
+    """
+    from dd_lab.parsers.base import seq_from_locator
+    from dd_lab.parsers.cache import cache_offset_from_locator, url_filename_hint
+
+    seq_types = {"local_storage", "session_storage", "indexeddb"}
+    present = {(r["app"], r["source_type"]) for r in rows if r["source_type"] in seq_types}
+    best_seq: dict[tuple[str, str, str], int] = {}
+    if present:
+        where = " OR ".join(["(app = ? AND source_type = ?)"] * len(present))
+        params: list[str] = [v for pair in present for v in pair]
+        for r2 in wh.query(
+            f"SELECT app, source_type, key, source_locator FROM artifacts WHERE {where}", params
+        ):
+            seq = seq_from_locator(r2["source_locator"])
+            if seq is None:
+                continue
+            k = (r2["app"], r2["source_type"], r2["key"])
+            if seq > best_seq.get(k, -1):
+                best_seq[k] = seq
+
+    for r in rows:
+        st = r["source_type"]
+        if st == "cache":
+            url = _derive_cache_url(r["source_locator"])
+            r["url"] = url
+            r["cache_offset"] = cache_offset_from_locator(r["source_locator"])
+            r["filename"] = url_filename_hint(url)
+            r["latest"] = None
+        else:
+            r["url"] = r["cache_offset"] = r["filename"] = None
+            if st in seq_types:
+                seq = seq_from_locator(r["source_locator"])
+                k = (r["app"], st, r["key"])
+                r["latest"] = seq is None or seq >= best_seq.get(k, seq)
+            else:
+                r["latest"] = None
+        del r["source_locator"]
 
 
 @app.get("/api/cases/{case_id}/classification")
@@ -567,15 +617,19 @@ def case_artifacts_export(
     from dd_lab.etl.warehouse import Warehouse
 
     fields = ["app", "source_type", "category", "confidence", "key", "value",
-              "record_ts", "source_file", "artifact_id", "deleted"]
+              "record_ts", "source_file", "artifact_id", "deleted",
+              "url", "cache_offset", "filename", "latest"]
+    _derived = ("url", "cache_offset", "filename", "latest")
+    query_cols = [f for f in fields if f not in _derived] + ["source_locator"]
     wh = Warehouse(deps.layout.warehouse)
     try:
         rows = wh.query(
-            f"SELECT {', '.join(fields)} FROM artifacts {clause} "
+            f"SELECT {', '.join(query_cols)} FROM artifacts {clause} "
             f"ORDER BY (category != 'GENERAL') DESC, confidence DESC NULLS LAST, key, artifact_id "
             f"LIMIT 200000",
             list(params),
         )
+        _enrich_artifact_rows(wh, rows)
     finally:
         wh.close()
     import csv
@@ -589,6 +643,36 @@ def case_artifacts_export(
         content=buf.getvalue(), media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{case_id}_artifacts.csv"'},
     )
+
+
+# Registered AFTER /artifacts/export.csv, not before: a wildcard
+# /artifacts/{artifact_id} route registered first would swallow requests to
+# /artifacts/export.csv too (Starlette matches path segments in registration
+# order, and "export.csv" matches {artifact_id} just fine) - the same class
+# of route-ordering mistake as a misplaced decorator, just at the path level
+# instead of the function level.
+@app.get("/api/cases/{case_id}/artifacts/{artifact_id}")
+def case_artifact_detail(case_id: str, artifact_id: str) -> dict:
+    """One artifact's full row, value UNTRUNCATED (unlike /artifacts, which
+    caps it for on-screen paging) - backs the table's row-detail view."""
+    deps = InvestigationDeps(cases_root=Path(_settings.cases_root), case_id=case_id)
+    if not deps.layout.warehouse.is_file():
+        raise HTTPException(409, "case not processed yet")
+    from dd_lab.etl.warehouse import Warehouse
+
+    wh = Warehouse(deps.layout.warehouse)
+    try:
+        rows = wh.query(
+            "SELECT app, source_type, category, confidence, key, value, record_ts, source_file, "
+            "source_locator, artifact_id, deleted FROM artifacts WHERE artifact_id = ?",
+            [artifact_id],
+        )
+        if not rows:
+            raise HTTPException(404, "artifact not found")
+        _enrich_artifact_rows(wh, rows)
+    finally:
+        wh.close()
+    return rows[0]
 
 
 @app.get("/api/cases/{case_id}/localstorage-files")

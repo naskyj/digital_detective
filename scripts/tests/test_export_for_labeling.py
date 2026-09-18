@@ -97,21 +97,8 @@ def test_export_writes_one_csv_per_source_type(case, tmp_path):
     assert row["label"] == ""
 
 
-def test_seq_from_locator_strips_leaf_path_suffix_first():
-    """Real bug found on real evidence: emit_value()/emit_parsed_value()
-    append "#<leaf_path>" AFTER the "...seq=<N>" locator base.py builds
-    (e.g. "...seq=1233#$" for a value whose flattened path is the root) -
-    parsing the number without stripping that suffix first raises inside
-    int() and silently falls back to None, which _load_rows treats as
-    'nothing to compare against' and marks latest=True unconditionally,
-    regardless of whether a newer version of the same key exists. Cost 59
-    of 581 real Local Storage keys in the actual case multiple false
-    latest=True rows before this fix."""
-    assert efl._seq_from_locator("host\x1fkey\x1fseq=1233#$") == 1233
-    assert efl._seq_from_locator("host\x1fkey\x1fseq=1233#some.leaf[0]") == 1233
-    assert efl._seq_from_locator("host\x1fkey\x1fseq=1233") == 1233  # no leaf suffix at all
-    assert efl._seq_from_locator("db/store/k1") is None  # no seq= convention at all (e.g. cache)
-    assert efl._seq_from_locator("host\x1fkey\x1fseq=None") is None  # reader didn't expose one
+
+
 
 
 def test_load_rows_marks_only_the_highest_sequence_number_as_latest(tmp_path):

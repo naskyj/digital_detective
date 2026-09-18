@@ -134,6 +134,49 @@ def url_filename_hint(url: str) -> str:
     return (url.rsplit("/", 1)[-1] or "cache_entry").split("?", 1)[0][:120] or "cache_entry"
 
 
+def raw_key_from_locator(locator: str) -> str:
+    """Recover the original Chromium cache key from ANY of the locator
+    shapes `_emit_entry` produces: bare `key`, `key @file:offset`,
+    `key @file:offset::body`, or `...::body#leaf.path` (and the
+    no-location-resolved variants of the last two, `key::body` /
+    `key::body#leaf.path`, when `_location` couldn't resolve a physical
+    file). Strips exactly the suffixes `_emit_entry` adds, in the order it
+    adds them - "#leaf" first (only body rows with a JSON value have it),
+    then "::body" (only body rows have it at all), then " @file:offset"
+    (only when `_location` resolved one). Splitting on " @" ALONE (an
+    earlier, simpler approach) silently keeps a trailing "::body#leaf" any
+    time location resolution fails, corrupting the recovered key - the
+    order here is what avoids that. The one place every reader of a cache
+    row's locator should go through, rather than reimplementing this
+    per-caller (the artifact-browser API's derived `url` column and the
+    labelling export's per-entry grouping both need exactly this)."""
+    s = locator
+    if "#" in s:
+        s = s.split("#", 1)[0]
+    if s.endswith("::body"):
+        s = s[: -len("::body")]
+    if " @" in s:
+        s = s.split(" @", 1)[0]
+    return s
+
+
+def cache_offset_from_locator(locator: str) -> int | None:
+    """The byte offset backing THIS row's own stream (meta or body) - the
+    number after the physical filename in ` @file:offset`. None when
+    `_location` couldn't resolve a physical location for this stream
+    (never fatal there, so not an error here either)."""
+    if " @" not in locator:
+        return None
+    after = locator.split(" @", 1)[1]  # "file:offset[::body[#leaf.path]]"
+    file_and_offset = after.split("::", 1)[0]
+    if ":" not in file_and_offset:
+        return None
+    try:
+        return int(file_and_offset.rsplit(":", 1)[-1])
+    except ValueError:
+        return None
+
+
 def _location(cache, key: str, stream: str):
     """The physical on-disk file (+ byte offset) backing one cache entry's
     metadata or body stream — the same fact a tool like ChromeCacheView shows
