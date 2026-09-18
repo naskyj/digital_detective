@@ -50,11 +50,14 @@ def test_make_artifact_propagates_deleted_true():
 def test_emit_value_propagates_deleted_to_every_flattened_leaf():
     import json
 
+    # A top-level ARRAY is what gets exploded (one artifact per entry,
+    # objects and all - see jsonflat.py's own docstring); a top-level
+    # OBJECT would collapse to exactly one artifact instead.
     rows = list(emit_value(
         _ctx(), source_type=SourceType.CACHE, source_file="f", locator="l", key="cache.body",
-        raw_value=json.dumps({"a": 1, "b": [2, 3]}), deleted=True,
+        raw_value=json.dumps([{"a": 1}, 2, [3, 4]]), deleted=True,
     ))
-    assert len(rows) == 3  # a, b[0], b[1]
+    assert len(rows) == 4  # [0] (whole object), [1], [2][0], [2][1]
     assert all(r.deleted for r in rows)
 
 

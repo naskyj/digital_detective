@@ -1,8 +1,13 @@
 """Unit coverage for the shared parser plumbing in dd_lab/parsers/base.py -
 in particular emit_value()/emit_parsed_value()'s key-path construction
 (join_leaf_key), which every storage parser (Local Storage, Session Storage,
-IndexedDB, Cache, Preferences) relies on - the single place that must get
-"key.[0]" vs "key[0]" right, so it only needs fixing once."""
+IndexedDB, Cache, Preferences) relies on.
+
+The policy (see jsonflat.py's own docstring): an object is always one
+artifact, whole, never split by key; only an array is exploded, one
+artifact per entry, recursing into any array nested inside another array.
+join_leaf_key is still the single place that must get "key.[0]" vs "key[0]"
+right for that array-of-arrays case, so it only needs fixing once."""
 
 from __future__ import annotations
 
@@ -44,14 +49,45 @@ def test_top_level_array_key_has_no_stray_dot_before_the_bracket():
     assert not any(".[" in k for k in keys)
 
 
-def test_nested_array_key_is_unaffected():
+def test_array_inside_an_object_is_never_reached():
+    """An object stops the walk right there, whole - a nested array buried
+    inside one is never separately exploded, unlike an array nested inside
+    ANOTHER array (test_array_of_arrays_key_path)."""
     keys = _keys(json.dumps({"friends": ["x", "y"]}))
-    assert keys == ["cache.body.friends[0]", "cache.body.friends[1]"]
+    assert keys == ["cache.body"]
 
 
-def test_plain_object_keys_still_dotted():
-    keys = _keys(json.dumps({"user": {"name": "bob"}}))
-    assert keys == ["cache.body.user.name"]
+def test_object_is_one_artifact_whole_however_deep():
+    artifacts = list(emit_value(
+        _ctx(), source_type=SourceType.CACHE, source_file="app/Cache/Cache_Data",
+        locator="k1", key="cache.body", raw_value=json.dumps({"user": {"name": "bob"}}),
+    ))
+    assert [a.key for a in artifacts] == ["cache.body"]
+    assert json.loads(artifacts[0].value) == {"user": {"name": "bob"}}
+
+
+def test_object_containing_raw_bytes_does_not_raise():
+    """Real bug found on real evidence: dumping a whole object in one
+    json.dumps() call (now that objects are never split by key) raises
+    TypeError the moment ANY value nested inside it is a raw `bytes` object
+    - which real IndexedDB records genuinely contain sometimes (blob
+    references, binary payloads, ccl_chromium_reader hands them back
+    already deserialized). Confirmed: this silently dropped thousands of a
+    real Slack IndexedDB store's records once it hit one such record,
+    because parse() catches per leveldb file, not per record."""
+    artifacts = _parsed_keys({"name": "bob", "blob": b"\x00\x01raw bytes"})
+    assert artifacts == ["idb.db.store"]  # didn't raise; one artifact, whole
+
+
+def test_array_of_objects_is_one_artifact_per_entry_not_split_further():
+    """Each array entry is its own artifact - including when that entry is
+    itself an object, which then stops there whole (not split by key)."""
+    artifacts = list(emit_value(
+        _ctx(), source_type=SourceType.CACHE, source_file="app/Cache/Cache_Data",
+        locator="k1", key="cache.body", raw_value=json.dumps([{"name": "bob"}, {"name": "eve"}]),
+    ))
+    assert [a.key for a in artifacts] == ["cache.body[0]", "cache.body[1]"]
+    assert [json.loads(a.value) for a in artifacts] == [{"name": "bob"}, {"name": "eve"}]
 
 
 def test_non_json_value_keeps_the_base_key_unchanged():
@@ -69,32 +105,20 @@ def test_array_of_arrays_key_path():
     assert keys == ["cache.body[0][0]", "cache.body[0][1]", "cache.body[1][0]", "cache.body[1][1]"]
 
 
-def test_literal_bracket_object_key_is_quoted_not_dotted():
+def test_object_with_bracket_like_keys_round_trips_intact():
     """A real case found on real evidence: VS Code's settings use "[python]"
-    as a literal object key (language-scoped defaults). Dot-joining it
-    ("configurationDefaults.[python]") reads exactly like the array-index
-    bug even though it isn't one - quoting it removes the ambiguity."""
-    keys = _keys(json.dumps({"configurationDefaults": {"[python]": {"editor": "x"}}}))
-    assert keys == ['cache.body.configurationDefaults["[python]"].editor']
-    assert not any(".[" in k for k in keys)
-
-
-def test_object_key_that_is_literally_an_index_string_is_distinguishable():
-    """The genuinely pathological case: a dict key whose string value is
-    "[0]" - identical in appearance to a real array index once flattened
-    naively. Quoting makes it distinguishable from cache.body[0][0]."""
-    keys = _keys(json.dumps([{"[0]": "not an index, a literal key"}]))
-    assert keys == ['cache.body[0]["[0]"]']
-    assert keys != _keys(json.dumps([["not an index, a literal key"]]))  # a genuine 2D array, for contrast
-
-
-def test_object_keys_with_special_characters_are_quoted():
-    keys = _keys(json.dumps({"weird key with spaces": 1, "dot.in.key": 2, "": 3}))
-    assert keys == [
-        'cache.body["weird key with spaces"]',
-        'cache.body["dot.in.key"]',
-        'cache.body[""]',
-    ]
+    as a literal object key (language-scoped defaults) - the kind of key
+    that used to read exactly like an array-index bug once dot-joined into
+    a path. That ambiguity doesn't arise any more: the whole object
+    (bracket-like keys included) is now one artifact, never path-joined at
+    all, so it round-trips through json.dumps/json.loads untouched."""
+    doc = {"configurationDefaults": {"[python]": {"editor": "x"}}, "[0]": "literal key, not an index"}
+    artifacts = list(emit_value(
+        _ctx(), source_type=SourceType.CACHE, source_file="app/Cache/Cache_Data",
+        locator="k1", key="cache.body", raw_value=json.dumps(doc),
+    ))
+    assert [a.key for a in artifacts] == ["cache.body"]
+    assert json.loads(artifacts[0].value) == doc
 
 
 def test_join_leaf_key_matches_the_documented_rules():

@@ -39,16 +39,28 @@ _FIELDS = [
     "key", "value", "text", "record_ts", "source_file", "deleted", "label",
 ]
 
-# cache.csv carries two extra columns _FIELDS doesn't: `url` (the request URL
-# this cache entry is for - same on every row of one entry's block, so it's
-# usable for correlation without looking up that entry's cache.url row) and
-# `cache_offset` (the byte offset backing THIS ROW'S own stream - `source_file`
-# already gives the physical file, but meta and body streams for the SAME
-# entry can live in different files at different offsets, see cache.py's
-# `_location`, so the offset is per-row, not per-entry, unlike `url`).
+# cache.csv carries three extra columns _FIELDS doesn't - three genuinely
+# different "which file" facts a cache entry has, kept as separate columns
+# rather than folded into one:
+#   source_file / cache_offset  the PHYSICAL on-disk file (+ byte offset)
+#                               Chromium actually stored the bytes in, e.g.
+#                               "Cache/Cache_Data/data_3" @ 737280 - meta and
+#                               body streams for the SAME entry can resolve
+#                               to different physical files (cache.py's
+#                               `_location`), so this is per-ROW, not per-entry
+#   filename                    a human-readable name guessed from the URL's
+#                               last path segment (cache.py's
+#                               `url_filename_hint`, the same one the UI's
+#                               "Open" download uses) - what the resource
+#                               would have been called, unrelated to where
+#                               Chromium physically stored it
+#   url                         the request URL, same on every row of one
+#                               entry's block, not just the cache.url row -
+#                               usable for correlation without a lookup
 _CACHE_FIELDS = [
     "artifact_id", "app", "source_type", "category", "confidence",
-    "key", "value", "text", "record_ts", "source_file", "cache_offset", "url", "deleted", "label",
+    "key", "value", "text", "record_ts", "source_file", "cache_offset",
+    "filename", "url", "deleted", "label",
 ]
 
 
@@ -132,11 +144,15 @@ def _load_cache_rows(wh) -> list[dict]:
         url = next((g["value"] for g in group if g["key"] == "cache.url"), raw_key)
         kept.append((app, url, group))
 
+    from dd_lab.parsers.cache import url_filename_hint
+
     out: list[dict] = []
     for _app, url, group in sorted(kept, key=lambda t: (t[0], t[1])):
+        filename = url_filename_hint(url)
         for r in sorted(group, key=lambda g: (_CACHE_FIELD_ORDER.get(g["key"], 5), g["key"])):
             r["cache_offset"] = _cache_offset(r["source_locator"])
             del r["source_locator"]
+            r["filename"] = filename  # human-readable, guessed from the URL - NOT the physical file above
             r["url"] = url  # the entry's URL, on every row - not just the cache.url row
             r["text"] = f"[{r['source_type']}] {r['key']} = {r['value']}"
             r["label"] = ""

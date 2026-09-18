@@ -60,12 +60,15 @@ def test_indexeddb_keys_have_no_stray_dot_before_bracket():
 
 @pytest.mark.skipif(_idb_profile() is None, reason="no real IndexedDB store available")
 def test_indexeddb_array_index_keys_use_unquoted_brackets():
+    """A record's top-level value is usually an object, which is now one
+    artifact whole (see jsonflat.py's docstring) - an array-indexed key
+    only appears when a record's own top-level value IS an array, which
+    isn't guaranteed on any given real profile, so this can't assert one
+    was found (see test_parsers_base.py's synthetic tests for that
+    guarantee); it only asserts the shape is right on whichever ones, if
+    any, this profile happens to produce."""
     rows = list(indexeddb.parse(_ctx_for(_idb_profile())))
-    # real IndexedDB records commonly hold arrays (e.g. lists of repos,
-    # recently-opened items) - confirm at least one genuinely indexed key
-    # made it through in the "[N]" (not quoted, not dotted) shape.
     indexed = [r.key for r in rows if re.search(r"\[\d+\]", r.key)]
-    assert indexed, "no array-indexed key found - can't confirm the bracket shape on this profile"
     assert not any(_DOT_BRACKET.search(k) for k in indexed)
 
 

@@ -121,6 +121,19 @@ def url_from_cache_key(key: str) -> str:
     return key.split("/", 2)[-1] if key.count("/") >= 2 else key
 
 
+def url_filename_hint(url: str) -> str:
+    """A human-readable filename guessed from a cache entry's URL (its last
+    path segment, query string dropped, capped at 120 chars) - NOT the
+    physical on-disk cache file (that's `source_file`/the byte offset
+    resolved by `_location`; a completely different, unrelated fact - one
+    is where Chromium physically stored the bytes, this is what the
+    original resource would have been called). Originally inline in
+    `read_cache_entry` (the "Open"/download filename); shared here so the
+    labelling export's `filename` column derives it the same way instead of
+    a second, possibly-drifting reimplementation."""
+    return (url.rsplit("/", 1)[-1] or "cache_entry").split("?", 1)[0][:120] or "cache_entry"
+
+
 def _location(cache, key: str, stream: str):
     """The physical on-disk file (+ byte offset) backing one cache entry's
     metadata or body stream — the same fact a tool like ChromeCacheView shows
@@ -365,8 +378,7 @@ def read_cache_entry(ctx: ParseContext, cache_dir_rel: str, key: str) -> tuple[b
         if enc:
             body = _decompress(body, enc)
         url = url_from_cache_key(key)
-        filename_hint = (url.rsplit("/", 1)[-1] or "cache_entry").split("?", 1)[0][:120] or "cache_entry"
-        return body, ct, filename_hint
+        return body, ct, url_filename_hint(url)
     except Exception:
         log.debug("could not read cache entry %r in %s", key, cache_dir)
         return None, "application/octet-stream", "cache_entry"

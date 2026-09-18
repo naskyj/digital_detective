@@ -105,14 +105,16 @@ def make_artifact(
 def join_leaf_key(key: str, leaf_path: str) -> str:
     """`key` + one leaf path from `jsonflat.iter_leaves`, joined correctly.
 
-    iter_leaves() already formats each segment to be self-sufficient - an
-    array index carries its own bracket ("[0]"), a non-identifier-safe
-    object key carries its own quoted bracket (`["odd key"]`) - so a leaf
-    path only ever needs a "." in front of it when it does NOT already start
-    with "[". The one place every parser that flattens JSON must agree on
-    this: two independent reimplementations of this exact join (here and,
-    formerly, a duplicate inline in indexeddb.py) is how "key.[0]" bugs
-    happen and then only get half-fixed.
+    iter_leaves() only ever explodes arrays now (an object is always one
+    artifact, whole - see jsonflat.py's own docstring), so a leaf path is
+    either "$" (the value wasn't an array at all - no path to append) or a
+    run of array-index brackets ("[0]", "[0][1]", ...), each self-sufficient
+    - never a "."-joined object-key segment any more. Still worth going
+    through one shared join rather than reimplementing it per parser: this
+    is the one place every parser that flattens JSON must agree on, and two
+    independent reimplementations of it (here and, formerly, a duplicate
+    inline in indexeddb.py) is how "key.[0]" bugs happen and then only get
+    half-fixed.
     """
     if not leaf_path or leaf_path == "$":
         return key
@@ -148,8 +150,8 @@ def emit_parsed_value(
 
         yield make_artifact(
             ctx, source_type=source_type, source_file=source_file, locator=locator,
-            key=key, value=_json.dumps(parsed), value_type=ValueType.JSON, record_ts=record_ts,
-            deleted=deleted,
+            key=key, value=_json.dumps(parsed, default=str), value_type=ValueType.JSON,
+            record_ts=record_ts, deleted=deleted,
         )
 
 
