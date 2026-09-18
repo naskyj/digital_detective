@@ -1008,7 +1008,14 @@ function localStorageFilesPanel(id, app){
     try{ d=await api('/cases/'+id+'/localstorage-files?app='+encodeURIComponent(app)); }
     catch(e){ out.innerHTML=''; out.append(el('div',{class:'hint'},'Could not load: '+e.message)); return; }
     if(!d.files.length){ out.innerHTML=''; out.append(el('div',{class:'hint'},'No Local Storage files found for this app.')); return; }
-    const t=el('table',{},el('thead',{},el('tr',{},
+    // table-layout:fixed - otherwise an expanded file's record dump (long,
+    // nowrap "value" cells inside recTable) blows the WHOLE table out to
+    // tens of thousands of pixels wide (confirmed: 284,612px in one real
+    // case), pushing this row's own Open/Close chevron far outside the
+    // viewport - not actually gone, just rendered off-screen. Fixed column
+    // widths (from the header row) mean recTable's own overflow:auto is
+    // what scrolls wide content now, not the whole table growing.
+    const t=el('table',{style:'table-layout:fixed;width:100%'},el('thead',{},el('tr',{},
       ...['Filename','Kind','Size','Records',''].map(h=>el('th',{},h)))));
     const tb=el('tbody',{});
     d.files.forEach(f=>{
@@ -1073,7 +1080,12 @@ function databaseFilesPanel(id, app){
     try{ d=await api('/cases/'+id+'/db-files?app='+encodeURIComponent(app)); }
     catch(e){ out.innerHTML=''; out.append(el('div',{class:'hint'},'Could not load: '+e.message)); return; }
     if(!d.files.length){ out.innerHTML=''; out.append(el('div',{class:'hint'},'No database files found for this app.')); return; }
-    const t=el('table',{},el('thead',{},el('tr',{},
+    // table-layout:fixed - same reason as localStorageFilesPanel's own
+    // table: an expanded table's raw row dump (nowrap cells) would
+    // otherwise blow the whole table out to a huge width, pushing this
+    // row's Open/Close chevron off-screen instead of just scrolling
+    // internally.
+    const t=el('table',{style:'table-layout:fixed;width:100%'},el('thead',{},el('tr',{},
       ...['File','Table','Rows',''].map(h=>el('th',{},h)))));
     const tb=el('tbody',{});
     d.files.forEach(f=>f.tables.forEach(tbl_=>{
