@@ -39,6 +39,18 @@ _FIELDS = [
     "key", "value", "text", "record_ts", "source_file", "deleted", "label",
 ]
 
+# cache.csv carries two extra columns _FIELDS doesn't: `url` (the request URL
+# this cache entry is for - same on every row of one entry's block, so it's
+# usable for correlation without looking up that entry's cache.url row) and
+# `cache_offset` (the byte offset backing THIS ROW'S own stream - `source_file`
+# already gives the physical file, but meta and body streams for the SAME
+# entry can live in different files at different offsets, see cache.py's
+# `_location`, so the offset is per-row, not per-entry, unlike `url`).
+_CACHE_FIELDS = [
+    "artifact_id", "app", "source_type", "category", "confidence",
+    "key", "value", "text", "record_ts", "source_file", "cache_offset", "url", "deleted", "label",
+]
+
 
 def _load_rows(wh, source_type: str) -> list[dict]:
     rows = wh.query(
@@ -69,6 +81,20 @@ def _raw_cache_key(locator: str) -> str:
     if " @" in s:
         s = s.split(" @", 1)[0]
     return s
+
+
+def _cache_offset(locator: str) -> str:
+    """The byte offset backing THIS row's own stream (meta or body), i.e.
+    the number after the physical filename in ` @file:offset` - empty when
+    cache.py couldn't resolve a physical location for this stream (never
+    fatal there, so not an error here either). Per-row, not per-entry: a
+    row's own locator, not the group's - see the `source_file` comment in
+    `_load_cache_rows`."""
+    if " @" not in locator:
+        return ""
+    after = locator.split(" @", 1)[1]  # "file:offset[::body[#leaf.path]]"
+    file_and_offset = after.split("::", 1)[0]
+    return file_and_offset.rsplit(":", 1)[-1] if ":" in file_and_offset else ""
 
 
 # Row order within one surviving cache entry: identifying context first
@@ -107,9 +133,11 @@ def _load_cache_rows(wh) -> list[dict]:
         kept.append((app, url, group))
 
     out: list[dict] = []
-    for _app, _url, group in sorted(kept, key=lambda t: (t[0], t[1])):
+    for _app, url, group in sorted(kept, key=lambda t: (t[0], t[1])):
         for r in sorted(group, key=lambda g: (_CACHE_FIELD_ORDER.get(g["key"], 5), g["key"])):
+            r["cache_offset"] = _cache_offset(r["source_locator"])
             del r["source_locator"]
+            r["url"] = url  # the entry's URL, on every row - not just the cache.url row
             r["text"] = f"[{r['source_type']}] {r['key']} = {r['value']}"
             r["label"] = ""
             out.append(r)
@@ -141,10 +169,10 @@ def _stratified_sample(rows: list[dict], target: int, rng: random.Random) -> lis
     return out
 
 
-def _write_csv(path: Path, rows: list[dict]) -> None:
+def _write_csv(path: Path, rows: list[dict], fieldnames: list[str] = _FIELDS) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=_FIELDS)
+        w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         w.writerows(rows)
 
@@ -212,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
                 chosen = _stratified_sample(rows, budget, rng)
             else:
                 chosen = rows
-            _write_csv(out_dir / f"{st}.csv", chosen)
+            _write_csv(out_dir / f"{st}.csv", chosen, _CACHE_FIELDS if st == "cache" else _FIELDS)
             summary.append((st, len(chosen), len(rows), raw_counts.get(st, len(rows))))
             grand_total += len(chosen)
     finally:
