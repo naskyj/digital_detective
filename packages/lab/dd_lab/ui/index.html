@@ -198,6 +198,23 @@ async function vImport(m){
   m.append(newCasePanel());
 }
 
+// Small original glyph-style icons (colour + a simple generic shape, not a
+// reproduction of any real trademarked logo - this stays fully local/inline,
+// no network fetch) for the app-targeting checklist below. Looked up by
+// substring against whatever name is being shown (a known target-app key or
+// a name discovered by the "Preview apps" scan).
+const _APP_ICONS={
+  discord:'<svg width="18" height="18" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="#5865F2"/><path d="M6 8a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-6l-3 3v-3H8a2 2 0 0 1-2-2V8z" fill="#fff"/></svg>',
+  slack:'<svg width="18" height="18" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="#611f69"/><path d="M9 7v10M15 7v10M6 10h12M6 14h12" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  roblox:'<svg width="18" height="18" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="#111"/><rect x="7.5" y="7.5" width="9" height="9" fill="none" stroke="#e2231a" stroke-width="1.8"/></svg>',
+};
+const _APP_ICON_GENERIC='<svg width="18" height="18" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="#9ca3af"/><rect x="6" y="7" width="12" height="10" rx="1.5" fill="none" stroke="#fff" stroke-width="1.6"/><path d="M6 10h12" stroke="#fff" stroke-width="1.6"/></svg>';
+function appIcon(name){
+  const n=(name||'').toLowerCase();
+  const key=Object.keys(_APP_ICONS).find(k=>n.includes(k));
+  return el('span',{class:'app-icon',style:'display:inline-flex',html:key?_APP_ICONS[key]:_APP_ICON_GENERIC});
+}
+
 // One evidence-source input: type toggle (Image / Folder - they go through
 // different acquisition code, dissect vs a flat-folder copy, and warrant
 // different hints/browse buttons), path, and a label (best-effort
@@ -240,29 +257,81 @@ function sourceRow(onRemove){
   }
   imgBtn.onclick=()=>setKind('image'); folderBtn.onclick=()=>setKind('folder');
 
-  const scanBtn=el('button',{class:'ghost'},'Preview apps (optional)');
+  // Apps to include: an upfront Automatic-vs-Target choice (not a buried
+  // "(optional)" preview step), with a common-apps checklist people can use
+  // without scanning first - the backend's `apps` filter is a plain
+  // case-insensitive substring match (acquire.py), so a plain "discord"
+  // works regardless of the exact profile-folder name it'll match against.
+  let appMode='auto';
+  const selectedApps=new Set();
+  const autoModeBtn=el('button',{class:'toggle-btn active'},'Automatic (all apps found)');
+  const targetModeBtn=el('button',{class:'toggle-btn'},'Target specific apps');
+  const targetBox=el('div',{style:'display:none;margin-top:8px'});
+  function setAppMode(m){
+    appMode=m;
+    autoModeBtn.className='toggle-btn'+(m==='auto'?' active':'');
+    targetModeBtn.className='toggle-btn'+(m==='target'?' active':'');
+    targetBox.style.display=m==='target'?'block':'none';
+  }
+  autoModeBtn.onclick=()=>setAppMode('auto');
+  targetModeBtn.onclick=()=>setAppMode('target');
+
+  function appCheckRow(key,label,extra){
+    const cb=el('input',{type:'checkbox',onchange:e=>{
+      if(e.target.checked) selectedApps.add(key); else selectedApps.delete(key);
+    }});
+    return el('label',{style:'display:flex;gap:8px;align-items:center;margin-top:4px;color:var(--fg)'},
+      cb, appIcon(key), el('span',{style:'flex:1'},label), extra||'');
+  }
+  const knownList=el('div');
+  [['discord','Discord'],['slack','Slack'],['roblox','Roblox']].forEach(([key,label])=>
+    knownList.append(appCheckRow(key,label)));
+
+  const customList=el('div');
+  const customInput=el('input',{placeholder:'add another app name…',style:'flex:1'});
+  const customAddBtn=el('button',{class:'sec'},'+ Add');
+  customAddBtn.onclick=()=>{
+    const name=customInput.value.trim();
+    if(!name) return;
+    selectedApps.add(name.toLowerCase());
+    customList.append(appCheckRow(name.toLowerCase(),name));
+    customInput.value='';
+  };
+
+  const scanBtn=el('button',{class:'ghost'},'Scan this source for apps (optional)');
   const scanLog=el('div',{class:'hint'});
-  const appsBox=el('div',{style:'display:none;margin-top:8px'});
-  const checks=[];
+  const scanResultsBox=el('div',{style:'display:none;margin-top:8px'});
   scanBtn.onclick=async()=>{
     if(!path.value.trim()) return alert('Enter a path first.');
     scanBtn.disabled=true; scanBtn.textContent='Scanning…';
-    scanLog.textContent=''; appsBox.style.display='none'; appsBox.innerHTML=''; checks.length=0;
+    scanLog.textContent=''; scanResultsBox.style.display='none'; scanResultsBox.innerHTML='';
     try{
       const d=await api('/image/list',{method:'POST',body:JSON.stringify({image_path:path.value.trim()})});
       if(!d.apps.length) scanLog.textContent='No supported application profiles were found.';
       else{
-        appsBox.style.display='block';
+        setAppMode('target');
+        scanResultsBox.style.display='block';
         d.apps.forEach(a=>{
-          const cb=el('input',{type:'checkbox',checked:''}); checks.push([cb,a]);
-          appsBox.append(el('label',{style:'display:flex;gap:8px;align-items:center;margin-top:4px;color:var(--fg)'},
-            cb, el('span',{},a.name, a.version?' v'+a.version:''),
-            el('span',{class:'muted mono',style:'flex:1;text-align:right;font-size:10px'},a.profile_dir)));
+          const nameKey=a.name.toLowerCase();
+          selectedApps.add(nameKey);
+          scanResultsBox.append(el('label',{style:'display:flex;gap:8px;align-items:center;margin-top:4px;color:var(--fg)'},
+            el('input',{type:'checkbox',checked:'',onchange:e=>{
+              if(e.target.checked) selectedApps.add(nameKey); else selectedApps.delete(nameKey);
+            }}),
+            appIcon(a.name), el('span',{style:'flex:1'},a.name, a.version?' v'+a.version:''),
+            el('span',{class:'muted mono',style:'font-size:10px'},a.profile_dir)));
         });
       }
     }catch(e){ scanLog.textContent='Could not open: '+e.message; }
-    scanBtn.disabled=false; scanBtn.textContent='Preview apps (optional)';
+    scanBtn.disabled=false; scanBtn.textContent='Scan this source for apps (optional)';
   };
+
+  targetBox.append(
+    knownList, customList,
+    el('div',{class:'row',style:'margin-top:6px'}, customInput, customAddBtn),
+    el('div',{class:'hint',style:'margin-top:10px'},'Or scan this source to see exactly what\'s on it:'),
+    el('div',{class:'row'}, scanBtn), scanLog, scanResultsBox,
+  );
 
   const memImg=el('input',{placeholder:'optional — a full-RAM capture acquired separately',style:'flex:1;min-width:220px'});
   const browseMemImg=el('button',{class:'sec',onclick:()=>browseForFile(
@@ -277,15 +346,16 @@ function sourceRow(onRemove){
   box.append(rowHeader,
     el('label',{},'Path'), el('div',{class:'row'}, path, browseFile, browseFolderBtn),
     el('label',{},'Label (who/what this source is from)'), label,
+    el('label',{},'Apps to include'), el('div',{class:'row'}, autoModeBtn, targetModeBtn), targetBox,
     el('label',{},'Memory image (optional)'), el('div',{class:'row'}, memImg, browseMemImg),
-    el('div',{class:'row',style:'margin-top:6px'}, scanBtn), scanLog, appsBox, statusLog);
+    statusLog);
   setKind('image');
 
   return {
     el: box, statusLog,
     value(){
-      const chosen = checks.length ? checks.filter(([c])=>c.checked).map(([,a])=>a.name) : null;
-      return {path: path.value.trim(), label: label.value.trim(), apps: chosen,
+      const apps = appMode==='auto' ? null : (selectedApps.size ? [...selectedApps] : null);
+      return {path: path.value.trim(), label: label.value.trim(), apps,
         memoryImagePath: memImg.value.trim()||null};
     },
   };
