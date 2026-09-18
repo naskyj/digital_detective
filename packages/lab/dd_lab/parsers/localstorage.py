@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import shutil
 from collections.abc import Iterator
+from pathlib import Path
 
 from dd_core.enums import SourceType
 from dd_core.schema import NormalizedArtifact
@@ -19,7 +20,7 @@ def parse(ctx: ParseContext) -> Iterator[NormalizedArtifact]:
     from ccl_chromium_reader.ccl_chromium_localstorage import LocalStoreDb
 
     leveldb_dir = ctx.path(LOCAL_STORAGE)
-    source_file = ctx.rel(leveldb_dir)
+    source_dir = ctx.rel(leveldb_dir)
     db, cleanup_dir = open_leveldb_resilient(leveldb_dir, LocalStoreDb)
     if db is None:
         return
@@ -28,6 +29,17 @@ def parse(ctx: ParseContext) -> Iterator[NormalizedArtifact]:
             try:
                 locator = f"{rec.storage_key}\x1f{rec.script_key}\x1fseq={rec.leveldb_seq_number}"
                 key = f"{rec.storage_key} :: {rec.script_key}"
+                # rec.file is the PHYSICAL .ldb/.log file this record was
+                # read from (a key isn't pinned to one file - compaction
+                # moves it between .ldb files over time, same fact
+                # /localstorage-files exposes for browsing). It's an
+                # absolute path (into a resilient-open tmp copy when that
+                # path was taken - see open_leveldb_resilient - which
+                # preserves the original filename, just not the original
+                # directory), so only its basename is evidence-safe to
+                # record; ctx.rel(leveldb_dir) is what keeps this relative
+                # to <case>/evidence/, same as every other source_file.
+                source_file = f"{source_dir}/{Path(rec.file).name}"
                 yield from emit_value(
                     ctx,
                     source_type=SourceType.LOCAL_STORAGE,

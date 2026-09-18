@@ -58,6 +58,19 @@ def case(tmp_path):
             )
             for i in range(6)
         ]
+        # export_for_labeling's cache loader keeps JSON-content-typed cache
+        # entries only (see _load_cache_rows) - each cache row above needs a
+        # sibling cache.content_type row sharing its locator prefix, or the
+        # whole-export test below sees an empty (correctly, but untested)
+        # cache.csv instead of exercising the normal per-source-type path.
+        rows += [
+            NormalizedArtifact(
+                artifact_id=f"a{i}-ct", case_id="case1", app="app", source_type=SourceType.CACHE,
+                source_file="app/f", source_locator=f"loc{i}", key="cache.content_type",
+                value="application/json", value_type=ValueType.STRING, extracted_ts=datetime.now(UTC),
+            )
+            for i in range(0, 6, 2)
+        ]
         wh.load_artifacts(rows)
     finally:
         wh.close()
@@ -73,12 +86,79 @@ def test_export_writes_one_csv_per_source_type(case, tmp_path):
     assert (out_dir / "local_storage.csv").is_file()
     with (out_dir / "cache.csv").open() as f:
         rows = list(csv.DictReader(f))
-    assert len(rows) == 3  # i = 0, 2, 4
-    row = rows[0]
+    # 3 entries (i = 0, 2, 4), each with its own value row AND its
+    # cache.content_type row (see the `case` fixture) - both kept, since
+    # _load_cache_rows keeps every row for a JSON-content-typed entry.
+    assert len(rows) == 6
+    row = next(r for r in rows if r["key"] != "cache.content_type")
     for col in ("artifact_id", "app", "source_type", "category", "key", "value", "text", "label"):
         assert col in row
     assert row["text"] == f"[cache] {row['key']} = {row['value']}"
     assert row["label"] == ""
+
+
+def test_seq_from_locator_strips_leaf_path_suffix_first():
+    """Real bug found on real evidence: emit_value()/emit_parsed_value()
+    append "#<leaf_path>" AFTER the "...seq=<N>" locator base.py builds
+    (e.g. "...seq=1233#$" for a value whose flattened path is the root) -
+    parsing the number without stripping that suffix first raises inside
+    int() and silently falls back to None, which _load_rows treats as
+    'nothing to compare against' and marks latest=True unconditionally,
+    regardless of whether a newer version of the same key exists. Cost 59
+    of 581 real Local Storage keys in the actual case multiple false
+    latest=True rows before this fix."""
+    assert efl._seq_from_locator("host\x1fkey\x1fseq=1233#$") == 1233
+    assert efl._seq_from_locator("host\x1fkey\x1fseq=1233#some.leaf[0]") == 1233
+    assert efl._seq_from_locator("host\x1fkey\x1fseq=1233") == 1233  # no leaf suffix at all
+    assert efl._seq_from_locator("db/store/k1") is None  # no seq= convention at all (e.g. cache)
+    assert efl._seq_from_locator("host\x1fkey\x1fseq=None") is None  # reader didn't expose one
+
+
+def test_load_rows_marks_only_the_highest_sequence_number_as_latest(tmp_path):
+    from datetime import UTC, datetime
+
+    from dd_core.casedir import CaseLayout
+    from dd_core.enums import SourceType, ValueType
+    from dd_core.schema import NormalizedArtifact
+    from dd_lab.etl.warehouse import Warehouse
+
+    layout = CaseLayout(tmp_path, "case2")
+    layout.create_lab_skeleton()
+    wh = Warehouse(layout.warehouse)
+    try:
+        # Three historical writes of the SAME key (increasing seq, one with
+        # a "#$" leaf-path suffix like a real flattened JSON value would
+        # have) plus one unrelated key, mirroring real localstorage.py output.
+        rows = [
+            NormalizedArtifact(
+                artifact_id="a1", case_id="case2", app="app", source_type=SourceType.LOCAL_STORAGE,
+                source_file="app/f", source_locator="origin\x1fk\x1fseq=1#$", key="origin :: k",
+                value="old", value_type=ValueType.STRING, extracted_ts=datetime.now(UTC),
+            ),
+            NormalizedArtifact(
+                artifact_id="a2", case_id="case2", app="app", source_type=SourceType.LOCAL_STORAGE,
+                source_file="app/f", source_locator="origin\x1fk\x1fseq=9#$", key="origin :: k",
+                value="new", value_type=ValueType.STRING, extracted_ts=datetime.now(UTC),
+            ),
+            NormalizedArtifact(
+                artifact_id="a3", case_id="case2", app="app", source_type=SourceType.LOCAL_STORAGE,
+                source_file="app/f", source_locator="origin\x1fk\x1fseq=4#$", key="origin :: k",
+                value="mid", value_type=ValueType.STRING, extracted_ts=datetime.now(UTC),
+            ),
+            NormalizedArtifact(
+                artifact_id="a4", case_id="case2", app="app", source_type=SourceType.LOCAL_STORAGE,
+                source_file="app/f", source_locator="origin\x1fother\x1fseq=1#$", key="origin :: other",
+                value="v", value_type=ValueType.STRING, extracted_ts=datetime.now(UTC),
+            ),
+        ]
+        wh.load_artifacts(rows)
+        by_id = {r["artifact_id"]: r for r in efl._load_rows(wh, "local_storage")}
+    finally:
+        wh.close()
+    assert by_id["a1"]["latest"] is False
+    assert by_id["a2"]["latest"] is True  # highest seq (9) for "origin :: k"
+    assert by_id["a3"]["latest"] is False
+    assert by_id["a4"]["latest"] is True  # only version of "origin :: other"
 
 
 def test_export_missing_warehouse_fails_cleanly(tmp_path):

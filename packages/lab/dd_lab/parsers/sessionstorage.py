@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import shutil
 from collections.abc import Iterator
+from pathlib import Path
 
 from dd_core.enums import SourceType
 from dd_core.schema import NormalizedArtifact
@@ -19,7 +20,7 @@ def parse(ctx: ParseContext) -> Iterator[NormalizedArtifact]:
     from ccl_chromium_reader.ccl_chromium_sessionstorage import SessionStoreDb
 
     ss_dir = ctx.path(SESSION_STORAGE)
-    source_file = ctx.rel(ss_dir)
+    source_dir = ctx.rel(ss_dir)
     db, cleanup_dir = open_leveldb_resilient(ss_dir, SessionStoreDb)
     if db is None:
         return
@@ -28,6 +29,9 @@ def parse(ctx: ParseContext) -> Iterator[NormalizedArtifact]:
             try:
                 host = rec.host or "?"
                 locator = f"{host}\x1f{rec.key}\x1fseq={rec.leveldb_sequence_number}"
+                # rec.file: same fact/same caveats as localstorage.py's own
+                # source_file line - see the comment there.
+                source_file = f"{source_dir}/{Path(rec.file).name}"
                 yield from emit_value(
                     ctx,
                     source_type=SourceType.SESSION_STORAGE,

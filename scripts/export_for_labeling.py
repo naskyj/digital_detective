@@ -36,7 +36,7 @@ for pkg in ("core", "lab"):
 
 _FIELDS = [
     "artifact_id", "app", "source_type", "category", "confidence",
-    "key", "value", "text", "record_ts", "source_file", "deleted", "label",
+    "key", "value", "text", "record_ts", "source_file", "deleted", "latest", "label",
 ]
 
 # cache.csv carries three extra columns _FIELDS doesn't - three genuinely
@@ -64,13 +64,68 @@ _CACHE_FIELDS = [
 ]
 
 
+def _seq_from_locator(locator: str) -> int | None:
+    """The LevelDB sequence number embedded in a locator ending
+    "...\\x1fseq=<N>" - localstorage.py, sessionstorage.py and indexeddb.py
+    all use this exact convention (independently, but identically) to keep
+    every historical/tombstoned version of a repeatedly-written key as its
+    own artifact instead of colliding on one artifact_id (see the indexeddb
+    collision bug fixed earlier this session). It's the ONLY recency signal
+    available for these three source_types: none of them set `record_ts` -
+    LevelDB itself carries no wall-clock timestamp per write, only this
+    monotonic per-store counter. None when the locator doesn't use this
+    convention (cache doesn't - see _raw_cache_key/_cache_offset instead)
+    or the reader didn't expose a sequence number for this record.
+
+    emit_value()/emit_parsed_value() append their own "#<leaf_path>" suffix
+    AFTER this (locator=f"{locator}#{leaf_path}", base.py) for every row a
+    JSON value flattens into - e.g. "...seq=1233#$" for a value whose path
+    is the root ("$", see jsonflat.py) - so that suffix has to be stripped
+    BEFORE looking for the number, the same way _raw_cache_key strips it,
+    or every such row silently fails int() and falls back to None here."""
+    if "#" in locator:
+        locator = locator.split("#", 1)[0]
+    marker = "\x1fseq="
+    if marker not in locator:
+        return None
+    try:
+        return int(locator.rsplit(marker, 1)[1])
+    except ValueError:
+        return None
+
+
 def _load_rows(wh, source_type: str) -> list[dict]:
     rows = wh.query(
         "SELECT artifact_id, app, source_type, category, confidence, key, value, "
-        "record_ts, source_file, deleted FROM artifacts WHERE source_type = ? ORDER BY app, key",
+        "record_ts, source_file, deleted, source_locator FROM artifacts WHERE source_type = ? "
+        "ORDER BY app, key",
         [source_type],
     )
+    # "latest": the row holding the CURRENT value of its (app, key), not a
+    # superseded one - the highest sequence number among every row sharing
+    # that key. Historical rows are NOT dropped (deliberately - see
+    # test_deleted_records.py/this session's `deleted` flag work: a prior
+    # value is real evidence, not noise to discard) - they're marked, so a
+    # hand-labeller or a downstream query can filter to current-only
+    # without the full history ever leaving the export. A row whose locator
+    # doesn't carry a sequence number at all (source_types other than
+    # local_storage/session_storage/indexeddb - nothing to compare against)
+    # defaults to latest=True: there's no version information to say
+    # otherwise.
+    best_seq: dict[tuple[str, str], int] = {}
+    seqs: dict[str, int | None] = {}
     for r in rows:
+        seq = _seq_from_locator(r["source_locator"])
+        seqs[r["artifact_id"]] = seq
+        if seq is not None:
+            k = (r["app"], r["key"])
+            if seq > best_seq.get(k, -1):
+                best_seq[k] = seq
+    for r in rows:
+        seq = seqs[r["artifact_id"]]
+        k = (r["app"], r["key"])
+        r["latest"] = seq is None or seq >= best_seq.get(k, seq)
+        del r["source_locator"]
         r["text"] = f"[{r['source_type']}] {r['key']} = {r['value']}"
         r["label"] = ""  # fill in with the true category before scoring
     return rows
