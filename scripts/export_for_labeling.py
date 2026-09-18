@@ -52,6 +52,70 @@ def _load_rows(wh, source_type: str) -> list[dict]:
     return rows
 
 
+def _raw_cache_key(locator: str) -> str:
+    """Recover the original Chromium cache key from one of the locator shapes
+    cache.py produces (`key`, `key @file:offset`, `key @file:offset::body`,
+    or `...::body#leaf.path`) so every row belonging to the same cache entry -
+    its url/status/content-type/timestamps AND its (separately-located) body -
+    groups back together. Meta and body streams can live at different
+    physical offsets for the same key (see cache.py's `_location`), so
+    grouping by locator prefix alone doesn't work; this strips exactly the
+    suffixes cache.py adds, in the order it adds them."""
+    s = locator
+    if "#" in s:
+        s = s.split("#", 1)[0]
+    if s.endswith("::body"):
+        s = s[: -len("::body")]
+    if " @" in s:
+        s = s.split(" @", 1)[0]
+    return s
+
+
+# Row order within one surviving cache entry: identifying context first
+# (url, status, content-type, timestamps), then its body flattened key by
+# key - so one JSON response reads as one contiguous block instead of its
+# leaves being scattered across the file next to unrelated entries that
+# happen to share a leaf name (the export's normal `ORDER BY app, key` groups
+# by leaf key across ALL entries, not by entry).
+_CACHE_FIELD_ORDER = {
+    "cache.url": 0, "cache.http_status": 1, "cache.content_type": 2,
+    "cache.request_time": 3, "cache.response_time": 4,
+}
+
+
+def _load_cache_rows(wh) -> list[dict]:
+    """Cache entries, JSON API responses only - every other content type
+    (JS, HTML, XML, plain text, images, fonts, ...) dropped entirely, since
+    those are the overwhelming majority of a Chromium cache and pure noise
+    for hand-labelling investigation-relevant data. Rows for a surviving
+    entry are kept adjacent and ordered (see _CACHE_FIELD_ORDER) instead of
+    interleaved with every other entry's rows."""
+    rows = wh.query(
+        "SELECT artifact_id, app, source_type, category, confidence, key, value, "
+        "record_ts, source_file, deleted, source_locator FROM artifacts WHERE source_type = 'cache'"
+    )
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for r in rows:
+        groups.setdefault((r["app"], _raw_cache_key(r["source_locator"])), []).append(r)
+
+    kept: list[tuple[str, str, list[dict]]] = []
+    for (app, raw_key), group in groups.items():
+        content_type = next((g["value"] for g in group if g["key"] == "cache.content_type"), "")
+        if "json" not in (content_type or "").lower():
+            continue
+        url = next((g["value"] for g in group if g["key"] == "cache.url"), raw_key)
+        kept.append((app, url, group))
+
+    out: list[dict] = []
+    for _app, _url, group in sorted(kept, key=lambda t: (t[0], t[1])):
+        for r in sorted(group, key=lambda g: (_CACHE_FIELD_ORDER.get(g["key"], 5), g["key"])):
+            del r["source_locator"]
+            r["text"] = f"[{r['source_type']}] {r['key']} = {r['value']}"
+            r["label"] = ""
+            out.append(r)
+    return out
+
+
 def _stratified_sample(rows: list[dict], target: int, rng: random.Random) -> list[dict]:
     """Roughly `target` rows out of `rows`, spread across categories present
     - a rare category with only a handful of rows still gets a few, instead
@@ -123,13 +187,24 @@ def main(argv: list[str] | None = None) -> int:
             print("this case's warehouse has no artifacts", file=sys.stderr)
             return 1
 
+        # cache is filtered (JSON API responses only - see _load_cache_rows)
+        # before anything else happens to it, so "of_total" below needs the
+        # PRE-filter raw count too, or a filtered source_type would silently
+        # look identical to one that was never filtered at all.
+        raw_counts = {
+            r["source_type"]: r["n"]
+            for r in wh.query("SELECT source_type, COUNT(*) AS n FROM artifacts GROUP BY source_type")
+        }
+
         # allocate the total sample budget across source_types proportional to
         # their share of the case, so a source_type with 400k rows doesn't
         # crowd out one with 40
-        all_rows = {st: _load_rows(wh, st) for st in source_types}
+        all_rows = {
+            st: (_load_cache_rows(wh) if st == "cache" else _load_rows(wh, st)) for st in source_types
+        }
         total_rows = sum(len(v) for v in all_rows.values())
 
-        summary: list[tuple[str, int, int]] = []  # source_type, written, of_total
+        summary: list[tuple[str, int, int, int]] = []  # source_type, written, of_filtered, of_raw
         grand_total = 0
         for st, rows in all_rows.items():
             if args.sample:
@@ -138,15 +213,21 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 chosen = rows
             _write_csv(out_dir / f"{st}.csv", chosen)
-            summary.append((st, len(chosen), len(rows)))
+            summary.append((st, len(chosen), len(rows), raw_counts.get(st, len(rows))))
             grand_total += len(chosen)
     finally:
         wh.close()
 
-    print(f"Case {args.case_id}: {total_rows:,} artifacts across {len(source_types)} source type(s)")
+    raw_total = sum(raw_counts.values())
+    print(f"Case {args.case_id}: {raw_total:,} artifacts across {len(source_types)} source type(s)")
     print(f"Wrote {grand_total:,} rows to {out_dir}/")
-    for st, written, of_total in sorted(summary, key=lambda x: -x[2]):
-        note = f"{written:,} of {of_total:,}" if written != of_total else f"{written:,} (all)"
+    for st, written, of_filtered, of_raw in sorted(summary, key=lambda x: -x[3]):
+        if written == of_raw:
+            note = f"{written:,} (all)"
+        elif written == of_filtered:
+            note = f"{written:,} of {of_raw:,} (rest filtered out - not JSON, for cache)"
+        else:
+            note = f"{written:,} of {of_filtered:,} kept, {of_raw:,} raw"
         print(f"  {st:<18} {note}")
     print()
     print("Fill in the `label` column with the true category for each row, then:")
