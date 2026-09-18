@@ -280,17 +280,22 @@ function newCasePanel(){
   const desc=el('textarea',{placeholder:'optional'});
   const kw=el('textarea',{placeholder:'gift card, payment, username_of_interest'});
   const op=el('input',{placeholder:'e.g. Det. A. Smith',style:'width:300px'});
+  const cid=el('input',{placeholder:'leave blank to generate one',style:'width:300px'});
   box.append(
     el('label',{},'Case name'), name,
     el('label',{},'Description (optional)'), desc,
     el('label',{},'Investigation keywords (comma or newline separated)'), kw,
-    el('label',{},'Operator name (recorded in the chain of custody)'), op);
+    el('label',{},'Operator name (recorded in the chain of custody)'), op,
+    el('label',{},'Case ID (optional — or the folder name of evidence dd-collect already produced, to register it)'),
+    cid);
 
   box.append(el('h2',{},'Evidence sources'),
     el('div',{class:'hint',style:'margin-bottom:4px'},
       'A disk/memory image, or a folder of evidence already extracted - add as many as '+
       'this case needs (a suspect\'s laptop AND a victim\'s phone, say). More can be '+
-      'added later from the case page too.'));
+      'added later from the case page too. Leave this empty if the Case ID above already '+
+      'points at evidence dd-collect (the live-collection tool) produced elsewhere - that '+
+      'evidence is already signed, nothing here needs to acquire it again.'));
   const sourcesWrap=el('div',{});
   const rows=[];
   function addRow(){
@@ -312,7 +317,7 @@ function newCasePanel(){
     let caseId;
     try{
       const meta=await api('/cases',{method:'POST',body:JSON.stringify({
-        name:name.value.trim(), description:desc.value, keywords:kw.value})});
+        case_id:cid.value.trim()||null, name:name.value.trim(), description:desc.value, keywords:kw.value})});
       caseId=meta.case_id;
     }catch(e){
       alert('Could not create the case: '+e.message);

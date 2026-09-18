@@ -18,6 +18,22 @@ def test_create_case_needs_no_evidence(tmp_path):
     assert not layout.manifest.is_file()  # still no evidence - that's fine
 
 
+def test_create_case_registers_pre_existing_dd_collect_evidence(tmp_path):
+    """The OTHER supported flow, still needed: dd-collect (the live
+    collector) already produced a fully-signed case elsewhere - this just
+    attaches a name/keywords to it, and must never touch its manifest. A
+    real regression caught while building the unified New Case page: it
+    initially had no way to name an EXISTING case_id at all, only to
+    generate a fresh one for acquiring new evidence."""
+    layout = CaseLayout(tmp_path, "collector_case_123")
+    layout.dir.mkdir(parents=True)
+    layout.manifest.write_text('{"fake": "already-signed manifest"}')
+
+    meta = create_case(tmp_path, "collector_case_123", "Registered dd-collect case", "", ["token"])
+    assert meta.case_id == "collector_case_123"
+    assert layout.manifest.read_text() == '{"fake": "already-signed manifest"}'  # untouched
+
+
 def test_create_case_generates_an_id_when_none_given(tmp_path):
     meta = create_case(tmp_path, None, "Auto ID case")
     assert meta.case_id  # non-empty, auto-generated
