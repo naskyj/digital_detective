@@ -427,9 +427,18 @@ async function vCase(m){
   // processed they move into the explorer's left nav below (so they aren't
   // duplicated); until then they're shown here on their own.
   if(!processed && d.evidence.apps.length){
-    m.append(cacheFilesPanel(id, d.evidence.apps));
-    m.append(localStorageFilesPanel(id, d.evidence.apps));
-    m.append(databaseFilesPanel(id, d.evidence.apps));
+    const preAppSel=el('select',{}, ...d.evidence.apps.map(a=>el('option',{value:a},a)));
+    const preFilesWrap=el('div',{});
+    function renderPreFiles(){
+      preFilesWrap.innerHTML='';
+      preFilesWrap.append(cacheFilesPanel(id, preAppSel.value),
+        localStorageFilesPanel(id, preAppSel.value), databaseFilesPanel(id, preAppSel.value));
+    }
+    preAppSel.onchange=renderPreFiles;
+    m.append(el('div',{class:'panel',style:'margin-bottom:0'},
+      el('label',{},'App'), preAppSel));
+    m.append(preFilesWrap);
+    renderPreFiles();
   }
 
   // --- the primary action panel ------------------------------------------
@@ -482,7 +491,7 @@ async function vCase(m){
   // count - the same drill-down shape a tool like Magnet AXIOM uses) driving
   // a right-hand content pane. ---------------------------------------------
   if(processed){
-    const explorer=await caseExplorer(id, w, d.evidence.apps);
+    const explorer=await caseExplorer(id, w);
     explorer.id='browser'; m.append(explorer);
   }
 }
@@ -494,7 +503,16 @@ const SRC_LABELS = {
   memory_network:'Memory Network', memory_artifact:'Memory Artifacts',
 };
 
-async function caseExplorer(id, w, evidenceApps){
+// Which source_types have a raw physical-FILES view (as opposed to only the
+// parsed-content Artifacts view), and which explorerSelection.type each one
+// answers to - the files-vs-content distinction ChromeCacheView-style
+// tooling normally gives you. Not every source_type has one (IndexedDB,
+// Session Storage, Preferences, ... don't yet) - those stay a single leaf
+// that goes straight to Artifacts, same as before.
+const FILES_PANEL_TYPE = {cache:'cachefiles', local_storage:'lsfiles', cookies:'dbfiles'};
+const FILES_PANEL_FN = {cachefiles:cacheFilesPanel, lsfiles:localStorageFilesPanel, dbfiles:databaseFilesPanel};
+
+async function caseExplorer(id, w){
   const nav=el('div',{class:'panel',style:'width:240px;flex-shrink:0;align-self:flex-start;position:sticky;top:0;max-height:calc(100vh - 140px);overflow:auto'});
   const content=el('div',{style:'flex:1;min-width:0'});
   const wrap=el('div',{style:'display:flex;gap:16px;align-items:flex-start'}, nav, content);
@@ -516,8 +534,13 @@ async function caseExplorer(id, w, evidenceApps){
       count!=null?el('span',{style:(active?'':'color:var(--muted)')+';flex-shrink:0'},count.toLocaleString()):'');
   }
   const expandedApps = new Set();  // collapsed by default; persists across renderNav() calls
+  const expandedSources = new Set();  // "app/source_type" keys, same idea one level down
   function toggleExpand(app){
     if(expandedApps.has(app)) expandedApps.delete(app); else expandedApps.add(app);
+    renderNav();
+  }
+  function toggleSourceExpand(k){
+    if(expandedSources.has(k)) expandedSources.delete(k); else expandedSources.add(k);
     renderNav();
   }
 
@@ -527,9 +550,7 @@ async function caseExplorer(id, w, evidenceApps){
     content.innerHTML=''; content.append(await paneFor(next));
   }
   async function paneFor(s){
-    if(s.type==='cache') return cacheFilesPanel(id, evidenceApps);
-    if(s.type==='lsfiles') return localStorageFilesPanel(id, evidenceApps);
-    if(s.type==='dbfiles') return databaseFilesPanel(id, evidenceApps);
+    if(FILES_PANEL_FN[s.type]) return FILES_PANEL_FN[s.type](id, s.app);
     if(s.type==='source') return browser(id, w.by_category.map(c=>c.category).filter(Boolean),
       {app:s.app, source_type:s.source_type});
     return overviewPanel(id, w);
@@ -540,24 +561,41 @@ async function caseExplorer(id, w, evidenceApps){
     const s=state.explorerSelection;
     nav.append(el('div',{style:'font-weight:700;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:2px 0 8px'},'Explore'));
     nav.append(navRow('Overview', null, s.type==='overview', ()=>select({type:'overview'}), 0));
-    nav.append(navRow('Cache files', null, s.type==='cache', ()=>select({type:'cache'}), 0));
-    nav.append(navRow('Local Storage files', null, s.type==='lsfiles', ()=>select({type:'lsfiles'}), 0));
-    nav.append(navRow('Database files', null, s.type==='dbfiles', ()=>select({type:'dbfiles'}), 0));
     nav.append(el('div',{style:'height:1px;background:var(--line);margin:10px 0'}));
     tree.apps.forEach(a=>{
       // Collapsed by default (a dropdown, not an always-expanded dump);
       // stays open once toggled, and auto-opens for the app currently
       // being browsed so navigating into one of its sources doesn't hide it.
-      const isOpen = expandedApps.has(a.app) || (s.type==='source' && s.app===a.app);
+      const appActiveBelow = (s.type==='source' || FILES_PANEL_FN[s.type]) && s.app===a.app;
+      const isOpen = expandedApps.has(a.app) || appActiveBelow;
       const row = navRow(a.app, a.total, s.type==='source'&&s.app===a.app&&!s.source_type,
         ()=>select({type:'source', app:a.app, source_type:null}), 0, isOpen?'▾':'▸');
       const chevron = row.querySelector('.nav-chevron');
       chevron.onclick = (e)=>{ e.stopPropagation(); toggleExpand(a.app); };
       nav.append(row);
-      if(isOpen) a.sources.forEach(src=>{
-        const active = s.type==='source' && s.app===a.app && s.source_type===src.source_type;
-        nav.append(navRow(SRC_LABELS[src.source_type]||src.source_type, src.n, active,
-          ()=>select({type:'source', app:a.app, source_type:src.source_type}), 1));
+      if(!isOpen) return;
+      a.sources.forEach(src=>{
+        const filesType = FILES_PANEL_TYPE[src.source_type];
+        const artifactsActive = s.type==='source' && s.app===a.app && s.source_type===src.source_type;
+        if(!filesType){
+          nav.append(navRow(SRC_LABELS[src.source_type]||src.source_type, src.n, artifactsActive,
+            ()=>select({type:'source', app:a.app, source_type:src.source_type}), 1));
+          return;
+        }
+        // A source with a raw-files view: two children, Files (physical
+        // files - every content type, not just what got parsed) and
+        // Artifacts (the parsed content, same as every other source).
+        const filesActive = s.type===filesType && s.app===a.app;
+        const srcKey=a.app+'/'+src.source_type;
+        const srcOpen = expandedSources.has(srcKey) || filesActive || artifactsActive;
+        const srcRow = navRow(SRC_LABELS[src.source_type]||src.source_type, src.n, false,
+          ()=>toggleSourceExpand(srcKey), 1, srcOpen?'▾':'▸');
+        srcRow.querySelector('.nav-chevron').onclick=(e)=>{e.stopPropagation(); toggleSourceExpand(srcKey);};
+        nav.append(srcRow);
+        if(!srcOpen) return;
+        nav.append(navRow('Files', null, filesActive, ()=>select({type:filesType, app:a.app}), 2));
+        nav.append(navRow('Artifacts', null, artifactsActive,
+          ()=>select({type:'source', app:a.app, source_type:src.source_type}), 2));
       });
     });
     if(!tree.apps.length) nav.append(el('div',{class:'hint'},'No artifact breakdown available.'));
@@ -842,15 +880,16 @@ function fmtBytes(n){
   return (n/1048576).toFixed(1)+' MB';
 }
 
-function cacheFilesPanel(id, apps){
+function cacheFilesPanel(id, app){
   // A ChromeCacheView-style inventory: one row per cache entry (the HTTP
-  // disk cache and the Cache API alike), naming the exact physical file and
-  // byte offset behind it - not just the logical cache key - so it's clear
-  // which file on the evidence copy each row actually came from. Reads
-  // straight off the evidence directory via /cache-files, independent of
-  // whether analysis has run.
+  // disk cache and the Cache API alike) - EVERY content type (JS, CSS,
+  // HTML, images, fonts, JSON, ...), not just the JSON the artifact/CSV
+  // views filter to, since this is about which physical FILES exist, not
+  // their parsed content - naming the exact physical file and byte offset
+  // behind it, not just the logical cache key. Reads straight off the
+  // evidence directory via /cache-files, independent of whether analysis
+  // has run.
   const wrap=el('div',{class:'panel'});
-  const appSel=el('select',{}, ...apps.map(a=>el('option',{value:a},a)));
   const q=el('input',{placeholder:'search URL or key',style:'flex:1;min-width:180px'});
   const count=el('div',{class:'hint'});
   const out=el('div',{class:'scroll',style:'margin-top:10px'});
@@ -860,7 +899,7 @@ function cacheFilesPanel(id, apps){
 
   async function load(){
     out.innerHTML='<div class="muted" style="padding:10px">loading…</div>';
-    const p=new URLSearchParams({app:appSel.value, limit:String(limit), offset:String(offset)});
+    const p=new URLSearchParams({app, limit:String(limit), offset:String(offset)});
     if(q.value) p.set('q', q.value);
     let d;
     try{ d=await api('/cases/'+id+'/cache-files?'+p); }
@@ -896,16 +935,15 @@ function cacheFilesPanel(id, apps){
     });
     t.append(tb); out.innerHTML=''; out.append(t);
   }
-  appSel.onchange=()=>{offset=0; load();};
   prevBtn.onclick=()=>{offset=Math.max(0,offset-limit); load();};
   nextBtn.onclick=()=>{offset+=limit; load();};
   let tmo; q.oninput=()=>{clearTimeout(tmo); tmo=setTimeout(()=>{offset=0; load();},300);};
-  wrap.append(el('h2',{style:'margin-top:0'},'Cache files'),
+  wrap.append(el('h2',{style:'margin-top:0'},app+' → Cache → Files'),
     el('div',{class:'hint',style:'margin-bottom:8px'},
-      'Every entry in the HTTP disk cache and the Cache API, with the exact physical '+
-      'file behind it - the same view a tool like ChromeCacheView gives, built on the '+
-      'same evidence copy everything else here reads from.'),
-    el('div',{class:'row'}, appSel, q), count, out,
+      'Every entry in the HTTP disk cache and the Cache API, every content type included - '+
+      'the same view a tool like ChromeCacheView gives, built on the same evidence copy '+
+      'everything else here reads from.'),
+    el('div',{class:'row'}, q), count, out,
     el('div',{class:'row',style:'margin-top:8px'}, prevBtn, nextBtn));
   load();
   return wrap;
@@ -928,7 +966,7 @@ async function vCacheEntry(m){
     style:'width:100%;height:calc(100vh - 110px);border:1px solid var(--line);border-radius:8px;background:#fff'}));
 }
 
-function localStorageFilesPanel(id, apps){
+function localStorageFilesPanel(id, app){
   // The Local Storage equivalent of cacheFilesPanel - but a LevelDB key
   // isn't pinned to one physical file the way a cache entry is (compaction
   // moves it between .ldb files over time), so this lists the physical
@@ -936,13 +974,12 @@ function localStorageFilesPanel(id, apps){
   // one row per key. "Open" expands a raw record dump read directly from
   // that one file - real .ldb/.log parsing, not the merged logical view.
   const wrap=el('div',{class:'panel'});
-  const appSel=el('select',{}, ...apps.map(a=>el('option',{value:a},a)));
   const out=el('div',{class:'scroll',style:'margin-top:10px'});
 
   async function load(){
     out.innerHTML='<div class="muted" style="padding:10px">loading…</div>';
     let d;
-    try{ d=await api('/cases/'+id+'/localstorage-files?app='+encodeURIComponent(appSel.value)); }
+    try{ d=await api('/cases/'+id+'/localstorage-files?app='+encodeURIComponent(app)); }
     catch(e){ out.innerHTML=''; out.append(el('div',{class:'hint'},'Could not load: '+e.message)); return; }
     if(!d.files.length){ out.innerHTML=''; out.append(el('div',{class:'hint'},'No Local Storage files found for this app.')); return; }
     const t=el('table',{},el('thead',{},el('tr',{},
@@ -953,7 +990,7 @@ function localStorageFilesPanel(id, apps){
       let recOffset=0; const recLimit=100;
       async function loadRecords(){
         recBox.innerHTML='<div class="muted">loading…</div>';
-        const rp=new URLSearchParams({app:appSel.value, file:f.filename, limit:String(recLimit), offset:String(recOffset)});
+        const rp=new URLSearchParams({app, file:f.filename, limit:String(recLimit), offset:String(recOffset)});
         const rd=await api('/cases/'+id+'/localstorage-files/open?'+rp);
         recBox.innerHTML='';
         recBox.append(el('div',{class:'hint'},
@@ -979,29 +1016,27 @@ function localStorageFilesPanel(id, apps){
     });
     t.append(tb); out.innerHTML=''; out.append(t);
   }
-  appSel.onchange=load;
-  wrap.append(el('h2',{style:'margin-top:0'},'Local Storage files'),
+  wrap.append(el('h2',{style:'margin-top:0'},app+' → Local Storage → Files'),
     el('div',{class:'hint',style:'margin-bottom:8px'},
       'Every physical .ldb/.log file in this app\'s Local Storage store, read directly - '+
       'raw records from that one file, including deleted/overwritten entries still '+
       'physically present, not the merged logical view the analysis pipeline uses.'),
-    el('div',{class:'row'}, appSel), out);
+    out);
   load();
   return wrap;
 }
 
-function databaseFilesPanel(id, apps){
+function databaseFilesPanel(id, app){
   // Raw SQLite database browsing - currently the one database file the
   // evidence layout defines (Cookies), listed with its tables and row
   // counts; "Open" expands a paginated raw row dump for a chosen table.
   const wrap=el('div',{class:'panel'});
-  const appSel=el('select',{}, ...apps.map(a=>el('option',{value:a},a)));
   const out=el('div',{class:'scroll',style:'margin-top:10px'});
 
   async function load(){
     out.innerHTML='<div class="muted" style="padding:10px">loading…</div>';
     let d;
-    try{ d=await api('/cases/'+id+'/db-files?app='+encodeURIComponent(appSel.value)); }
+    try{ d=await api('/cases/'+id+'/db-files?app='+encodeURIComponent(app)); }
     catch(e){ out.innerHTML=''; out.append(el('div',{class:'hint'},'Could not load: '+e.message)); return; }
     if(!d.files.length){ out.innerHTML=''; out.append(el('div',{class:'hint'},'No database files found for this app.')); return; }
     const t=el('table',{},el('thead',{},el('tr',{},
@@ -1012,7 +1047,7 @@ function databaseFilesPanel(id, apps){
       let rOffset=0; const rLimit=100;
       async function loadRows(){
         rowBox.innerHTML='<div class="muted">loading…</div>';
-        const rp=new URLSearchParams({app:appSel.value, path:f.path, table:tbl_.table, limit:String(rLimit), offset:String(rOffset)});
+        const rp=new URLSearchParams({app, path:f.path, table:tbl_.table, limit:String(rLimit), offset:String(rOffset)});
         const rd=await api('/cases/'+id+'/db-files/open?'+rp);
         rowBox.innerHTML='';
         rowBox.append(el('div',{class:'hint'},
@@ -1037,12 +1072,11 @@ function databaseFilesPanel(id, apps){
     }));
     t.append(tb); out.innerHTML=''; out.append(t);
   }
-  appSel.onchange=load;
-  wrap.append(el('h2',{style:'margin-top:0'},'Database files'),
+  wrap.append(el('h2',{style:'margin-top:0'},app+' → Cookies → Files'),
     el('div',{class:'hint',style:'margin-bottom:8px'},
       'Raw SQLite tables from database-backed evidence files (Cookies today), read '+
       'directly - independent of what the named parser normally extracts from them.'),
-    el('div',{class:'row'}, appSel), out);
+    out);
   load();
   return wrap;
 }
