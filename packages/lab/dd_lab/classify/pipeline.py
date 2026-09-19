@@ -35,7 +35,9 @@ def classify_stream(
     """Attach a ClassificationResult to each artifact as it flows past."""
     classifier = classifier or Classifier()
     for a in artifacts:
-        a.classification = classifier.classify(a.key, a.value, a.value_type)
+        a.classification = classifier.classify(
+            a.key, a.value, a.value_type, app=a.app, source_type=a.source_type, deleted=a.deleted
+        )
         if tally is not None:
             tally.classified += 1
             cat = str(a.classification.category)
@@ -52,7 +54,14 @@ def classify_warehouse(
     for rows in wh.iter_for_classification():
         updates = []
         for r in rows:
-            cr = classifier.classify(r["key"], r["value"], r["value_type"])
+            cr = classifier.classify(
+                r["key"],
+                r["value"],
+                r["value_type"],
+                app=r["app"],
+                source_type=r["source_type"],
+                deleted=r["deleted"],
+            )
             cat = str(cr.category)
             result.by_category[cat] = result.by_category.get(cat, 0) + 1
             updates.append(

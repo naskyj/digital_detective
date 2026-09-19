@@ -14,7 +14,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 
 from dd_core.enums import ArtifactCategory as C
-from dd_core.enums import ValueType
+from dd_core.enums import SourceType, ValueType
 from dd_core.schema import ClassificationResult
 from dd_lab.classify.entropy import entropy_vote
 from dd_lab.classify.ner import ner_vote
@@ -62,18 +62,32 @@ class Classifier:
         self._model_voter = model_voter  # callable(key, value) -> (C, float) | None
 
     def classify(
-        self, key: str, value: str, value_type: ValueType | str = ValueType.STRING
+        self,
+        key: str,
+        value: str,
+        value_type: ValueType | str = ValueType.STRING,
+        *,
+        app: str | None = None,
+        source_type: SourceType | str | None = None,
+        deleted: bool = False,
     ) -> ClassificationResult:
+        # app/source_type/deleted are plumbing added for
+        # classifier_backend_spec.md - all optional/keyword-only so every
+        # existing 3-positional-arg call site (production and tests) is
+        # unaffected. Not yet used for any voting decision; source_type-based
+        # routing and app-scoped rules land in later phases. `deleted` will
+        # drive a post-combine relevance boost once that phase lands.
+        del source_type, deleted
         scores: dict[C, float] = defaultdict(float)
         spans: list[str] = []
 
-        rx = regex_hits(key, value)
+        rx = regex_hits(key, value, app)
         regex_vote = _best(rx)
         for hit in rx:
             scores[hit.category] += _W_REGEX * hit.weight
             spans.append(hit.span)
 
-        kw = keyword_hits(key, value)
+        kw = keyword_hits(key, value, app)
         keyword_vote = _best(kw)
         for hit in kw:
             scores[hit.category] += _W_KEYWORD * hit.weight

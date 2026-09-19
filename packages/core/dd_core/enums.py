@@ -34,7 +34,18 @@ class ValueType(StrEnum):
 
 
 class ArtifactCategory(StrEnum):
-    """Investigation-relevant categories the NLP ensemble assigns."""
+    """Investigation-relevant categories the NLP ensemble assigns.
+
+    MEDIA, DRAFT, NAVIGATION_ACTIVITY, ACCOUNT_SETTINGS, NOTIFICATION and
+    CONTACT_PII were added for the collaborator's classifier_backend_spec.md
+    taxonomy (identity/communication/timestamp/contact_pii/media/credential/
+    navigation_activity/draft/geolocation/account_settings/notification/
+    financial) - added additively rather than replacing the existing set, so
+    675k+ already-classified real warehouse rows, the UI, and the report
+    builder don't need to change. The spec's identity/communication/
+    credential/geolocation/financial/timestamp map onto USER/CHAT_CONTENT/
+    CREDENTIAL/LOCATION_INFO/PAYMENT_INFO/TIMESTAMP below, unchanged.
+    """
 
     CHAT_CONTENT = "CHAT_CONTENT"
     GAME_DETAIL = "GAME_DETAIL"
@@ -46,6 +57,12 @@ class ArtifactCategory(StrEnum):
     NETWORK_DETAIL = "NETWORK_DETAIL"
     CREDENTIAL = "CREDENTIAL"
     USER = "USER"
+    CONTACT_PII = "CONTACT_PII"
+    MEDIA = "MEDIA"
+    DRAFT = "DRAFT"
+    NAVIGATION_ACTIVITY = "NAVIGATION_ACTIVITY"
+    ACCOUNT_SETTINGS = "ACCOUNT_SETTINGS"
+    NOTIFICATION = "NOTIFICATION"
     GENERAL = "GENERAL"
 
 

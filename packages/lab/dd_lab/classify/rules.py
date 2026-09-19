@@ -23,8 +23,14 @@ CATEGORY_PRIORITY = [
     C.LOCATION_INFO,
     C.CHAT_CONTENT,
     C.USER,
+    C.CONTACT_PII,
     C.GROUP_DETAIL,
     C.GAME_DETAIL,
+    C.MEDIA,
+    C.DRAFT,
+    C.NAVIGATION_ACTIVITY,
+    C.ACCOUNT_SETTINGS,
+    C.NOTIFICATION,
     C.NETWORK_DETAIL,
     C.SYSTEM_DETAIL,
     C.TIMESTAMP,
@@ -156,7 +162,7 @@ def _norm_key_tail(key: str) -> str:
     return _PUNCT.sub("", "".join(segs[-2:]).lower())
 
 
-def regex_hits(key: str, value: str) -> list[RuleHit]:
+def regex_hits(key: str, value: str, app: str | None = None) -> list[RuleHit]:
     hits: list[RuleHit] = []
     sample = value[:4000]
     for cat, patterns in _VALUE_PATTERNS.items():
@@ -164,10 +170,14 @@ def regex_hits(key: str, value: str) -> list[RuleHit]:
             m = pat.search(sample)
             if m:
                 hits.append(RuleHit(cat, weight, m.group(0)[:80]))
+    # `app` is accepted here (and by keyword_hits below) so both functions
+    # can grow the per-app profile lookup (classifier_backend_spec.md) in a
+    # later phase without another signature change; a no-op until then.
+    del app
     return hits
 
 
-def keyword_hits(key: str, value: str) -> list[RuleHit]:
+def keyword_hits(key: str, value: str, app: str | None = None) -> list[RuleHit]:
     hits: list[RuleHit] = []
     ktail = _norm_key_tail(key)
     for cat, kws in _KEY_KEYWORDS.items():
@@ -179,4 +189,5 @@ def keyword_hits(key: str, value: str) -> list[RuleHit]:
         best = max((w for sub, w in kws if sub in vlow), default=0.0)
         if best:
             hits.append(RuleHit(cat, best, "value-keyword"))
+    del app
     return hits

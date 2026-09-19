@@ -287,11 +287,17 @@ class Warehouse:
         return self.con.execute("SELECT count(*) FROM artifacts").fetchone()[0]
 
     def iter_for_classification(self, batch_size: int = 20000) -> Iterator[list[dict]]:
-        """Yield batches of {artifact_id, key, value, value_type} for re-classification."""
+        """Yield batches of {artifact_id, key, value, value_type, app,
+        source_type, deleted} for re-classification. app/source_type/deleted
+        are needed by Classifier.classify()'s routing/gating (see
+        classifier_backend_spec.md's implementation) - without them,
+        re-classifying an already-ingested warehouse would skip every
+        source-type-aware rule that the ingest-time classify_stream() path
+        gets for free from the NormalizedArtifact it's already holding."""
         offset = 0
         while True:
             rows = self.query(
-                "SELECT artifact_id, key, value, value_type FROM artifacts "
+                "SELECT artifact_id, key, value, value_type, app, source_type, deleted FROM artifacts "
                 f"ORDER BY artifact_id LIMIT {batch_size} OFFSET {offset}"
             )
             if not rows:

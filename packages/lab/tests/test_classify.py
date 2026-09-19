@@ -121,3 +121,32 @@ def test_relevant_true_for_a_bare_timestamp_value_type():
     assert r.category == "TIMESTAMP"
     assert r.relevant is True
     assert r.relevance_score > 0.0
+
+
+# --------------------------------------------------------------- app/source_type/deleted plumbing
+# classifier_backend_spec.md phase 1: Classifier.classify() grows optional
+# app/source_type/deleted kwargs. This phase is pure plumbing - none of them
+# drive any voting/gating decision yet (that lands in later phases), so
+# passing them must be a strict no-op against today's behavior.
+
+
+def test_new_kwargs_are_accepted_and_dont_change_the_result():
+    from dd_core.enums import SourceType
+
+    key, value = "cache.body.auth.token", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIx.abcdEF"
+    baseline = C.classify(key, value)
+    with_kwargs = C.classify(
+        key, value, app="discord", source_type=SourceType.CACHE, deleted=True
+    )
+    assert with_kwargs.category == baseline.category
+    assert with_kwargs.confidence == baseline.confidence
+    assert with_kwargs.relevant == baseline.relevant
+    assert with_kwargs.relevance_score == baseline.relevance_score
+
+
+def test_new_kwargs_accept_plain_strings_too():
+    # pipeline.py's classify_warehouse() re-classify path reads source_type
+    # back out of DuckDB as a plain string, not a SourceType instance - the
+    # signature must tolerate that, not just the enum.
+    r = C.classify("k", "v", app="roblox", source_type="cache", deleted=False)
+    assert r.category  # didn't raise, produced a real result
