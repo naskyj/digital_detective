@@ -8,9 +8,17 @@ entirely - both halves are sanitised SEPARATELY then joined instead)."""
 from __future__ import annotations
 
 from dd_core.evidence import safe_name
-from dd_lab.api.main import _source_label_for_app
 from dd_lab.case import EvidenceSourceMeta
 from dd_lab.imaging.acquire import source_app_prefix
+
+# Still a module-level import (this helper isn't worth a per-test deferred
+# import), but dd_lab.api.main constructs a real JobManager (api/jobs.py) as
+# a side effect of import, which unconditionally marks any currently running
+# job as interrupted - see conftest.py's own docstring for the real incident
+# this caused. Safe here only because pytest always imports a directory's
+# conftest.py (which sets DD_CONFIG_DIR) before collecting sibling test
+# files, never rely on that ordering outside a test suite.
+from dd_lab.api.main import _source_label_for_app
 
 
 def _source(label: str) -> EvidenceSourceMeta:
