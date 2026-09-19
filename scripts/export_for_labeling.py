@@ -8,9 +8,12 @@ One CSV per source_type (cache.csv, local_storage.csv, indexeddb.csv,
 memory_string.csv, ...) so a labeller can work through one evidence type at a
 time. Each row's `text` column is exactly the string the trained model will
 see (`[<source_type>] <key> = <value>` — see MODEL_TRAINING.md's "Categories"
-section), and `category`/`confidence` show what the CURRENT rule/keyword/NER/
-model ensemble already predicted, so filling in `label` with the true
-category turns this directly into a scoring set for scripts/score_labels.py.
+section). `category`/`confidence` AND `relevant`/`relevance_score` show what
+the CURRENT rule/keyword/NER/entropy(/model, once trained) ensemble already
+predicted on both axes - filling in `label` with the true category turns this
+directly into a scoring set for scripts/score_labels.py; `relevant`/
+`relevance_score` are there so the same export also supports hand-labelling
+for a binary relevance model, without a second, separately-shaped export.
 
 cache.csv is the one exception, a different shape entirely: one row per
 physical cache entry (or one element of a JSON array-of-objects body), not
@@ -47,6 +50,7 @@ for pkg in ("core", "lab"):
 
 _FIELDS = [
     "artifact_id", "app", "source_type", "category", "confidence",
+    "relevant", "relevance_score",
     "key", "value", "text", "record_ts", "source_file", "deleted", "latest", "label",
 ]
 
@@ -81,8 +85,8 @@ def _load_rows(wh, source_type: str) -> list[dict]:
     from dd_lab.parsers.base import seq_from_locator
 
     rows = wh.query(
-        "SELECT artifact_id, app, source_type, category, confidence, key, value, "
-        "record_ts, source_file, deleted, source_locator FROM artifacts WHERE source_type = ? "
+        "SELECT artifact_id, app, source_type, category, confidence, relevant, relevance_score, "
+        "key, value, record_ts, source_file, deleted, source_locator FROM artifacts WHERE source_type = ? "
         "ORDER BY app, key",
         [source_type],
     )
