@@ -170,6 +170,27 @@ def dump_process_memory(image: Path, pid: int, out_dir: Path, timeout: int = 900
     return dump
 
 
+# Columns that carry a real event timestamp rather than an opaque value -
+# confirmed against a real pslist run: Volatility's own JSON rendering emits
+# these as ISO8601 with a UTC offset ("2026-09-13T14:04:02+00:00"), directly
+# parseable via datetime.fromisoformat(), no reformatting needed. Populating
+# record_ts on these specific columns is what makes a process's lifetime show
+# up in v_timeline/the report's timeline section at all - before this, every
+# Volatility-derived row (and every memory-string row) had record_ts=None,
+# so process start/exit was invisible to "reconstruct a timeline" despite
+# memory being the largest data source in a real case.
+_TIMESTAMP_COLS = {"CreateTime", "ExitTime"}
+
+
+def _parse_vol_timestamp(col: str, val: object) -> datetime | None:
+    if col not in _TIMESTAMP_COLS:
+        return None
+    try:
+        return datetime.fromisoformat(str(val))
+    except ValueError:
+        return None
+
+
 def analyse_image(
     case_id: str, app: str, image: Path, evidence_root: Path
 ) -> Iterator[NormalizedArtifact]:
@@ -183,6 +204,7 @@ def analyse_image(
             for col, val in row.items():
                 if val in (None, "", "-", "N/A") or col.startswith("__"):
                     continue
+                record_ts = _parse_vol_timestamp(col, val)
                 yield NormalizedArtifact(
                     artifact_id=NormalizedArtifact.make_id(
                         case_id, stype, source_file, f"{plugin}:{i}", col
@@ -190,5 +212,6 @@ def analyse_image(
                     case_id=case_id, app=app, source_type=stype,
                     source_file=source_file, source_locator=f"{plugin}#{i}",
                     key=f"{prefix}.{col}", value=str(val)[:8000],
-                    value_type=ValueType.STRING, extracted_ts=now,
+                    value_type=ValueType.TIMESTAMP if record_ts else ValueType.STRING,
+                    record_ts=record_ts, extracted_ts=now,
                 )
