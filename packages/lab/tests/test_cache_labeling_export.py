@@ -25,6 +25,7 @@ from dd_lab.parsers.cache import (
     CacheLabelRow,
     _binary_placeholder,
     _classify_body_for_labeling,
+    _flatten_newlines,
     iter_cache_entries_for_labeling,
     list_cache_files,
 )
@@ -105,6 +106,13 @@ def test_array_of_arrays_is_one_row_not_exploded():
     body = json.dumps([[1, 2], [3, 4]])
     kind, values = _classify_body_for_labeling(body)
     assert kind == "json_array"
+
+
+def test_flatten_newlines_escapes_lf_cr_and_crlf():
+    assert _flatten_newlines("line1\nline2") == "line1\\nline2"
+    assert _flatten_newlines("line1\r\nline2") == "line1\\nline2"
+    assert _flatten_newlines("line1\rline2") == "line1\\nline2"
+    assert _flatten_newlines("no newlines here") == "no newlines here"
 
 
 def test_binary_placeholder_names_content_type_and_size():
@@ -250,7 +258,24 @@ def test_text_rows_are_capped_to_a_short_sample(export_rows):
     if not text_rows:
         pytest.skip("no non-JSON text cache entry found in this profile right now")
     for r in text_rows:
-        assert len(r.value) <= _TEXT_SAMPLE_CHARS + 40  # + room for the truncation marker
+        # newline-escaping (see test_no_row_ever_contains_a_raw_newline)
+        # can expand the sample beyond the raw character cap - one \n per
+        # embedded newline, so a generous multiple covers even a densely
+        # multi-line source file's worth of escaping.
+        assert len(r.value) <= _TEXT_SAMPLE_CHARS * 2 + 40
+
+
+@_skip_if_unavailable
+@pytest.mark.slow
+def test_no_row_ever_contains_a_raw_newline(export_rows):
+    """The actual real bug this guards against: a naive line-count (`wc -l`,
+    or a non-RFC4180-compliant viewer) miscounted a correctly-parsed
+    6,863-row export as 10,730+ "rows", entirely because of literal
+    newlines embedded inside quoted text-body samples. Every value must be
+    single-line from here on, regardless of how the file gets opened."""
+    for r in export_rows:
+        assert "\n" not in r.value
+        assert "\r" not in r.value
 
 
 @_skip_if_unavailable

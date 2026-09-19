@@ -525,6 +525,21 @@ def _cap_body(text: str, limit: int) -> str:
     return text
 
 
+def _flatten_newlines(text: str) -> str:
+    """A raw JS/CSS/HTML/plain-text body sample can contain literal
+    newlines - a properly RFC4180-quoted CSV field handles that fine, but a
+    naive line-counting check (`wc -l`) or a non-compliant viewer doesn't,
+    and will report a wildly inflated "row count" that has nothing to do
+    with the actual number of CSV records (confirmed on a real export: a
+    correctly-parsed 6,863-row file counted as 10,730+ raw lines). JSON
+    bodies never hit this - json.dumps already escapes embedded newlines
+    into a literal two-character "\\n" itself. Escaping here the same way,
+    rather than collapsing to a space, keeps the sample byte-faithful
+    (recoverable, and not silently merging two distinct tokens together)
+    for a partner doing exact content matching against the raw dump."""
+    return text.replace("\r\n", "\\n").replace("\r", "\\n").replace("\n", "\\n")
+
+
 def _classify_body_for_labeling(text: str) -> tuple[str, list[str]]:
     """(body_kind, [row values]) for one decoded response body - one value
     unless body_kind is "json_array_element", in which case there's one per
@@ -620,6 +635,7 @@ def _describe_entry_for_labeling(
         for i, v in enumerate(values):
             yield CacheLabelRow(**common, body_kind=body_kind, array_index=i, value=_cap_body(v, _JSON_BODY_CHARS))
     elif body_kind == "text":
-        yield CacheLabelRow(**common, body_kind=body_kind, value=_cap_body(values[0], _TEXT_SAMPLE_CHARS))
+        sample = _flatten_newlines(_cap_body(values[0], _TEXT_SAMPLE_CHARS))
+        yield CacheLabelRow(**common, body_kind=body_kind, value=sample)
     else:
         yield CacheLabelRow(**common, body_kind=body_kind, value=_cap_body(values[0], _JSON_BODY_CHARS))
