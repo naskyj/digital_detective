@@ -17,6 +17,7 @@ from dd_core.enums import ArtifactCategory as C
 from dd_core.enums import SourceType, ValueType
 from dd_core.schema import ClassificationResult
 from dd_lab.classify.entropy import entropy_vote
+from dd_lab.classify.gates import boosted_relevance, is_structurally_empty
 from dd_lab.classify.ner import ner_vote
 from dd_lab.classify.rules import CATEGORY_PRIORITY, keyword_hits, regex_hits
 
@@ -71,13 +72,23 @@ class Classifier:
         source_type: SourceType | str | None = None,
         deleted: bool = False,
     ) -> ClassificationResult:
-        # app/source_type/deleted are plumbing added for
-        # classifier_backend_spec.md - all optional/keyword-only so every
-        # existing 3-positional-arg call site (production and tests) is
-        # unaffected. Not yet used for any voting decision; source_type-based
-        # routing and app-scoped rules land in later phases. `deleted` will
-        # drive a post-combine relevance boost once that phase lands.
-        del source_type, deleted
+        # source_type-based voter routing and app-scoped rules land in later
+        # phases; source_type itself isn't consulted yet.
+        del source_type
+
+        # Empty-body pre-gate (classifier_backend_spec.md): runs FIRST,
+        # before any voter, and overrides everything - a structurally empty
+        # value carries no evidence no matter what ID the key/URL contains.
+        if is_structurally_empty(value):
+            return ClassificationResult(
+                category=C.GENERAL,
+                confidence=0.0,
+                relevant=False,
+                relevance_score=0.0,
+                classifier_version=CLASSIFIER_VERSION,
+                classified_ts=datetime.now(UTC),
+            )
+
         scores: dict[C, float] = defaultdict(float)
         spans: list[str] = []
 
@@ -116,6 +127,9 @@ class Classifier:
             scores[C.TIMESTAMP] = 0.6
 
         category, confidence, relevance_score = _combine(scores)
+        relevance_score = boosted_relevance(
+            relevance_score, deleted=deleted, is_general=category == C.GENERAL
+        )
         return ClassificationResult(
             category=category,
             confidence=confidence,
