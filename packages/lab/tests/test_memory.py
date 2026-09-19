@@ -73,6 +73,15 @@ def test_iter_memory_artifacts_uses_process_scoped_carving_when_matched(tmp_path
     assert any("discord process only content marker" in a.value for a in artifacts)
     assert not any("Bearer eyJ" in a.value for a in artifacts)  # whole-image content absent
     assert not proc_dump.exists()  # cleaned up right after carving
+    # real bug, found while building Phase 4's process_memory agent tool: the
+    # API's `q` filter and the UI's process-detail view both search/document
+    # source_locator as "pid<PID>:string#n" (see api/main.py's case_artifacts
+    # comment, test_api.py::test_artifacts_search_matches_source_locator) to
+    # scope carved strings to one process - but _carve_and_yield previously
+    # always emitted a bare "string#n" regardless of caller, so that filter
+    # could never match a single real process-scoped row. Assert the real
+    # per-process code path actually produces the prefixed locator now.
+    assert all(a.source_locator.startswith("pid4242:string#") for a in artifacts)
 
 
 def test_iter_memory_artifacts_falls_back_to_whole_image_when_nothing_matched(tmp_path):

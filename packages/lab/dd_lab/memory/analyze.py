@@ -54,17 +54,36 @@ def find_dumps(layout: CaseLayout) -> list[tuple[str, Path]]:
 
 def _carve_and_yield(
     case_id: str, app: str, dump_path: Path, source_file: str, now: datetime,
+    locator_prefix: str = "",
 ) -> Iterator[NormalizedArtifact]:
     """Run iter_strings() over `dump_path` and yield memory_string artifacts
     tagged with `app`/`source_file` - the one string-carving step shared by
-    both the whole-image path and the per-process path below."""
+    both the whole-image path and the per-process path below.
+
+    `locator_prefix`: the per-process caller passes "pid<PID>:" here so the
+    resulting source_locator is "pid<PID>:string#n" - the contract the API's
+    `q` filter (dd_lab/api/main.py's case_artifacts) and the UI's process-
+    detail view already document and rely on to scope a search down to one
+    process's own carved strings. Before this parameter existed, every call
+    site (both here and the whole-image path) always produced a bare
+    "string#n" locator regardless of which branch ran, so that filter could
+    never actually match anything for a real process - confirmed via the
+    codebase's own test (test_api.py::test_artifacts_search_matches_source_locator)
+    exercising only a hand-planted row shaped how the docs/UI assume, never
+    this function's real output. Default "" preserves the whole-image
+    behaviour exactly (bare "string#n", unchanged)."""
     for n, s in enumerate(iter_strings(dump_path)):
+        # make_id's own locator ingredient is left as str(n), unchanged from
+        # before this fix - source_file already disambiguates a per-process
+        # dump from the whole image (it carries the #pid<PID> suffix too),
+        # so artifact_id stays exactly as stable as it always was; only the
+        # human/API-facing source_locator field gains the prefix.
         yield NormalizedArtifact(
             artifact_id=NormalizedArtifact.make_id(
                 case_id, SourceType.MEMORY_STRING, source_file, str(n), "mem.string"
             ),
             case_id=case_id, app=app, source_type=SourceType.MEMORY_STRING,
-            source_file=source_file, source_locator=f"string#{n}",
+            source_file=source_file, source_locator=f"{locator_prefix}string#{n}",
             key="mem.string", value=s, value_type=ValueType.STRING, extracted_ts=now,
         )
 
@@ -105,7 +124,10 @@ def iter_memory_artifacts(
                     continue
                 proc_source_file = f"{source_file}#pid{pid}"
                 try:
-                    yield from _carve_and_yield(case_id, matched_app, proc_dump, proc_source_file, now)
+                    yield from _carve_and_yield(
+                        case_id, matched_app, proc_dump, proc_source_file, now,
+                        locator_prefix=f"pid{pid}:",
+                    )
                 finally:
                     proc_dump.unlink(missing_ok=True)  # don't hold every matched process's dump at once
 
