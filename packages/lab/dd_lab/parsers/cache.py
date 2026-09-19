@@ -11,6 +11,7 @@ JSON bodies are flattened leaf-by-leaf.
 from __future__ import annotations
 
 import gzip
+import json
 import logging
 import zlib
 from collections.abc import Iterator
@@ -29,6 +30,7 @@ from dd_lab.parsers.base import (
     emit_value,
     make_artifact,
 )
+from dd_lab.parsers.jsonflat import try_parse_json
 
 log = logging.getLogger("dd_lab.parsers.cache")
 
@@ -427,3 +429,178 @@ def read_cache_entry(ctx: ParseContext, cache_dir_rel: str, key: str) -> tuple[b
         return None, "application/octet-stream", "cache_entry"
     finally:
         cache.close()
+
+
+# --------------------------------------------------------------------- labelling export
+#
+# One row per physical cache entry (or, for a JSON array-of-objects body, one
+# row per element) - NOT one row per metadata field. `parse()`/`_emit_entry`
+# above feeds the main warehouse, where url/http_status/content_type/
+# request_time/response_time are each their own NormalizedArtifact (correct
+# there - the artifact browser, findings, correlation and the classifier all
+# want one fact per row). A hand-labelling/content-matching export is a
+# different consumer with a different unit of analysis: a person (or a
+# partner reconciling against a raw ChromeCacheView dump) thinks in terms of
+# "this cached file", not "this file's request_time considered on its own" -
+# treating those 5-6 fields as 5-6 separate "artifacts" inflated a real
+# export ~7x over the true entry count (41,405 rows for 5,946 real entries,
+# confirmed against a partner's independent raw-dump reconciliation) and
+# scattered one entry's own facts across unrelated rows instead of keeping
+# them together as columns of the same row.
+#
+# The body gets its own, narrower splitting rule than jsonflat.py's general
+# one (which explodes ANY array, including a plain array of strings/numbers,
+# and recurses into nested arrays) - see `_classify_body_for_labeling`: only
+# a top-level JSON array whose elements are ALL objects is exploded, one row
+# per element; a JSON object (however deeply nested inside), a primitive/
+# mixed/empty array, non-JSON text, and binary content all stay exactly one
+# row. This function reads bodies fresh from the evidence directory (like
+# `list_cache_files`, independent of the ingest pipeline and its warehouse)
+# rather than reconstructing shape from already-flattened warehouse rows,
+# which would be ambiguous or outright lossy for exactly the cases this
+# rule cares about getting right.
+
+# Body text this long or longer is truncated for the export (a generous cap
+# for content-matching, well above MAX_VALUE_CHARS in base.py - that cap is
+# tuned for the warehouse's own `value` column, a different consumer with a
+# tighter row-size budget).
+_EXPORT_BODY_CHARS = 20_000
+
+
+class CacheLabelRow(BaseModel):
+    entry_id: str          # stable id, unique per (case, app, cache_dir, key) - NOT per exported row
+    app: str
+    cache_kind: str         # "http_cache" | "cache_api"
+    cache_dir: str          # evidence-relative directory
+    url: str
+    filename: str           # human-readable, guessed from the URL (see url_filename_hint)
+    http_status: str | None = None
+    content_type: str | None = None
+    content_encoding: str | None = None
+    size_bytes: int | None = None
+    source_file: str        # the physical evidence file backing the body, if resolved
+    cache_offset: int | None = None
+    request_time: datetime | None = None
+    response_time: datetime | None = None
+    body_kind: str           # "empty" | "binary" | "text" | "json_object" | "json_array" | "json_array_element"
+    array_index: int | None = None   # set only when body_kind == "json_array_element"
+    body: str = ""
+
+
+def _cap_body(text: str, limit: int = _EXPORT_BODY_CHARS) -> str:
+    if len(text) > limit:
+        return text[:limit] + f"…[+{len(text) - limit} chars]"
+    return text
+
+
+def _classify_body_for_labeling(text: str) -> tuple[str, list[str]]:
+    """(body_kind, [row values]) for one decoded response body - one value
+    unless body_kind is "json_array_element", in which case there's one per
+    array entry, in order. See the module-level comment above for the exact
+    rule; `try_parse_json` (jsonflat.py) is the same JSON-or-not sniff/parse
+    the rest of the system uses, so "is this JSON" never drifts between the
+    two rules that both apply it to a cache body."""
+    parsed = try_parse_json(text)
+    if parsed is None:
+        return "text", [text]
+    if isinstance(parsed, dict):
+        return "json_object", [json.dumps(parsed, default=str)]
+    # try_parse_json only ever returns a dict or a list (it requires the
+    # first non-whitespace character to be "{" or "[") - a bare top-level
+    # JSON scalar never reaches here, so this is the only remaining case.
+    if parsed and all(isinstance(e, dict) for e in parsed):
+        return "json_array_element", [json.dumps(e, default=str) for e in parsed]
+    return "json_array", [json.dumps(parsed, default=str)]
+
+
+def iter_cache_entries_for_labeling(ctx: ParseContext) -> Iterator[CacheLabelRow]:
+    """Every cache entry for this app, across every cache directory (the HTTP
+    disk cache and the Cache API alike) - one row each, or one row per
+    element for a JSON array-of-objects body. See the module comment above."""
+    from ccl_chromium_reader import ccl_chromium_cache as cc
+
+    seen: set[str] = set()
+    for cache_dir in _iter_cache_dirs(ctx):
+        rp = str(cache_dir.resolve())
+        if rp in seen:
+            continue
+        seen.add(rp)
+        cache_dir_rel = ctx.rel(cache_dir)
+        kind = "cache_api" if "Service Worker" in cache_dir_rel else "http_cache"
+        klass = cc.guess_cache_class(cache_dir)
+        if klass is None:
+            continue
+        try:
+            cache = klass(cache_dir)
+        except Exception:
+            log.exception("could not open cache at %s", cache_dir)
+            continue
+        try:
+            for key in cache.keys():  # noqa: SIM118  (ChromiumCache, not a dict)
+                try:
+                    yield from _describe_entry_for_labeling(ctx, cache, key, cache_dir_rel, kind)
+                except Exception:
+                    log.debug("skipped unreadable cache entry %r in %s", key, cache_dir)
+        finally:
+            cache.close()
+
+
+def _describe_entry_for_labeling(
+    ctx: ParseContext, cache, key: str, cache_dir_rel: str, kind: str
+) -> Iterator[CacheLabelRow]:
+    try:
+        meta = next((m for m in cache.get_metadata(key) if m), None)
+    except Exception:
+        meta = None
+    body_loc = _location(cache, key, "body")
+    url = url_from_cache_key(key)
+
+    def attr(name: str) -> str | None:
+        return (meta.get_attribute(name) or [None])[0] if meta else None
+
+    content_encoding = attr("content-encoding") or ""
+    content_type = attr("content-type") or ""
+    common = dict(
+        entry_id=stable_id(ctx.case_id, ctx.app, cache_dir_rel, key),
+        app=ctx.app, cache_kind=kind, cache_dir=cache_dir_rel,
+        url=url, filename=url_filename_hint(url),
+        http_status=_first(meta.http_header_declarations) if meta else None,
+        content_type=content_type or None, content_encoding=content_encoding or None,
+        size_bytes=_entry_size(cache, key),
+        source_file=f"{cache_dir_rel}/{body_loc.file_name}" if body_loc else cache_dir_rel,
+        cache_offset=body_loc.offset if body_loc else None,
+        request_time=getattr(meta, "request_time", None) if meta else None,
+        response_time=getattr(meta, "response_time", None) if meta else None,
+    )
+
+    bodies = cache.get_cachefile(key)
+    # `is not None`, not truthiness - a genuinely empty body (b"", a real
+    # 304/204 response) is still a body, not a missing one (see
+    # test_read_cache_entry_empty_body_is_a_real_empty_response_not_missing).
+    body = next((b for b in (bodies or []) if b is not None), None)
+    if body is None:
+        yield CacheLabelRow(**common, body_kind="empty")
+        return
+    if content_encoding:
+        body = _decompress(body, content_encoding)
+    if not body:
+        yield CacheLabelRow(**common, body_kind="empty")
+        return
+    if not any(t in content_type.lower() for t in _TEXTUAL_CT):
+        # a real, non-empty entry (image/font/wasm/...) - still counted, per
+        # the partner's own rule ("any non-JSON cache body = 1 artifact"),
+        # just with no meaningful text body to include.
+        yield CacheLabelRow(**common, body_kind="binary")
+        return
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        yield CacheLabelRow(**common, body_kind="binary")
+        return
+
+    body_kind, values = _classify_body_for_labeling(text)
+    if body_kind == "json_array_element":
+        for i, v in enumerate(values):
+            yield CacheLabelRow(**common, body_kind=body_kind, array_index=i, body=_cap_body(v))
+    else:
+        yield CacheLabelRow(**common, body_kind=body_kind, body=_cap_body(values[0]))

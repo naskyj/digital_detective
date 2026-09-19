@@ -12,8 +12,19 @@ section), and `category`/`confidence` show what the CURRENT rule/keyword/NER/
 model ensemble already predicted, so filling in `label` with the true
 category turns this directly into a scoring set for scripts/score_labels.py.
 
-Read-only: opens the case's warehouse for reading only. Never writes to the
-case directory.
+cache.csv is the one exception, a different shape entirely: one row per
+physical cache entry (or one element of a JSON array-of-objects body), not
+one row per classified field - a content-matching/reconciliation partner's
+own unit of analysis is "this cached file", and the old per-field shape
+inflated 5,946 real entries into 41,405 rows. No `category`/`confidence`/
+`text` columns (they were being assigned per metadata field, meaningless
+once a row is a whole entry) and never downsampled by `--sample` (full
+coverage parity against a raw cache dump matters more than a stratified
+subset here). See dd_lab/parsers/cache.py::iter_cache_entries_for_labeling.
+
+Read-only: opens the case's warehouse for reading (every source_type) and
+its evidence directory for reading (cache only, straight from the on-disk
+cache files - see above). Never writes to the case directory.
 
     uv run python scripts/export_for_labeling.py --cases-root <dir> --case-id <id>
     uv run python scripts/export_for_labeling.py --cases-root <dir> --case-id <id> --sample 2000
@@ -39,28 +50,23 @@ _FIELDS = [
     "key", "value", "text", "record_ts", "source_file", "deleted", "latest", "label",
 ]
 
-# cache.csv carries three extra columns _FIELDS doesn't - three genuinely
-# different "which file" facts a cache entry has, kept as separate columns
-# rather than folded into one:
-#   source_file / cache_offset  the PHYSICAL on-disk file (+ byte offset)
-#                               Chromium actually stored the bytes in, e.g.
-#                               "Cache/Cache_Data/data_3" @ 737280 - meta and
-#                               body streams for the SAME entry can resolve
-#                               to different physical files (cache.py's
-#                               `_location`), so this is per-ROW, not per-entry
-#   filename                    a human-readable name guessed from the URL's
-#                               last path segment (cache.py's
-#                               `url_filename_hint`, the same one the UI's
-#                               "Open" download uses) - what the resource
-#                               would have been called, unrelated to where
-#                               Chromium physically stored it
-#   url                         the request URL, same on every row of one
-#                               entry's block, not just the cache.url row -
-#                               usable for correlation without a lookup
+# cache.csv has an entirely different shape from every other source_type's
+# export: ONE ROW PER PHYSICAL CACHE ENTRY (or one row per element of a JSON
+# array-of-objects body), not one row per metadata field. Found via a real
+# partner's reconciliation against a raw ChromeCacheView dump: the old
+# per-field export (url/http_status/content_type/request_time/response_time
+# each counted as their own "artifact") inflated 5,946 real entries into
+# 41,405 rows. `category`/`confidence` are dropped entirely for cache - they
+# were being assigned PER METADATA FIELD (e.g. a bare content-type string
+# classified CHAT_CONTENT at 0.713), meaningless once those fields become
+# columns of one entry's row instead of independent classified values. See
+# dd_lab/parsers/cache.py::iter_cache_entries_for_labeling/CacheLabelRow,
+# the single source of truth for this row shape.
 _CACHE_FIELDS = [
-    "artifact_id", "app", "source_type", "category", "confidence",
-    "key", "value", "text", "record_ts", "source_file", "cache_offset",
-    "filename", "url", "deleted", "label",
+    "entry_id", "app", "source_type", "cache_kind", "cache_dir", "url", "filename",
+    "http_status", "content_type", "content_encoding", "size_bytes",
+    "source_file", "cache_offset", "request_time", "response_time",
+    "body_kind", "array_index", "body", "label",
 ]
 
 
@@ -103,55 +109,28 @@ def _load_rows(wh, source_type: str) -> list[dict]:
     return rows
 
 
-# Row order within one surviving cache entry: identifying context first
-# (url, status, content-type, timestamps), then its body flattened key by
-# key - so one JSON response reads as one contiguous block instead of its
-# leaves being scattered across the file next to unrelated entries that
-# happen to share a leaf name (the export's normal `ORDER BY app, key` groups
-# by leaf key across ALL entries, not by entry).
-_CACHE_FIELD_ORDER = {
-    "cache.url": 0, "cache.http_status": 1, "cache.content_type": 2,
-    "cache.request_time": 3, "cache.response_time": 4,
-}
+def _load_cache_rows(cases_root: str, case_id: str, apps: list[str]) -> list[dict]:
+    """Every cache entry across every app that has cache evidence, ALL
+    content types included (JSON, JS, CSS, HTML, images, fonts, wasm, ...) -
+    reads fresh from the evidence directory (like list_cache_files, not the
+    warehouse) because the warehouse's own JSON flattening already applies a
+    different, more aggressive splitting rule (any array, not just a
+    top-level array-of-objects) that can't be losslessly un-flattened back
+    into "one row per entry". See
+    dd_lab/parsers/cache.py::iter_cache_entries_for_labeling."""
+    from dd_core.casedir import CaseLayout
+    from dd_lab.parsers.base import ParseContext
+    from dd_lab.parsers.cache import iter_cache_entries_for_labeling
 
-
-def _load_cache_rows(wh) -> list[dict]:
-    """Cache entries, JSON API responses only - every other content type
-    (JS, HTML, XML, plain text, images, fonts, ...) dropped entirely, since
-    those are the overwhelming majority of a Chromium cache and pure noise
-    for hand-labelling investigation-relevant data. Rows for a surviving
-    entry are kept adjacent and ordered (see _CACHE_FIELD_ORDER) instead of
-    interleaved with every other entry's rows."""
-    rows = wh.query(
-        "SELECT artifact_id, app, source_type, category, confidence, key, value, "
-        "record_ts, source_file, deleted, source_locator FROM artifacts WHERE source_type = 'cache'"
-    )
-    from dd_lab.parsers.cache import cache_offset_from_locator, raw_key_from_locator, url_filename_hint
-
-    groups: dict[tuple[str, str], list[dict]] = {}
-    for r in rows:
-        groups.setdefault((r["app"], raw_key_from_locator(r["source_locator"])), []).append(r)
-
-    kept: list[tuple[str, str, list[dict]]] = []
-    for (app, raw_key), group in groups.items():
-        content_type = next((g["value"] for g in group if g["key"] == "cache.content_type"), "")
-        if "json" not in (content_type or "").lower():
-            continue
-        url = next((g["value"] for g in group if g["key"] == "cache.url"), raw_key)
-        kept.append((app, url, group))
-
+    layout = CaseLayout(cases_root, case_id)
     out: list[dict] = []
-    for _app, url, group in sorted(kept, key=lambda t: (t[0], t[1])):
-        filename = url_filename_hint(url)
-        for r in sorted(group, key=lambda g: (_CACHE_FIELD_ORDER.get(g["key"], 5), g["key"])):
-            offset = cache_offset_from_locator(r["source_locator"])
-            r["cache_offset"] = "" if offset is None else offset
-            del r["source_locator"]
-            r["filename"] = filename  # human-readable, guessed from the URL - NOT the physical file above
-            r["url"] = url  # the entry's URL, on every row - not just the cache.url row
-            r["text"] = f"[{r['source_type']}] {r['key']} = {r['value']}"
-            r["label"] = ""
-            out.append(r)
+    for app in apps:
+        ctx = ParseContext(case_id=case_id, app=app, evidence_root=layout.evidence)
+        for row in iter_cache_entries_for_labeling(ctx):
+            d = row.model_dump(mode="json")
+            d["source_type"] = "cache"
+            d["label"] = ""
+            out.append(d)
     return out
 
 
@@ -226,33 +205,37 @@ def main(argv: list[str] | None = None) -> int:
             print("this case's warehouse has no artifacts", file=sys.stderr)
             return 1
 
-        # cache is filtered (JSON API responses only - see _load_cache_rows)
-        # before anything else happens to it, so "of_total" below needs the
-        # PRE-filter raw count too, or a filtered source_type would silently
-        # look identical to one that was never filtered at all.
         raw_counts = {
             r["source_type"]: r["n"]
             for r in wh.query("SELECT source_type, COUNT(*) AS n FROM artifacts GROUP BY source_type")
         }
 
+        apps = sorted(p.name for p in layout.evidence.iterdir()) if layout.evidence.is_dir() else []
+
         # allocate the total sample budget across source_types proportional to
         # their share of the case, so a source_type with 400k rows doesn't
-        # crowd out one with 40
+        # crowd out one with 40. cache is loaded fresh from evidence, not the
+        # warehouse (see _load_cache_rows) - its "share" is one row per
+        # physical entry, an entirely different unit from every other
+        # source_type's one-row-per-classified-field, so it's excluded from
+        # that proportional split and always written in full instead (see
+        # the --sample handling below).
         all_rows = {
-            st: (_load_cache_rows(wh) if st == "cache" else _load_rows(wh, st)) for st in source_types
+            st: (_load_cache_rows(args.cases_root, args.case_id, apps) if st == "cache" else _load_rows(wh, st))
+            for st in source_types
         }
-        total_rows = sum(len(v) for v in all_rows.values())
+        total_rows = sum(len(v) for st, v in all_rows.items() if st != "cache")
 
-        summary: list[tuple[str, int, int, int]] = []  # source_type, written, of_filtered, of_raw
+        summary: list[tuple[str, int, int]] = []  # source_type, written, of_total
         grand_total = 0
         for st, rows in all_rows.items():
-            if args.sample:
-                budget = max(1, round(args.sample * len(rows) / total_rows))
+            if args.sample and st != "cache":
+                budget = max(1, round(args.sample * len(rows) / total_rows)) if total_rows else len(rows)
                 chosen = _stratified_sample(rows, budget, rng)
             else:
                 chosen = rows
             _write_csv(out_dir / f"{st}.csv", chosen, _CACHE_FIELDS if st == "cache" else _FIELDS)
-            summary.append((st, len(chosen), len(rows), raw_counts.get(st, len(rows))))
+            summary.append((st, len(chosen), len(rows)))
             grand_total += len(chosen)
     finally:
         wh.close()
@@ -260,13 +243,13 @@ def main(argv: list[str] | None = None) -> int:
     raw_total = sum(raw_counts.values())
     print(f"Case {args.case_id}: {raw_total:,} artifacts across {len(source_types)} source type(s)")
     print(f"Wrote {grand_total:,} rows to {out_dir}/")
-    for st, written, of_filtered, of_raw in sorted(summary, key=lambda x: -x[3]):
-        if written == of_raw:
+    for st, written, of_total in sorted(summary, key=lambda x: -x[2]):
+        if st == "cache":
+            note = f"{written:,} cache entries/elements (always full - not a --sample of the {raw_counts.get('cache', 0):,} warehouse cache rows, a different unit; see cache.py's iter_cache_entries_for_labeling)"
+        elif written == of_total:
             note = f"{written:,} (all)"
-        elif written == of_filtered:
-            note = f"{written:,} of {of_raw:,} (rest filtered out - not JSON, for cache)"
         else:
-            note = f"{written:,} of {of_filtered:,} kept, {of_raw:,} raw"
+            note = f"{written:,} of {of_total:,}"
         print(f"  {st:<18} {note}")
     print()
     print("Fill in the `label` column with the true category for each row, then:")

@@ -37,7 +37,13 @@ def case(tmp_path):
     across two source types, built the same way the rest of the lab suite
     builds sample cases - but inlined here rather than depending on
     packages/lab/tests/sample_case.py, since scripts/ has no test
-    dependency on the lab package's own test helpers."""
+    dependency on the lab package's own test helpers.
+
+    cache.csv now reads fresh from the evidence directory rather than the
+    warehouse (see _load_cache_rows/iter_cache_entries_for_labeling) - an
+    "app" directory under evidence is enough for main() to know which apps
+    to scan; the tests below monkeypatch the actual cache reader itself, so
+    no real Chromium cache needs to exist on disk here."""
     from datetime import UTC, datetime
 
     from dd_core.casedir import CaseLayout
@@ -47,6 +53,7 @@ def case(tmp_path):
 
     layout = CaseLayout(tmp_path, "case1")
     layout.create_lab_skeleton()
+    (layout.evidence / "app").mkdir(parents=True, exist_ok=True)
     wh = Warehouse(layout.warehouse)
     try:
         rows = [
@@ -58,27 +65,57 @@ def case(tmp_path):
             )
             for i in range(6)
         ]
-        # export_for_labeling's cache loader keeps JSON-content-typed cache
-        # entries only (see _load_cache_rows) - each cache row above needs a
-        # sibling cache.content_type row sharing its locator prefix, or the
-        # whole-export test below sees an empty (correctly, but untested)
-        # cache.csv instead of exercising the normal per-source-type path.
-        rows += [
-            NormalizedArtifact(
-                artifact_id=f"a{i}-ct", case_id="case1", app="app", source_type=SourceType.CACHE,
-                source_file="app/f", source_locator=f"loc{i}", key="cache.content_type",
-                value="application/json", value_type=ValueType.STRING, extracted_ts=datetime.now(UTC),
-            )
-            for i in range(0, 6, 2)
-        ]
         wh.load_artifacts(rows)
     finally:
         wh.close()
     return tmp_path, "case1"
 
 
-def test_export_writes_one_csv_per_source_type(case, tmp_path):
+def _canned_cache_rows():
+    """Two physical entries: one plain JSON-object body (one row), one
+    JSON array-of-objects body (exploded into two rows sharing one
+    entry_id) - the exact shape the real partner feedback this fixes is
+    about: entry count, not metadata-field count."""
+    from datetime import UTC, datetime
+
+    from dd_lab.parsers.cache import CacheLabelRow
+
+    return [
+        CacheLabelRow(
+            entry_id="e1", app="app", cache_kind="http_cache", cache_dir="app/Cache/Cache_Data",
+            url="https://example.com/a.json", filename="a.json", http_status="HTTP/1.1 200",
+            content_type="application/json", content_encoding=None, size_bytes=42,
+            source_file="app/Cache/Cache_Data/data_1", cache_offset=100,
+            request_time=datetime(2026, 1, 1, tzinfo=UTC), response_time=datetime(2026, 1, 1, tzinfo=UTC),
+            body_kind="json_object", array_index=None, body='{"id": 1}',
+        ),
+        CacheLabelRow(
+            entry_id="e2", app="app", cache_kind="http_cache", cache_dir="app/Cache/Cache_Data",
+            url="https://example.com/list.json", filename="list.json", http_status="HTTP/1.1 200",
+            content_type="application/json", content_encoding=None, size_bytes=20,
+            source_file="app/Cache/Cache_Data/data_1", cache_offset=200,
+            request_time=None, response_time=None,
+            body_kind="json_array_element", array_index=0, body='{"n": 1}',
+        ),
+        CacheLabelRow(
+            entry_id="e2", app="app", cache_kind="http_cache", cache_dir="app/Cache/Cache_Data",
+            url="https://example.com/list.json", filename="list.json", http_status="HTTP/1.1 200",
+            content_type="application/json", content_encoding=None, size_bytes=20,
+            source_file="app/Cache/Cache_Data/data_1", cache_offset=200,
+            request_time=None, response_time=None,
+            body_kind="json_array_element", array_index=1, body='{"n": 2}',
+        ),
+    ]
+
+
+def test_export_writes_one_csv_per_source_type(case, tmp_path, monkeypatch):
     cases_root, case_id = case
+
+    import dd_lab.parsers.cache as cache_mod
+
+    canned = _canned_cache_rows()
+    monkeypatch.setattr(cache_mod, "iter_cache_entries_for_labeling", lambda ctx: iter(canned))
+
     out_dir = tmp_path / "out"
     rc = efl.main(["--cases-root", str(cases_root), "--case-id", case_id, "--out-dir", str(out_dir)])
     assert rc == 0
@@ -86,15 +123,44 @@ def test_export_writes_one_csv_per_source_type(case, tmp_path):
     assert (out_dir / "local_storage.csv").is_file()
     with (out_dir / "cache.csv").open() as f:
         rows = list(csv.DictReader(f))
-    # 3 entries (i = 0, 2, 4), each with its own value row AND its
-    # cache.content_type row (see the `case` fixture) - both kept, since
-    # _load_cache_rows keeps every row for a JSON-content-typed entry.
-    assert len(rows) == 6
-    row = next(r for r in rows if r["key"] != "cache.content_type")
-    for col in ("artifact_id", "app", "source_type", "category", "key", "value", "text", "label"):
-        assert col in row
-    assert row["text"] == f"[cache] {row['key']} = {row['value']}"
-    assert row["label"] == ""
+    # one row for the whole-object entry (e1) + one row per array element of
+    # the second entry (e2) = 3 rows for 2 physical entries - NOT one row per
+    # metadata field (the real bug this fixes: 41,405 rows for 5,946 entries).
+    assert len(rows) == 3
+    assert {r["entry_id"] for r in rows} == {"e1", "e2"}
+    for col in ("entry_id", "app", "source_type", "url", "body_kind", "array_index", "body", "label"):
+        assert col in rows[0]
+    assert all(r["source_type"] == "cache" for r in rows)
+    assert all(r["label"] == "" for r in rows)
+    # category/confidence/text were being assigned PER METADATA FIELD (e.g.
+    # a bare content-type string classified CHAT_CONTENT) - meaningless once
+    # a row is a whole entry, so dropped entirely rather than carried forward
+    # incorrectly at the entry level.
+    assert "category" not in rows[0]
+    assert "confidence" not in rows[0]
+    assert "text" not in rows[0]
+
+
+def test_cache_csv_is_never_downsampled(case, tmp_path, monkeypatch):
+    """cache has a different unit (one row per physical entry/array element)
+    from every other source_type (one row per classified field) - stratifying
+    it by --sample's category-based logic would be meaningless (cache rows
+    carry no category) and would break the coverage parity a content-matching
+    partner needs against the raw cache dump. --sample must leave it alone."""
+    cases_root, case_id = case
+    import dd_lab.parsers.cache as cache_mod
+
+    canned = _canned_cache_rows()
+    monkeypatch.setattr(cache_mod, "iter_cache_entries_for_labeling", lambda ctx: iter(canned))
+
+    out_dir = tmp_path / "out"
+    rc = efl.main([
+        "--cases-root", str(cases_root), "--case-id", case_id, "--out-dir", str(out_dir), "--sample", "1",
+    ])
+    assert rc == 0
+    with (out_dir / "cache.csv").open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 3  # untouched by --sample 1, unlike local_storage.csv
 
 
 
