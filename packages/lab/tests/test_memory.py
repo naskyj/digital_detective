@@ -168,6 +168,68 @@ def test_analyze_memory_loads_and_classifies(tmp_path):
     assert CustodyEvent.ANALYSIS_STEP in events
 
 
+def test_analyze_memory_clears_stale_system_rows_on_rerun(tmp_path):
+    """Real bug, found while regenerating a real case's exports: a "_system"
+    (the memory-image pseudo-app) row from an EARLIER run - e.g. a
+    whole-image string carve from before process-scoped carving existed -
+    was never cleared by a later "Run analysis", because ingest_case()'s
+    own per-app reset loop explicitly excludes "_system" (it only covers
+    real target apps). Confirmed on the real case: 400,000 stale "_system"
+    memory_string rows survived a fresh run that itself only added 637,652
+    new rows - never re-verified, just silently carried forward forever.
+
+    Uses a minimal signed case (for a real manifest + warehouse) but
+    monkeypatches find_dumps/iter_memory_artifacts so this doesn't need a
+    real Electron profile, Volatility, or an actual memory image on disk -
+    only analyze_memory()'s own reset-then-load behaviour is under test."""
+    from datetime import UTC, datetime
+    from unittest.mock import patch
+
+    from dd_core.enums import SourceType, ValueType
+    from dd_core.schema import NormalizedArtifact
+    from dd_lab.etl.warehouse import Warehouse
+    from dd_lab.memory.analyze import analyze_memory
+    from tests.sample_case import build_sample_case
+
+    profile = _find_profile()
+    if profile is None:
+        pytest.skip("no Electron profile")
+    root = tmp_path / "cases"
+    layout = build_sample_case(root, "c_stale", "app", profile, include=frozenset({"preferences"}))
+
+    stale = NormalizedArtifact(
+        artifact_id="stale-system-row", case_id="c_stale", app="_system",
+        source_type=SourceType.MEMORY_STRING, source_file="_system/memory/physmem.raw",
+        source_locator="string#0", key="mem.string", value="leftover from an earlier run",
+        value_type=ValueType.STRING, extracted_ts=datetime.now(UTC),
+    )
+    wh = Warehouse(layout.warehouse)
+    try:
+        wh.load_artifacts([stale])
+    finally:
+        wh.close()
+
+    fresh = NormalizedArtifact(
+        artifact_id="fresh-system-row", case_id="c_stale", app="_system",
+        source_type=SourceType.MEMORY_STRING, source_file="_system/memory/physmem.raw",
+        source_locator="string#0", key="mem.string", value="produced by today's run",
+        value_type=ValueType.STRING, extracted_ts=datetime.now(UTC),
+    )
+    with (
+        patch("dd_lab.memory.analyze.find_dumps", return_value=[("_system", layout.evidence / "fake.raw")]),
+        patch("dd_lab.memory.analyze.iter_memory_artifacts", return_value=iter([fresh])),
+    ):
+        result = analyze_memory(root, "c_stale", classifier=False)
+    assert result.ok
+
+    wh = Warehouse(layout.warehouse)
+    try:
+        ids = {r["artifact_id"] for r in wh.query("SELECT artifact_id FROM artifacts WHERE app = '_system'")}
+    finally:
+        wh.close()
+    assert ids == {"fresh-system-row"}  # the stale row is gone, not just supplemented
+
+
 def _find_profile():
     from pathlib import Path
 

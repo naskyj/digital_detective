@@ -161,6 +161,26 @@ def analyze_memory(
     if load:
         wh = Warehouse(layout.warehouse)
         try:
+            # "_system" (the memory-image pseudo-app - see app_names above)
+            # is the one app memory analysis writes to that ingest_case()'s
+            # own per-app reset loop never touches, since that loop only
+            # covers real target apps (app_names deliberately excludes
+            # "_system"). Real target apps are NOT reset here - ingest_case()
+            # already reset+reloaded their disk artifacts just before this
+            # runs, and resetting them again here would wipe that, not just
+            # memory-derived rows.
+            #
+            # Without this, a "_system" row from an EARLIER run's different
+            # code path (e.g. a whole-image string carve from before
+            # process-scoped carving existed - see iter_memory_artifacts'
+            # fallback branch) sits forever: nothing ever clears it, so a
+            # later run whose own logic no longer produces that row never
+            # notices it's stale. Confirmed on a real case: 400,000 "_system"
+            # memory_string rows survived untouched across a fresh
+            # "Run analysis" that itself only added 637,652 new rows overall -
+            # the pre-existing ones were never re-verified by the new run at
+            # all, just silently carried forward.
+            wh.reset_app("_system")
             result.artifact_count = wh.load_artifacts(stream)
             wh.build_views()
         finally:
