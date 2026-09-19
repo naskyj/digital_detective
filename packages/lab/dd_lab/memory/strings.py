@@ -34,8 +34,23 @@ _ASCII_RUN = re.compile(rb"[\x20-\x7e]{%d,}")
 _UTF16_RUN = re.compile(rb"(?:[\x20-\x7e]\x00){%d,}")
 
 # keep strings that look like they carry information, drop base64 mush / repeats
+#
+# The bare "@" alternative this used to have was measured (against the real
+# case, 20260915_013847_9be1ee7d) to be responsible for 72.4% of the entire
+# GENERAL/0.0-confidence memory_string bucket (815,978 of 1,126,582 rows) -
+# any "@" anywhere, including in pure binary noise, mangled C++ symbols
+# (?vGetCoefficient@EXFORMOBJ@@...), and driver paths
+# (@%SystemRoot%\system32\drivers\...), counted as "interesting". Of those
+# 815,978 rows, exactly one was a genuine hit (a real Discord mention,
+# <@1473705902501531761>) once a proper email/mention shape was required -
+# even a naive email-shaped regex (permitting a bare "." as the whole local
+# part) let a repeated false positive ("5}.@e.kc", appearing 20x) through,
+# which is why the local part below requires an actual word character right
+# before the "@", not just any of [\w.+-].
+_EMAIL_SHAPE = re.compile(r"[\w.+-]*\w@[\w-]+\.[A-Za-z]{2,}")
+_MENTION_SHAPE = re.compile(r"<@!?\d{15,20}>")  # Discord's raw mention syntax
 _INTERESTING = re.compile(
-    r"(https?://|wss?://|@|[Tt]oken|[Bb]earer|password|secret|"
+    r"(https?://|wss?://|[Tt]oken|[Bb]earer|password|secret|"
     r"\b\d{1,3}(?:\.\d{1,3}){3}\b|[A-Za-z]:\\)"
 )
 
@@ -185,7 +200,10 @@ def _keep(s: str, seen: set[str]) -> str | None:
     if _is_code_or_pki(s):
         return None
     # positive interest signals
-    interesting = bool(_INTERESTING.search(s)) or bool(_JSON_KEY.search(s)) or bool(_TOAST_TAG.search(s))
+    interesting = (
+        bool(_INTERESTING.search(s)) or bool(_JSON_KEY.search(s)) or bool(_TOAST_TAG.search(s))
+        or bool(_EMAIL_SHAPE.search(s)) or bool(_MENTION_SHAPE.search(s))
+    )
     if not interesting and _looks_like_sentence(s):
         interesting = True
     if not interesting:

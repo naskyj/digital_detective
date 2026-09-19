@@ -81,6 +81,30 @@ def test_keeps_toast_notification_text():
     assert _kept("<text>hey beautiful, can i have your number?</text>")
 
 
+def test_bare_at_no_longer_keeps_pure_noise():
+    # measured against the real case's already-carved memory_string rows:
+    # the old bare "@" clause was responsible for 72.4% of the entire
+    # GENERAL/0.0-confidence bucket (815,978 of 1,126,582 rows), and of
+    # those, exactly one was a genuine hit once a real email/mention shape
+    # was required. These are real examples from that bucket, not invented.
+    assert not _kept("MFE22@")
+    assert not _kept("?vGetCoefficient@EXFORMOBJ@@QEBAXPEAUtagFLOATOBJ_XFORM@@@Z")
+    assert not _kept("@%SystemRoot%\\system32\\drivers\\ztdns.sys,-1")
+    assert not _kept("a `A`@")
+
+
+def test_bare_at_false_positive_with_dot_local_part_is_rejected():
+    # a naive email-shape regex permitting a bare "." as the whole local
+    # part ("[\\w.+-]+@...") let this exact string (repeated 20x in the
+    # real data) through as a false "email" - the local part must contain
+    # an actual word character immediately before the "@".
+    assert not _kept("5}.@e.kc")
+
+
+def test_keeps_a_real_discord_mention():
+    assert _kept("<@1473705902501531761>")
+
+
 def test_default_cap_covers_a_real_full_ram_image():
     # real case's physmem.raw kept ~528k strings uncapped across its full
     # 5.83GiB (measured directly) - the cap must clear that with headroom,
