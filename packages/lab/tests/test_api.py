@@ -346,6 +346,59 @@ def test_timeline_endpoint_paginates_and_filters(client):
     assert "GENERAL" in filtered["facets"]["categories"]  # facets aren't narrowed by the active filter
 
 
+def test_chat_send_and_history_via_api(client, monkeypatch):
+    """Phase 6 - the model itself is stubbed (a real LLM call has no place
+    in this test suite, same reasoning as test_agent_llm.py's FunctionModel
+    pattern) via chat.py's own build_model, exercised through the real HTTP
+    endpoints end to end: send a message, read the persisted history back."""
+    from datetime import UTC, datetime
+
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from pydantic_ai.models.function import FunctionModel
+
+    import dd_lab.agent.chat as chat_mod
+    from dd_core.casedir import CaseLayout
+    from dd_core.enums import ArtifactCategory as C
+    from dd_core.enums import SourceType as S
+    from dd_core.schema import ClassificationResult, NormalizedArtifact
+    from dd_lab.api import main as main_mod
+    from dd_lab.etl.warehouse import Warehouse
+
+    monkeypatch.setattr(
+        chat_mod, "build_model",
+        lambda cfg: FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart("hello from chat")])),
+    )
+
+    layout = CaseLayout(main_mod._settings.cases_root, "case_api_1")
+    wh = Warehouse(layout.warehouse)
+    try:
+        wh.load_artifacts([NormalizedArtifact(
+            artifact_id="chat-a1", case_id="case_api_1", app="discord", source_type=S.INDEXEDDB,
+            source_file="discord/IndexedDB/x", source_locator="loc1", key="content", value="hi",
+            extracted_ts=datetime.now(UTC),
+            classification=ClassificationResult(category=C.CHAT_CONTENT, confidence=0.9),
+        )])
+    finally:
+        wh.close()
+
+    empty = client.get("/api/cases/case_api_1/chat").json()
+    assert empty["turns"] == []
+
+    sent = client.post("/api/cases/case_api_1/chat", json={"message": "hi there"}).json()
+    assert sent == {"ok": True, "reply": "hello from chat"}
+
+    history = client.get("/api/cases/case_api_1/chat").json()
+    assert history["turns"] == [
+        {"role": "user", "text": "hi there"},
+        {"role": "assistant", "text": "hello from chat"},
+    ]
+
+
+def test_chat_routes_404_for_an_unknown_case(client):
+    assert client.get("/api/cases/does-not-exist/chat").status_code == 404
+    assert client.post("/api/cases/does-not-exist/chat", json={"message": "hi"}).status_code == 404
+
+
 def test_cache_files_route_works_without_a_run(client):
     """Unlike /artifacts, the cache-file browser reads straight off the
     evidence directory - it must work before "Run analysis" has ever

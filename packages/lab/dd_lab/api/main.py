@@ -84,6 +84,10 @@ class QueryIn(BaseModel):
     sql: str
 
 
+class ChatIn(BaseModel):
+    message: str
+
+
 # --------------------------------------------------------------------- settings
 
 
@@ -940,6 +944,42 @@ def case_keyword(case_id: str, keyword: str) -> dict:
     if not deps.layout.warehouse.is_file():
         raise HTTPException(409, "case not processed yet")
     return search_keyword(deps, keyword)
+
+
+@app.get("/api/cases/{case_id}/chat")
+def case_chat_history(case_id: str) -> dict:
+    """The persisted conversation so far, flattened for the chat panel to
+    render on load. An unanalysed case (or one with no chat yet) simply has
+    no turns - not an error, chat just hasn't started."""
+    from dd_lab.agent.chat import history_for_ui, load_history
+
+    layout = _layout(case_id)
+    if not layout.manifest.is_file():
+        raise HTTPException(404, "case not found")
+    deps = InvestigationDeps(cases_root=Path(_settings.cases_root), case_id=case_id)
+    return {"turns": history_for_ui(load_history(deps))}
+
+
+@app.post("/api/cases/{case_id}/chat")
+def case_chat_send(case_id: str, body: ChatIn) -> dict:
+    """Phase 6 of the agent-improvement plan - a read-mostly, multi-turn
+    chat over the same investigation tool substrate as the main agent
+    (query_warehouse, search_keyword, correlate_entities, list_processes,
+    process_memory, list_findings, ...), excluding anything mutating or
+    expensive (run_ingest/run_memory_analysis/write_finding/generate_report -
+    see dd_lab/agent/chat.py's own docstring). Synchronous request/response,
+    not a background job - a chat reply is a normal few-second wait, not a
+    multi-minute analysis run."""
+    from dd_lab.agent.chat import run_chat_turn
+
+    layout = _layout(case_id)
+    if not layout.manifest.is_file():
+        raise HTTPException(404, "case not found")
+    deps = InvestigationDeps(cases_root=Path(_settings.cases_root), case_id=case_id)
+    result = run_chat_turn(deps, _settings.agent_config(), body.message)
+    if not result.ok:
+        return {"ok": False, "error": result.error}
+    return {"ok": True, "reply": result.reply}
 
 
 @app.get("/api/cases/{case_id}/report", response_class=HTMLResponse)

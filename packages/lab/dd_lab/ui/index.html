@@ -155,10 +155,10 @@ async function pollActiveJobs(){
 }
 setInterval(pollActiveJobs, 3000);
 
-const _loadingMsg = {case:'Opening case…', report:'Loading report…', audit:'Loading audit trail…', cases:'Loading cases…', import:'Loading…', settings:'Loading settings…', dashboard:'Loading…', cacheentry:'Opening cache entry…', processdetail:'Opening process…'};
+const _loadingMsg = {case:'Opening case…', report:'Loading report…', audit:'Loading audit trail…', cases:'Loading cases…', import:'Loading…', settings:'Loading settings…', dashboard:'Loading…', cacheentry:'Opening cache entry…', processdetail:'Opening process…', chat:'Opening chat…'};
 async function render(){
   const m=$('#main'); m.innerHTML=''; m.append(loadingView(_loadingMsg[state.view]));
-  try{ await ({dashboard:vDashboard,import:vImport,cases:vCases,case:vCase,report:vReport,audit:vAudit,settings:vSettings,cacheentry:vCacheEntry,processdetail:vProcessDetail}[state.view]||vDashboard)(m); }
+  try{ await ({dashboard:vDashboard,import:vImport,cases:vCases,case:vCase,report:vReport,audit:vAudit,settings:vSettings,cacheentry:vCacheEntry,processdetail:vProcessDetail,chat:vChat}[state.view]||vDashboard)(m); }
   catch(e){ m.innerHTML=''; m.append(el('div',{class:'panel'},'Error: '+e.message)); }
 }
 
@@ -682,6 +682,7 @@ async function vCase(m){
   } else {
     actions.append(el('div',{class:'row'},
       d.reports.length?el('button',{class:'primary',onclick:()=>go('report',id)},'📄  Open report'):'',
+      el('button',{class:'sec',onclick:()=>go('chat',id)},'💬  Chat'),
       el('button',{class:'sec',onclick:e=>startRun(e.target)},'↻  Re-run analysis'),
       el('button',{class:'sec',onclick:()=>document.getElementById('browser')
         ?.scrollIntoView({behavior:'smooth'})},'🔍  Browse artifacts'),
@@ -1650,6 +1651,84 @@ async function vAudit(m){
     el('h2',{},'Analysis audit'),
     el('div',{class:'panel scroll'}, tbl(d.audit,['seq','ts','kind','name','detail'])));
 }
+async function vChat(m){
+  // Phase 6 of the agent-improvement plan (magical-dazzling-dragon.md), the
+  // last phase - its own page (same reasoning as Report/Audit: this used to
+  // have no precedent at all in this codebase, so it gets a focused view
+  // rather than being squeezed into the case page). Read-mostly: the chat
+  // agent (dd_lab/agent/chat.py) can search/correlate/look at process
+  // memory but never writes findings or runs new analysis - only "Run
+  // analysis" does that, unconditionally, before any agent starts.
+  const id=state.arg;
+  m.innerHTML='';
+  m.append(el('div',{class:'row',style:'margin-bottom:10px'},
+    el('button',{class:'sec',onclick:()=>go('case',id)},'←  Back to case')));
+  m.append(el('h1',{},'Chat'), el('div',{class:'muted mono',style:'margin-bottom:6px'},id));
+  m.append(el('div',{class:'hint',style:'margin-bottom:10px'},
+    "Ask about what's already in this case's warehouse - it can search, correlate identifiers "+
+    "across apps, and look at a specific process's memory, but it never writes findings or "+
+    "changes the case; those only ever happen through Run analysis."));
+
+  const thread=el('div',{class:'panel',
+    style:'max-height:calc(100vh - 330px);overflow:auto;display:flex;flex-direction:column;gap:10px'});
+  const input=el('textarea',{placeholder:'Ask a question about this case… (Enter to send, Shift+Enter for a new line)'});
+  const sendBtn=el('button',{},'Send');
+  const err=el('div',{class:'hint',style:'color:var(--bad)'});
+
+  function bubble(role,text){
+    const isUser = role==='user';
+    return el('div',{style:
+      'align-self:'+(isUser?'flex-end':'flex-start')+';max-width:78%;'+
+      'background:'+(isUser?'var(--accent2)':'var(--bg)')+';color:'+(isUser?'#fff':'var(--fg)')+';'+
+      'border:1px solid var(--line);border-radius:10px;padding:8px 12px;'+
+      'white-space:pre-wrap;word-break:break-word;font-size:13.5px'},
+      text);
+  }
+
+  async function loadHistory(){
+    thread.innerHTML='<div class="muted" style="padding:10px">loading…</div>';
+    let d;
+    try{ d=await api('/cases/'+id+'/chat'); }
+    catch(e){ thread.innerHTML=''; thread.append(el('div',{class:'hint'},'Could not load: '+e.message)); return; }
+    thread.innerHTML='';
+    if(!d.turns.length){
+      thread.append(el('div',{class:'hint'},'No messages yet — ask something below.'));
+      return;
+    }
+    d.turns.forEach(t=>thread.append(bubble(t.role,t.text)));
+    thread.scrollTop=thread.scrollHeight;
+  }
+
+  async function send(){
+    const text=input.value.trim();
+    if(!text) return;
+    err.textContent='';
+    input.value=''; input.disabled=true; sendBtn.disabled=true;
+    sendBtn.innerHTML='<span class="spin" style="border-color:#0003;border-top-color:#333"></span>…';
+    if(thread.querySelector('.hint')) thread.innerHTML='';  // clear the "no messages yet" hint
+    thread.append(bubble('user',text));
+    thread.scrollTop=thread.scrollHeight;
+    try{
+      const d=await api('/cases/'+id+'/chat',{method:'POST',body:JSON.stringify({message:text})});
+      if(!d.ok) throw new Error(d.error||'chat failed');
+      thread.append(bubble('assistant',d.reply));
+      thread.scrollTop=thread.scrollHeight;
+    }catch(e){
+      err.textContent='Could not get a reply: '+e.message;
+    }finally{
+      input.disabled=false; sendBtn.disabled=false; sendBtn.textContent='Send'; input.focus();
+    }
+  }
+  sendBtn.onclick=send;
+  input.onkeydown=e=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } };
+
+  m.append(thread,
+    el('div',{class:'row',style:'margin-top:10px;align-items:flex-start'}, input, sendBtn),
+    err);
+  loadHistory();
+  input.focus();
+}
+
 function tbl(rows,cols){
   const t=el('table',{},el('thead',{},el('tr',{},...cols.map(c=>el('th',{},c)))));
   const tb=el('tbody',{});
