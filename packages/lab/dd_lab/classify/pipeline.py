@@ -61,6 +61,8 @@ def classify_warehouse(
                     {
                         "category": cat,
                         "confidence": cr.confidence,
+                        "relevant": cr.relevant,
+                        "relevance_score": cr.relevance_score,
                         "regex_vote": _s(cr.regex_vote),
                         "ner_vote": _s(cr.ner_vote),
                         "keyword_vote": _s(cr.keyword_vote),

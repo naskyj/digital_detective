@@ -172,11 +172,12 @@ def test_case_lifecycle_via_api(client):
     # and artifact-browser "why" view read.
     row = arts["rows"][0]
     for col in (
-        "artifact_id", "regex_vote", "keyword_vote", "ner_vote", "model_vote", "entropy_vote",
-        "evidence_spans", "deleted",
+        "artifact_id", "relevant", "relevance_score", "regex_vote", "keyword_vote", "ner_vote",
+        "model_vote", "entropy_vote", "evidence_spans", "deleted",
     ):
         assert col in row
     assert isinstance(row["deleted"], bool)
+    assert isinstance(row["relevant"], bool)
 
     clf = client.get("/api/cases/case_api_1/classification").json()
     assert clf["by_category"]

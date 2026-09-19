@@ -97,7 +97,7 @@ def build_correlation_report(
     max_artifacts_per_entity: int = 50,
     min_distinct_sources: int = 2,
 ) -> list[CorrelatedEntity]:
-    """Scan the higher-signal (non-GENERAL) artifacts for entities, then for
+    """Scan the higher-signal (`relevant`) artifacts for entities, then for
     each distinct one look across the *whole* warehouse (every category,
     every source type) for where else it appears. Only entities that actually
     turn up in more than one app or more than one storage mechanism are
@@ -105,7 +105,7 @@ def build_correlation_report(
     appears once has nothing to correlate.
     """
     candidates = wh.query(
-        f"SELECT {_CITE_COLS} FROM artifacts WHERE category != 'GENERAL' "
+        f"SELECT {_CITE_COLS} FROM artifacts WHERE relevant "
         f"ORDER BY confidence DESC NULLS LAST LIMIT ?",
         [candidate_row_limit],
     )

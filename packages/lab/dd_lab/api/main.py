@@ -503,10 +503,11 @@ def case_artifacts(
     try:
         total = wh.query(f"SELECT count(*) AS n FROM artifacts {clause}", list(params))[0]["n"]
         rows = wh.query(
-            f"SELECT app, source_type, category, confidence, key, substr(value,1,300) AS value, "
+            f"SELECT app, source_type, category, confidence, relevant, relevance_score, key, "
+            f"substr(value,1,300) AS value, "
             f"record_ts, source_file, source_locator, artifact_id, regex_vote, keyword_vote, "
             f"ner_vote, model_vote, entropy_vote, evidence_spans, deleted FROM artifacts {clause} "
-            f"ORDER BY (category != 'GENERAL') DESC, confidence DESC NULLS LAST, key, artifact_id "
+            f"ORDER BY relevant DESC, confidence DESC NULLS LAST, key, artifact_id "
             f"LIMIT {int(limit)} OFFSET {int(offset)}",
             list(params),
         )
@@ -784,7 +785,7 @@ def case_artifacts_export(
     try:
         rows = wh.query(
             f"SELECT {', '.join(query_cols)} FROM artifacts {clause} "
-            f"ORDER BY (category != 'GENERAL') DESC, confidence DESC NULLS LAST, key, artifact_id "
+            f"ORDER BY relevant DESC, confidence DESC NULLS LAST, key, artifact_id "
             f"LIMIT 200000",
             list(params),
         )
@@ -822,8 +823,8 @@ def case_artifact_detail(case_id: str, artifact_id: str) -> dict:
     wh = Warehouse(deps.layout.warehouse)
     try:
         rows = wh.query(
-            "SELECT app, source_type, category, confidence, key, value, record_ts, source_file, "
-            "source_locator, artifact_id, deleted FROM artifacts WHERE artifact_id = ?",
+            "SELECT app, source_type, category, confidence, relevant, relevance_score, key, value, "
+            "record_ts, source_file, source_locator, artifact_id, deleted FROM artifacts WHERE artifact_id = ?",
             [artifact_id],
         )
         if not rows:

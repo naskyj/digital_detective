@@ -20,7 +20,7 @@ from dd_lab.classify.entropy import entropy_vote
 from dd_lab.classify.ner import ner_vote
 from dd_lab.classify.rules import CATEGORY_PRIORITY, keyword_hits, regex_hits
 
-CLASSIFIER_VERSION = "ensemble-0.2.0"
+CLASSIFIER_VERSION = "ensemble-0.3.0"
 
 _PRIORITY_INDEX = {c: i for i, c in enumerate(CATEGORY_PRIORITY)}
 
@@ -36,15 +36,23 @@ _W_MODEL = 1.1
 _W_ENTROPY = 0.5
 
 
-def _combine(scores: dict[C, float]) -> tuple[C, float]:
+def _combine(scores: dict[C, float]) -> tuple[C, float, float]:
+    """(category, confidence, relevance_score). `relevance_score` is the
+    winning category's own raw accumulated score, capped to [0, 1] - the
+    same signal `confidence` already partly uses, but as its own,
+    unconflated value, and pinned to exactly 0.0 whenever GENERAL wins
+    (never a positive "relevance" for the category that means "nothing
+    said this mattered"). `category`/`confidence` are unchanged - relevance
+    is read from the same combine step, not a second ensemble pass."""
     if not scores:
-        return C.GENERAL, 0.0
+        return C.GENERAL, 0.0, 0.0
     top = max(scores.items(), key=lambda kv: (kv[1], -_PRIORITY_INDEX.get(kv[0], 99)))
     cat, raw = top
     total = sum(scores.values())
     agreement = raw / total if total else 0.0
     confidence = max(0.0, min(1.0, 0.5 * min(raw, 1.0) + 0.5 * agreement))
-    return cat, round(confidence, 3)
+    relevance = 0.0 if cat == C.GENERAL else round(min(1.0, raw), 3)
+    return cat, round(confidence, 3), relevance
 
 
 class Classifier:
@@ -93,10 +101,12 @@ class Classifier:
         if not scores and str(value_type) == ValueType.TIMESTAMP:
             scores[C.TIMESTAMP] = 0.6
 
-        category, confidence = _combine(scores)
+        category, confidence, relevance_score = _combine(scores)
         return ClassificationResult(
             category=category,
             confidence=confidence,
+            relevant=category != C.GENERAL,
+            relevance_score=relevance_score,
             regex_vote=regex_vote,
             keyword_vote=keyword_vote,
             ner_vote=ner_cat,

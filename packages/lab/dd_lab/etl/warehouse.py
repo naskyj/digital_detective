@@ -79,6 +79,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
     -- classification (filled by the NLP ensemble)
     category          VARCHAR,
     confidence        DOUBLE,
+    relevant          BOOLEAN,        -- "does this matter to the investigation" - a real field of its
+    relevance_score   DOUBLE,         -- own, not every consumer re-deriving category != 'GENERAL'
     regex_vote        VARCHAR,
     ner_vote          VARCHAR,
     keyword_vote      VARCHAR,
@@ -113,7 +115,7 @@ CREATE OR REPLACE VIEW v_by_category AS
     ORDER BY artifacts DESC;
 
 CREATE OR REPLACE VIEW v_timeline AS
-    SELECT record_ts, app, source_type, category, key, value, artifact_id
+    SELECT record_ts, app, source_type, category, relevant, key, value, artifact_id
     FROM artifacts
     WHERE record_ts IS NOT NULL
     ORDER BY record_ts;
@@ -150,7 +152,8 @@ _CORE_COLS = (
     "deleted",
 )
 _CLASS_COLS = (
-    "category", "confidence", "regex_vote", "ner_vote", "keyword_vote", "model_vote", "entropy_vote",
+    "category", "confidence", "relevant", "relevance_score",
+    "regex_vote", "ner_vote", "keyword_vote", "model_vote", "entropy_vote",
     "evidence_spans", "classifier_version", "classified_ts",
 )
 _INSERT_COLS = _CORE_COLS + _CLASS_COLS
@@ -162,7 +165,9 @@ _JSON_COLUMNS = (
     ("key", "VARCHAR"), ("value", "VARCHAR"), ("value_type", "VARCHAR"),
     ("record_ts", "TIMESTAMP"), ("extracted_ts", "TIMESTAMP"),
     ("size_bytes", "BIGINT"), ("value_sha256", "VARCHAR"), ("deleted", "BOOLEAN"),
-    ("category", "VARCHAR"), ("confidence", "DOUBLE"), ("regex_vote", "VARCHAR"),
+    ("category", "VARCHAR"), ("confidence", "DOUBLE"),
+    ("relevant", "BOOLEAN"), ("relevance_score", "DOUBLE"),
+    ("regex_vote", "VARCHAR"),
     ("ner_vote", "VARCHAR"), ("keyword_vote", "VARCHAR"), ("model_vote", "VARCHAR"),
     ("entropy_vote", "VARCHAR"),
     ("evidence_spans", "VARCHAR"), ("classifier_version", "VARCHAR"), ("classified_ts", "TIMESTAMP"),
@@ -179,6 +184,8 @@ _JSON_COLUMNS = (
 _MIGRATIONS = (
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS deleted BOOLEAN DEFAULT FALSE",
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS entropy_vote VARCHAR",
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS relevant BOOLEAN",
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS relevance_score DOUBLE",
 )
 
 
@@ -246,6 +253,8 @@ class Warehouse:
             "size_bytes": a.size_bytes, "value_sha256": a.value_sha256, "deleted": a.deleted,
             "category": str(c.category) if c else None,
             "confidence": c.confidence if c else None,
+            "relevant": c.relevant if c else None,
+            "relevance_score": c.relevance_score if c else None,
             "regex_vote": _s(c.regex_vote) if c else None,
             "ner_vote": _s(c.ner_vote) if c else None,
             "keyword_vote": _s(c.keyword_vote) if c else None,
@@ -298,7 +307,8 @@ class Warehouse:
         """
         self.con.execute(
             "CREATE OR REPLACE TEMP TABLE _cls ("
-            "artifact_id VARCHAR, category VARCHAR, confidence DOUBLE, regex_vote VARCHAR, "
+            "artifact_id VARCHAR, category VARCHAR, confidence DOUBLE, "
+            "relevant BOOLEAN, relevance_score DOUBLE, regex_vote VARCHAR, "
             "ner_vote VARCHAR, keyword_vote VARCHAR, model_vote VARCHAR, entropy_vote VARCHAR, "
             "evidence_spans VARCHAR, classifier_version VARCHAR, classified_ts TIMESTAMP)"
         )
@@ -306,10 +316,12 @@ class Warehouse:
         for batch in _batched(updates, 20000):
             self.con.execute("DELETE FROM _cls")
             self.con.executemany(
-                "INSERT INTO _cls VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO _cls VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [
                     (
-                        aid, c["category"], c["confidence"], c.get("regex_vote"), c.get("ner_vote"),
+                        aid, c["category"], c["confidence"],
+                        c.get("relevant"), c.get("relevance_score"),
+                        c.get("regex_vote"), c.get("ner_vote"),
                         c.get("keyword_vote"), c.get("model_vote"), c.get("entropy_vote"),
                         c.get("evidence_spans"), c.get("classifier_version"), c.get("classified_ts"),
                     )
@@ -318,7 +330,9 @@ class Warehouse:
             )
             self.con.execute(
                 "UPDATE artifacts a SET "
-                "category = c.category, confidence = c.confidence, regex_vote = c.regex_vote, "
+                "category = c.category, confidence = c.confidence, "
+                "relevant = c.relevant, relevance_score = c.relevance_score, "
+                "regex_vote = c.regex_vote, "
                 "ner_vote = c.ner_vote, keyword_vote = c.keyword_vote, model_vote = c.model_vote, "
                 "entropy_vote = c.entropy_vote, "
                 "evidence_spans = c.evidence_spans, classifier_version = c.classifier_version, "

@@ -71,3 +71,53 @@ def test_model_voter_is_optional_and_used_when_present():
     r = clf.classify("some.random.key", "value")
     assert r.model_vote == "GAME_DETAIL"
     assert r.category == "GAME_DETAIL"
+
+
+# --------------------------------------------------------------------- relevant/relevance_score
+#
+# A second, explicit output alongside category - "does this matter to the
+# investigation", not "what kind of thing is this". Computed from the same
+# per-voter scores category already uses (see ensemble.py::_combine), not a
+# separate ensemble pass.
+
+
+def test_relevant_true_for_a_real_category_hit():
+    r = C.classify("local_storage.app.password", "hunter2")
+    assert r.category == "CREDENTIAL"
+    assert r.relevant is True
+    assert r.relevance_score > 0.0
+
+
+def test_relevant_false_when_nothing_fires_at_all():
+    r = C.classify("some.opaque.key", "xyz")
+    assert r.category == "GENERAL"
+    assert r.relevant is False
+    assert r.relevance_score == 0.0
+
+
+def test_relevant_false_for_a_bare_boolean_or_short_number():
+    # the entropy voter's explicit "not relevant" vote (see test_classify_entropy.py)
+    r = C.classify("prefs.window.height", "800")
+    assert r.category == "GENERAL"
+    assert r.relevant is False
+    assert r.relevance_score == 0.0
+
+
+def test_relevance_score_is_never_positive_when_category_is_general():
+    """However GENERAL was reached (empty scores, or GENERAL winning a real
+    vote), relevance_score must be pinned to 0.0 - never a positive
+    "relevance" for the category that means "nothing said this mattered"."""
+    for key, value in [("some.opaque.key", "xyz"), ("prefs.window.height", "800"), ("k", "true")]:
+        r = C.classify(key, value)
+        if r.category == "GENERAL":
+            assert r.relevance_score == 0.0
+            assert r.relevant is False
+
+
+def test_relevant_true_for_a_bare_timestamp_value_type():
+    from dd_core.enums import ValueType
+
+    r = C.classify("cache.body.some_field", "2025-06-22T20:37:52Z", ValueType.TIMESTAMP)
+    assert r.category == "TIMESTAMP"
+    assert r.relevant is True
+    assert r.relevance_score > 0.0

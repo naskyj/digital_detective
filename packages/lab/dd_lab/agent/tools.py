@@ -198,7 +198,7 @@ def search_keyword(deps: InvestigationDeps, keyword: str, limit: int = 50) -> di
         rows = wh.query(
             "SELECT app, source_type, category, key, substr(value,1,200) AS value, record_ts "
             "FROM artifacts WHERE value ILIKE ? OR key ILIKE ? "
-            "ORDER BY (category != 'GENERAL') DESC, confidence DESC LIMIT ?",
+            "ORDER BY relevant DESC, confidence DESC LIMIT ?",
             [f"%{keyword}%", f"%{keyword}%", int(limit)],
         )
     finally:
@@ -301,7 +301,7 @@ def process_memory(deps: InvestigationDeps, pid: int, limit: int = 50) -> dict:
             "SELECT app, source_type, category, key, substr(value,1,300) AS value, "
             "record_ts, source_file, source_locator, artifact_id FROM artifacts "
             "WHERE source_type = 'memory_string' AND source_locator LIKE ? "
-            "ORDER BY (category != 'GENERAL') DESC, confidence DESC LIMIT ?",
+            "ORDER BY relevant DESC, confidence DESC LIMIT ?",
             [f"pid{int(pid)}:%", int(limit)],
         )
     finally:

@@ -75,7 +75,7 @@ def build_report(
         timeline = wh.query(
             "SELECT strftime(record_ts,'%Y-%m-%d %H:%M') AS ts, app, category, "
             "substr(key,1,50) AS key, substr(value,1,80) AS value "
-            "FROM v_timeline WHERE category != 'GENERAL' LIMIT 120"
+            "FROM v_timeline WHERE relevant LIMIT 120"
         )
         high = wh.query(
             "SELECT category, round(confidence,2) AS conf, app, substr(key,1,60) AS key, "
