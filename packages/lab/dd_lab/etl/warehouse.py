@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     ner_vote          VARCHAR,
     keyword_vote      VARCHAR,
     model_vote        VARCHAR,
+    entropy_vote      VARCHAR,
     evidence_spans    VARCHAR,     -- JSON array
     classifier_version VARCHAR,
     classified_ts     TIMESTAMP
@@ -149,7 +150,7 @@ _CORE_COLS = (
     "deleted",
 )
 _CLASS_COLS = (
-    "category", "confidence", "regex_vote", "ner_vote", "keyword_vote", "model_vote",
+    "category", "confidence", "regex_vote", "ner_vote", "keyword_vote", "model_vote", "entropy_vote",
     "evidence_spans", "classifier_version", "classified_ts",
 )
 _INSERT_COLS = _CORE_COLS + _CLASS_COLS
@@ -163,6 +164,7 @@ _JSON_COLUMNS = (
     ("size_bytes", "BIGINT"), ("value_sha256", "VARCHAR"), ("deleted", "BOOLEAN"),
     ("category", "VARCHAR"), ("confidence", "DOUBLE"), ("regex_vote", "VARCHAR"),
     ("ner_vote", "VARCHAR"), ("keyword_vote", "VARCHAR"), ("model_vote", "VARCHAR"),
+    ("entropy_vote", "VARCHAR"),
     ("evidence_spans", "VARCHAR"), ("classifier_version", "VARCHAR"), ("classified_ts", "TIMESTAMP"),
 )
 
@@ -176,6 +178,7 @@ _JSON_COLUMNS = (
 #: "column not found" on any query that names it.
 _MIGRATIONS = (
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS deleted BOOLEAN DEFAULT FALSE",
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS entropy_vote VARCHAR",
 )
 
 
@@ -247,6 +250,7 @@ class Warehouse:
             "ner_vote": _s(c.ner_vote) if c else None,
             "keyword_vote": _s(c.keyword_vote) if c else None,
             "model_vote": _s(c.model_vote) if c else None,
+            "entropy_vote": _s(c.entropy_vote) if c else None,
             "evidence_spans": _json(c.evidence_spans) if c else None,
             "classifier_version": c.classifier_version if c else None,
             "classified_ts": c.classified_ts.isoformat() if (c and c.classified_ts) else None,
@@ -295,19 +299,19 @@ class Warehouse:
         self.con.execute(
             "CREATE OR REPLACE TEMP TABLE _cls ("
             "artifact_id VARCHAR, category VARCHAR, confidence DOUBLE, regex_vote VARCHAR, "
-            "ner_vote VARCHAR, keyword_vote VARCHAR, model_vote VARCHAR, evidence_spans VARCHAR, "
-            "classifier_version VARCHAR, classified_ts TIMESTAMP)"
+            "ner_vote VARCHAR, keyword_vote VARCHAR, model_vote VARCHAR, entropy_vote VARCHAR, "
+            "evidence_spans VARCHAR, classifier_version VARCHAR, classified_ts TIMESTAMP)"
         )
         total = 0
         for batch in _batched(updates, 20000):
             self.con.execute("DELETE FROM _cls")
             self.con.executemany(
-                "INSERT INTO _cls VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO _cls VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 [
                     (
                         aid, c["category"], c["confidence"], c.get("regex_vote"), c.get("ner_vote"),
-                        c.get("keyword_vote"), c.get("model_vote"), c.get("evidence_spans"),
-                        c.get("classifier_version"), c.get("classified_ts"),
+                        c.get("keyword_vote"), c.get("model_vote"), c.get("entropy_vote"),
+                        c.get("evidence_spans"), c.get("classifier_version"), c.get("classified_ts"),
                     )
                     for aid, c in batch
                 ],
@@ -316,6 +320,7 @@ class Warehouse:
                 "UPDATE artifacts a SET "
                 "category = c.category, confidence = c.confidence, regex_vote = c.regex_vote, "
                 "ner_vote = c.ner_vote, keyword_vote = c.keyword_vote, model_vote = c.model_vote, "
+                "entropy_vote = c.entropy_vote, "
                 "evidence_spans = c.evidence_spans, classifier_version = c.classifier_version, "
                 "classified_ts = c.classified_ts "
                 "FROM _cls c WHERE a.artifact_id = c.artifact_id"

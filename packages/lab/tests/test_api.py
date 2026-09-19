@@ -172,7 +172,8 @@ def test_case_lifecycle_via_api(client):
     # and artifact-browser "why" view read.
     row = arts["rows"][0]
     for col in (
-        "artifact_id", "regex_vote", "keyword_vote", "ner_vote", "model_vote", "evidence_spans", "deleted",
+        "artifact_id", "regex_vote", "keyword_vote", "ner_vote", "model_vote", "entropy_vote",
+        "evidence_spans", "deleted",
     ):
         assert col in row
     assert isinstance(row["deleted"], bool)
@@ -180,7 +181,10 @@ def test_case_lifecycle_via_api(client):
     clf = client.get("/api/cases/case_api_1/classification").json()
     assert clf["by_category"]
     for c in clf["by_category"]:
-        for col in ("category", "n", "mean_conf", "regex_agree", "keyword_agree", "ner_agree", "model_agree"):
+        for col in (
+            "category", "n", "mean_conf", "regex_agree", "keyword_agree", "ner_agree", "model_agree",
+            "entropy_agree",
+        ):
             assert col in c
         assert c["category"] in clf["examples"]
 

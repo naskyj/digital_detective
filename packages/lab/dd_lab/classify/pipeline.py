@@ -65,6 +65,7 @@ def classify_warehouse(
                         "ner_vote": _s(cr.ner_vote),
                         "keyword_vote": _s(cr.keyword_vote),
                         "model_vote": _s(cr.model_vote),
+                        "entropy_vote": _s(cr.entropy_vote),
                         "evidence_spans": json.dumps(cr.evidence_spans, ensure_ascii=False),
                         "classifier_version": cr.classifier_version,
                         "classified_ts": cr.classified_ts,

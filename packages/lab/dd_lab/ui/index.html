@@ -894,14 +894,14 @@ async function classificationPanel(id){
   const wrap=el('div',{class:'panel'});
   wrap.append(el('h2',{style:'margin-top:0'},'Classification breakdown'),
     el('div',{class:'hint',style:'margin-bottom:8px'},
-      'How the rules + keyword + NER + model ensemble voted per category. '+
+      'How the rules + keyword + NER + model + entropy ensemble voted per category. '+
       'Click a row for a few example artifacts and their individual votes.'));
   let d;
   try{ d=await api('/cases/'+id+'/classification'); }
   catch(e){ wrap.append(el('div',{class:'hint'},'Could not load: '+e.message)); return wrap; }
 
   const t=el('table',{},el('thead',{},el('tr',{},
-    ...['Category','Count','Mean conf','Regex','Keyword','NER','Model'].map(h=>el('th',{},h)))));
+    ...['Category','Count','Mean conf','Regex','Keyword','NER','Model','Entropy'].map(h=>el('th',{},h)))));
   const tb=el('tbody',{});
   d.by_category.forEach(c=>{
     const exBox=el('div',{style:'display:none;padding:8px 0'});
@@ -910,7 +910,7 @@ async function classificationPanel(id){
         if(!exBox.childNodes.length){
           const examples=d.examples[c.category]||[];
           exBox.append(examples.length
-            ? tbl(examples,['app','source_type','key','value','regex_vote','keyword_vote','ner_vote','model_vote'])
+            ? tbl(examples,['app','source_type','key','value','regex_vote','keyword_vote','ner_vote','model_vote','entropy_vote'])
             : el('div',{class:'hint'},'no examples'));
         }
         exBox.style.display='block';
@@ -922,9 +922,10 @@ async function classificationPanel(id){
       el('td',{},c.regex_agree.toLocaleString()),
       el('td',{},c.keyword_agree.toLocaleString()),
       el('td',{},c.ner_agree.toLocaleString()),
-      el('td',{},c.model_agree.toLocaleString()));
+      el('td',{},c.model_agree.toLocaleString()),
+      el('td',{},c.entropy_agree.toLocaleString()));
     tb.append(row);
-    const exRow=el('tr',{}); const exCell=el('td',{colspan:'7'},exBox);
+    const exRow=el('tr',{}); const exCell=el('td',{colspan:'8'},exBox);
     exRow.append(exCell); tb.append(exRow);
   });
   t.append(tb);

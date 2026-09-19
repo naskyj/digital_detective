@@ -505,7 +505,7 @@ def case_artifacts(
         rows = wh.query(
             f"SELECT app, source_type, category, confidence, key, substr(value,1,300) AS value, "
             f"record_ts, source_file, source_locator, artifact_id, regex_vote, keyword_vote, "
-            f"ner_vote, model_vote, evidence_spans, deleted FROM artifacts {clause} "
+            f"ner_vote, model_vote, entropy_vote, evidence_spans, deleted FROM artifacts {clause} "
             f"ORDER BY (category != 'GENERAL') DESC, confidence DESC NULLS LAST, key, artifact_id "
             f"LIMIT {int(limit)} OFFSET {int(offset)}",
             list(params),
@@ -662,14 +662,15 @@ def case_classification(case_id: str) -> dict:
             "sum(CASE WHEN regex_vote = category THEN 1 ELSE 0 END) AS regex_agree, "
             "sum(CASE WHEN keyword_vote = category THEN 1 ELSE 0 END) AS keyword_agree, "
             "sum(CASE WHEN ner_vote = category THEN 1 ELSE 0 END) AS ner_agree, "
-            "sum(CASE WHEN model_vote = category THEN 1 ELSE 0 END) AS model_agree "
+            "sum(CASE WHEN model_vote = category THEN 1 ELSE 0 END) AS model_agree, "
+            "sum(CASE WHEN entropy_vote = category THEN 1 ELSE 0 END) AS entropy_agree "
             "FROM artifacts GROUP BY category ORDER BY n DESC"
         )
         examples = {}
         for r in rows:
             examples[r["category"]] = wh.query(
                 "SELECT app, source_type, key, substr(value,1,200) AS value, "
-                "regex_vote, keyword_vote, ner_vote, model_vote "
+                "regex_vote, keyword_vote, ner_vote, model_vote, entropy_vote "
                 "FROM artifacts WHERE category = ? ORDER BY confidence DESC NULLS LAST LIMIT 5",
                 [r["category"]],
             )

@@ -26,6 +26,7 @@ class ClassificationResult(BaseModel):
     ner_vote: ArtifactCategory | None = None
     keyword_vote: ArtifactCategory | None = None
     model_vote: ArtifactCategory | None = None
+    entropy_vote: ArtifactCategory | None = None
     evidence_spans: list[str] = Field(default_factory=list)
     classifier_version: str = "unknown"
     classified_ts: datetime | None = None

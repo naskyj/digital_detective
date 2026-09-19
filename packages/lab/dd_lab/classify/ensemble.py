@@ -16,10 +16,11 @@ from datetime import UTC, datetime
 from dd_core.enums import ArtifactCategory as C
 from dd_core.enums import ValueType
 from dd_core.schema import ClassificationResult
+from dd_lab.classify.entropy import entropy_vote
 from dd_lab.classify.ner import ner_vote
 from dd_lab.classify.rules import CATEGORY_PRIORITY, keyword_hits, regex_hits
 
-CLASSIFIER_VERSION = "ensemble-0.1.0"
+CLASSIFIER_VERSION = "ensemble-0.2.0"
 
 _PRIORITY_INDEX = {c: i for i, c in enumerate(CATEGORY_PRIORITY)}
 
@@ -28,6 +29,11 @@ _W_REGEX = 1.0
 _W_KEYWORD = 0.85
 _W_NER = 0.7
 _W_MODEL = 1.1
+# Weakest voter, deliberately - a value-shape heuristic with no key-name or
+# keyword context at all (see entropy.py's own docstring). Its job is to
+# break ties in favour of/against GENERAL when nothing else has a strong
+# opinion, not to override a real signal from another voter.
+_W_ENTROPY = 0.5
 
 
 def _combine(scores: dict[C, float]) -> tuple[C, float]:
@@ -77,6 +83,12 @@ class Classifier:
                 model_cat, model_strength = mv
                 scores[model_cat] += _W_MODEL * model_strength
 
+        ev = entropy_vote(key, value)
+        entropy_cat = None
+        if ev:
+            entropy_cat, entropy_strength = ev
+            scores[entropy_cat] += _W_ENTROPY * entropy_strength
+
         # A bare timestamp / number with no other signal is TIMESTAMP / GENERAL.
         if not scores and str(value_type) == ValueType.TIMESTAMP:
             scores[C.TIMESTAMP] = 0.6
@@ -89,6 +101,7 @@ class Classifier:
             keyword_vote=keyword_vote,
             ner_vote=ner_cat,
             model_vote=model_cat,
+            entropy_vote=entropy_cat,
             evidence_spans=spans[:5],
             classifier_version=CLASSIFIER_VERSION,
             classified_ts=datetime.now(UTC),
