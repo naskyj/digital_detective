@@ -27,7 +27,14 @@ from pathlib import Path
 from dd_core.casedir import CaseLayout
 from dd_core.custody import CustodyLog
 from dd_core.enums import CustodyEvent, SourceType
-from dd_core.evidence import MEMORY, execute_copy, plan_profile_copy, safe_name, source_type_for_path
+from dd_core.evidence import (
+    MEMORY,
+    execute_copy,
+    plan_native_root_copy,
+    plan_profile_copy,
+    safe_name,
+    source_type_for_path,
+)
 from dd_core.hashing import sha256_file
 from dd_core.manifest import AcquisitionHost, Manifest, build_entry
 from dd_core.schema import TargetApp
@@ -97,7 +104,7 @@ def _image_host(target, image_path: str, image_sha256: str) -> AcquisitionHost:
 
 
 def _extract_discovered_apps(
-    found: list[tuple[str, Path, str | None]],
+    found: list[tuple[str, Path, str | None, Path | None]],
     *,
     layout: CaseLayout,
     custody: CustodyLog,
@@ -123,7 +130,7 @@ def _extract_discovered_apps(
     silently landing in - and merging into - the same evidence folder."""
     target_apps: list[TargetApp] = []
     prefix = source_app_prefix(source_label) if source_label else ""
-    for name, profile_dir, version in found:
+    for name, profile_dir, version, native_root in found:
         display_name = f"{source_label} / {name}" if source_label else name
         dest_name = prefix + safe_name(name)
         app_evidence = layout.evidence / dest_name
@@ -131,6 +138,12 @@ def _extract_discovered_apps(
 
         say(f"[{display_name}] extracting profile from {profile_dir}")
         specs = plan_profile_copy(profile_dir)
+        if native_root is not None:
+            # the app's own native data (logs, XML/JSON config) sitting
+            # outside the Chromium profile WebView2/MSIX embeds well inside
+            # it - see iter_profiles_for_entry's docstring. A curated,
+            # extension-allowlisted pick, never a wholesale copy.
+            specs += plan_native_root_copy(native_root)
         if not specs:
             warnings.append(f"{display_name}: no recognisable Chromium data at {profile_dir}")
             say(f"[{display_name}] WARNING: nothing to extract")
@@ -328,7 +341,7 @@ def acquire_from_image(
         say("WARNING: no matching app profiles found")
 
     target_apps = _extract_discovered_apps(
-        [(a.name, a.profile_dir, a.version) for a in found],
+        [(a.name, a.profile_dir, a.version, a.native_root) for a in found],
         layout=layout, custody=custody, operator=operator or "image-extractor",
         say=say, warnings=warnings, provenance="from image path", source_label=source_label,
     )
@@ -412,7 +425,7 @@ def acquire_from_folder(
         say("WARNING: no matching app profiles found")
 
     target_apps = _extract_discovered_apps(
-        [(a.name, a.profile_dir, a.version) for a in found],
+        [(a.name, a.profile_dir, a.version, a.native_root) for a in found],
         layout=layout, custody=custody, operator=operator or "folder-import",
         say=say, warnings=warnings, provenance="from folder path", source_label=source_label,
     )

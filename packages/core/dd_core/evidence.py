@@ -156,12 +156,26 @@ def _safe_iterdir(d: Path) -> list[Path]:
 _MSIX_REDIRECT_ROOTS = ("Roaming", "Local")
 
 
-def iter_profiles_for_entry(entry: Path) -> list[tuple[str, Path]]:
-    """Every (name, profile_dir) found at or under one candidate directory -
-    `entry` itself, one level nested (`<name>/<name>`, some apps do this),
-    an MSIX/UWP Store-package redirect (`entry/LocalCache/{Roaming,Local}/
-    *`), or embedded via WebView2 (possibly more than one, if the app keeps
-    several versioned copies around).
+def iter_profiles_for_entry(entry: Path) -> list[tuple[str, Path, Path | None]]:
+    """Every (name, profile_dir, native_root) found at or under one candidate
+    directory - `entry` itself, one level nested (`<name>/<name>`, some apps
+    do this), an MSIX/UWP Store-package redirect (`entry/LocalCache/
+    {Roaming,Local}/*`), or embedded via WebView2 (possibly more than one, if
+    the app keeps several versioned copies around).
+
+    `native_root` is `None` when the profile itself already covers the app's
+    own data (`entry` *is* the profile, or `<name>/<name>` is - a normal
+    Electron app: `plan_profile_copy()`'s whole-profile copy already grabs
+    everything sitting next to the Chromium store, e.g. Discord's own
+    `settings.json` next to `Preferences`, so there's nothing extra to
+    single out). It's `entry` itself for the MSIX and WebView2 cases, where
+    the profile found is nested well inside a native app's own directory
+    tree and that tree is never otherwise touched - real evidence in a
+    WebView2 host (Roblox's own logs/XML/JSON config, not the embedded
+    browser's Chromium profile) would otherwise never be collected at all.
+    Callers use this to separately, and much more narrowly (an extension
+    allowlist, not a wholesale copy - see `plan_native_root_copy`), pick up
+    that native data too.
 
     The one place "is this candidate actually a profile, and exactly
     where" is decided - the live collector (`dd_collector.discover`),
@@ -181,10 +195,10 @@ def iter_profiles_for_entry(entry: Path) -> list[tuple[str, Path]]:
     was invisible to a flat-folder scan without this.
     """
     if looks_like_profile(entry):
-        return [(entry.name, entry)]
+        return [(entry.name, entry, None)]
     nested = entry / entry.name
     if nested.is_dir() and looks_like_profile(nested):
-        return [(entry.name, nested)]
+        return [(entry.name, nested, None)]
     found = []
     for root_name in _MSIX_REDIRECT_ROOTS:
         redirect_root = entry / "LocalCache" / root_name
@@ -193,14 +207,14 @@ def iter_profiles_for_entry(entry: Path) -> list[tuple[str, Path]]:
         for child in _safe_iterdir(redirect_root):
             try:
                 if child.is_dir() and looks_like_profile(child):
-                    found.append((child.name, child))
+                    found.append((child.name, child, entry))
             except OSError:
                 continue
     if found:
         return found
     for wv in find_webview2_profiles(entry):
         via = str(wv.parent.parent.relative_to(entry))
-        found.append((f"{entry.name} (WebView2 via {via})", wv))
+        found.append((f"{entry.name} (WebView2 via {via})", wv, entry))
     return found
 
 
@@ -284,6 +298,72 @@ def plan_profile_copy(
     return specs
 
 
+# Extensions plan_native_root_copy() (below) and the appdata.py parser both
+# treat as "worth a look" - plain-text/structured config/log formats, never
+# a wholesale copy of a native app's install directory (binaries/assets are
+# clearly out of scope).
+MISC_EXTENSIONS = frozenset({".json", ".xml", ".log", ".txt", ".ini", ".cfg"})
+
+# Depth-bounded (same reasoning/bound as find_webview2_profiles: an app can
+# keep several old versioned copies around, e.g. Roblox's Versions/ folder)
+# rather than an unbounded recursive glob.
+_NATIVE_ROOT_MAX_DEPTH = 6
+_NATIVE_ROOT_MAX_FILES = 500
+
+# DENYLIST minus "logs": that entry exists for VS Code's own editor-log
+# bloat (see DENYLIST's own comment), but here it would silently defeat the
+# entire point of this function for a native app like Roblox, whose OWN
+# game logs live in a directory literally named "logs" - real evidence,
+# not bloat, and already scoped down to MISC_EXTENSIONS regardless (the
+# huge-binary-bloat concern DENYLIST's other entries address doesn't apply
+# once extension-filtering is already doing that job).
+_NATIVE_ROOT_DENYLIST = DENYLIST - {"logs"}
+
+
+def plan_native_root_copy(
+    native_root: str | Path, dest_prefix: str = "native",
+    max_depth: int = _NATIVE_ROOT_MAX_DEPTH, max_files: int = _NATIVE_ROOT_MAX_FILES,
+) -> list[CopySpec]:
+    """A curated, extension-allowlisted pick from a native (non-Chromium)
+    app's own directory tree - e.g. Roblox's own logs/XML/JSON config,
+    sitting outside the Chromium profile WebView2 embeds deep inside that
+    same tree (see iter_profiles_for_entry's native_root). Never a
+    wholesale copy: skips most DENYLIST directory names (see
+    _NATIVE_ROOT_DENYLIST - "logs" is deliberately NOT skipped here) and
+    anything under an EBWebView-marked subtree (the profile itself, already
+    collected separately via plan_profile_copy on the profile_dir), and
+    stops at `max_files` as a safety bound.
+    """
+    root = native_root if isinstance(native_root, Path) else Path(native_root)
+    specs: list[CopySpec] = []
+
+    def walk(d: Path, depth: int) -> None:
+        if depth > max_depth or len(specs) >= max_files:
+            return
+        try:
+            children = list(d.iterdir())
+        except OSError:
+            return
+        for child in children:
+            if len(specs) >= max_files:
+                return
+            try:
+                is_dir = child.is_dir()
+            except OSError:
+                continue
+            if is_dir:
+                if child.name in _NATIVE_ROOT_DENYLIST or child.name == _WEBVIEW2_MARKER:
+                    continue
+                walk(child, depth + 1)
+            elif child.suffix.lower() in MISC_EXTENSIONS:
+                rel = child.relative_to(root).as_posix()
+                specs.append(CopySpec(child, f"{dest_prefix}/{rel}", False))
+
+    if root.is_dir():
+        walk(root, 0)
+    return specs
+
+
 # path prefix (under <app>/) -> SourceType string
 _SOURCE_TYPE_PREFIXES = (
     ("Local Storage/leveldb", "local_storage"),
@@ -297,6 +377,7 @@ _SOURCE_TYPE_PREFIXES = (
     ("Preferences", "preferences"),
     ("Local State", "local_state"),
     ("memory", "memory_process"),
+    ("native", "app_data"),
 )
 
 
@@ -307,6 +388,11 @@ def source_type_for_path(evidence_relative_path: str) -> str:
     for prefix, source_type in _SOURCE_TYPE_PREFIXES:
         if tail.startswith(prefix):
             return source_type
+    # An unclaimed file loose at the app root (e.g. Discord's own
+    # settings.json, sitting next to Preferences) - app_data if it's a
+    # format appdata.py would actually pick up, else the old fallback.
+    if Path(tail).suffix.lower() in MISC_EXTENSIONS:
+        return "app_data"
     return "preferences"
 
 

@@ -14,6 +14,7 @@ from dd_core.evidence import (
     CopyReport,
     CopySpec,
     execute_copy,
+    plan_native_root_copy,
     plan_profile_copy,
     source_type_for_path,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "CustodyLog",
     "CustodyRecord",
     "execute_copy",
+    "plan_native_root_copy",
     "plan_profile_copy",
     "source_type_for_path",
     "Manifest",

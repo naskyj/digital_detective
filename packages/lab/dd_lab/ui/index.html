@@ -707,6 +707,12 @@ const SRC_LABELS = {
   cache:'Cache', cookies:'Cookies', preferences:'Preferences', local_state:'Local State',
   memory_string:'Memory Strings', memory_process:'Memory Processes',
   memory_network:'Memory Network', memory_artifact:'Memory Artifacts',
+  // native (non-Chromium) config/log/JSON files no named parser claims - a
+  // WebView2/MSIX-hosted app's own native root (Roblox's logs/XML/JSON, not
+  // the embedded browser profile), or a stray file loose in a normal
+  // Electron app's profile (e.g. Discord's own settings.json) - see
+  // dd_lab/parsers/appdata.py.
+  app_data:'App Data',
 };
 
 // Which source_types have a raw physical-FILES view (as opposed to only the

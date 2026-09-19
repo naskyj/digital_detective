@@ -19,6 +19,7 @@ class SourceType(StrEnum):
     MEMORY_PROCESS = "memory_process"
     MEMORY_NETWORK = "memory_network"
     MEMORY_ARTIFACT = "memory_artifact"
+    APP_DATA = "app_data"
 
 
 class ValueType(StrEnum):

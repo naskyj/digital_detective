@@ -36,6 +36,14 @@ class ElectronApp:
     # against a live or memory-image process list, rather than repeating the
     # display label for every pid.
     process_name: str | None = None
+    # the app's own native root directory when its profile was found nested
+    # well inside it (WebView2 embedding, or an MSIX/UWP redirect) - None for
+    # a normal Electron app, where the profile itself already covers
+    # everything worth collecting. See iter_profiles_for_entry's own
+    # docstring; used to also curated-copy the app's own non-Chromium data
+    # (logs, XML/JSON config) that plan_profile_copy() never reaches on its
+    # own, since it only ever copies from profile_dir.
+    native_root: Path | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -45,6 +53,7 @@ class ElectronApp:
             "pids": self.pids,
             "running": self.running,
             "process_name": self.process_name,
+            "native_root": str(self.native_root) if self.native_root else None,
         }
 
 
@@ -128,7 +137,7 @@ def discover_apps(extra_dirs: list[str | Path] | None = None) -> list[ElectronAp
             matched_process_name, pids = next(
                 ((k, v) for k, v in running.items() if key in k or k in key), (None, [])
             )
-            for name, profile in iter_profiles_for_entry(entry):
+            for name, profile, native_root in iter_profiles_for_entry(entry):
                 if profile in seen_profiles:
                     continue
                 seen_profiles.add(profile)
@@ -140,6 +149,7 @@ def discover_apps(extra_dirs: list[str | Path] | None = None) -> list[ElectronAp
                         pids=pids,
                         running=bool(pids),
                         process_name=matched_process_name,
+                        native_root=native_root,
                     )
                 )
     return apps

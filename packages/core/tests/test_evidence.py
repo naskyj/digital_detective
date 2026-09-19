@@ -13,6 +13,7 @@ from dd_core.evidence import (
     execute_copy,
     find_webview2_profiles,
     iter_profiles_for_entry,
+    plan_native_root_copy,
 )
 
 
@@ -142,16 +143,18 @@ def test_find_webview2_profiles_respects_max_depth(tmp_path):
 
 
 def test_iter_profiles_for_entry_direct_match(tmp_path):
+    # a normal Electron app: entry IS the profile, so native_root is None -
+    # plan_profile_copy()'s whole-profile copy already gets everything.
     app_root = tmp_path / "SomeApp"
     _make_profile(app_root)
-    assert iter_profiles_for_entry(app_root) == [("SomeApp", app_root)]
+    assert iter_profiles_for_entry(app_root) == [("SomeApp", app_root, None)]
 
 
 def test_iter_profiles_for_entry_one_level_nested(tmp_path):
     app_root = tmp_path / "SomeApp"
     nested = app_root / "SomeApp"
     _make_profile(nested)
-    assert iter_profiles_for_entry(app_root) == [("SomeApp", nested)]
+    assert iter_profiles_for_entry(app_root) == [("SomeApp", nested, None)]
 
 
 def test_iter_profiles_for_entry_msix_redirect(tmp_path):
@@ -160,33 +163,108 @@ def test_iter_profiles_for_entry_msix_redirect(tmp_path):
     live machine would have) - confirmed on real evidence: a Slack MSIX
     package folder named "<PackageFamilyName>" holds its real profile at
     "<that folder>/LocalCache/Roaming/Slack/...", invisible to a direct or
-    one-level-nested check."""
+    one-level-nested check. native_root is the outer package folder - real
+    native app data can sit there too, well outside the Chromium profile."""
     app_root = tmp_path / "SomeVendor.Slack_abc123"
     profile = app_root / "LocalCache" / "Roaming" / "Slack"
     _make_profile(profile)
-    assert iter_profiles_for_entry(app_root) == [("Slack", profile)]
+    assert iter_profiles_for_entry(app_root) == [("Slack", profile, app_root)]
 
 
 def test_iter_profiles_for_entry_msix_redirect_local_variant(tmp_path):
     app_root = tmp_path / "SomeVendor.App_abc123"
     profile = app_root / "LocalCache" / "Local" / "App"
     _make_profile(profile)
-    assert iter_profiles_for_entry(app_root) == [("App", profile)]
+    assert iter_profiles_for_entry(app_root) == [("App", profile, app_root)]
 
 
 def test_iter_profiles_for_entry_falls_through_to_webview2(tmp_path):
     """MSIX redirect and WebView2 are both checked, in that order, but only
     one should ever fire for a given entry - confirm the WebView2 path
-    still works when there's no LocalCache directory at all."""
+    still works when there's no LocalCache directory at all. native_root is
+    the app's own root here too - e.g. Roblox's own logs/XML config, sitting
+    well outside the WebView2-embedded Chromium profile found underneath it."""
     app_root = tmp_path / "Roblox"
     profile = app_root / "UniversalApp" / "WebView2" / "EBWebView" / "Default"
     _make_profile(profile)
     found = iter_profiles_for_entry(app_root)
     assert len(found) == 1
     assert found[0][1] == profile
+    assert found[0][2] == app_root
 
 
 def test_iter_profiles_for_entry_no_match_returns_empty(tmp_path):
     app_root = tmp_path / "PlainApp"
     app_root.mkdir()
     assert iter_profiles_for_entry(app_root) == []
+
+
+def _rels(specs):
+    return {s.dest_rel for s in specs}
+
+
+def test_plan_native_root_copy_picks_up_allowlisted_extensions(tmp_path):
+    root = tmp_path / "Roblox"
+    (root / "logs" / "1.0.123").mkdir(parents=True)
+    (root / "logs" / "1.0.123" / "20260101_Player_1_last.log").write_text("hello")
+    (root / "AnalysticsSettings.xml").write_text("<root/>")
+    (root / "LocalStorage").mkdir()
+    (root / "LocalStorage" / "appStorage.json").write_text("{}")
+
+    specs = plan_native_root_copy(root)
+    rels = _rels(specs)
+    assert "native/logs/1.0.123/20260101_Player_1_last.log" in rels
+    assert "native/AnalysticsSettings.xml" in rels
+    assert "native/LocalStorage/appStorage.json" in rels
+    assert all(not s.is_dir for s in specs)  # file-by-file, never a directory copy
+
+
+def test_plan_native_root_copy_ignores_non_allowlisted_extensions(tmp_path):
+    root = tmp_path / "Roblox"
+    root.mkdir()
+    (root / "RobloxPlayerBeta.exe").write_bytes(b"MZ...")
+    (root / "content.pak").write_bytes(b"binary")
+    specs = plan_native_root_copy(root)
+    assert specs == []
+
+
+def test_plan_native_root_copy_skips_denylisted_dir_names(tmp_path):
+    # "logs" itself is NOT denylisted (that's the whole point - it's the one
+    # place Roblox keeps its own logs), but something like a Crashpad dump
+    # dir sitting alongside it should still be skipped.
+    root = tmp_path / "Roblox"
+    (root / "Crashpad").mkdir(parents=True)
+    (root / "Crashpad" / "settings.json").write_text("{}")
+    (root / "logs").mkdir()
+    (root / "logs" / "app.log").write_text("real log content")
+    specs = plan_native_root_copy(root)
+    rels = _rels(specs)
+    assert "native/logs/app.log" in rels
+    assert not any("Crashpad" in r for r in rels)
+
+
+def test_plan_native_root_copy_skips_the_embedded_webview2_profile(tmp_path):
+    # the WebView2 profile itself is already collected separately via
+    # plan_profile_copy() on profile_dir - must not be picked up again here.
+    root = tmp_path / "Roblox"
+    wv = root / "UniversalApp" / "WebView2" / "EBWebView" / "Default"
+    wv.mkdir(parents=True)
+    (wv / "Preferences").write_text("{}")
+    (wv / "some_config.json").write_text("{}")
+    (root / "AnalysticsSettings.xml").write_text("<root/>")
+    specs = plan_native_root_copy(root)
+    rels = _rels(specs)
+    assert "native/AnalysticsSettings.xml" in rels
+    assert not any("EBWebView" in r for r in rels)
+
+
+def test_plan_native_root_copy_respects_max_files(tmp_path):
+    root = tmp_path / "Roblox"
+    root.mkdir()
+    for i in range(10):
+        (root / f"f{i}.log").write_text("x")
+    assert len(plan_native_root_copy(root, max_files=3)) == 3
+
+
+def test_plan_native_root_copy_missing_root_returns_empty(tmp_path):
+    assert plan_native_root_copy(tmp_path / "does-not-exist") == []

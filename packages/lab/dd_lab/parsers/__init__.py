@@ -12,12 +12,15 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from dd_core.schema import NormalizedArtifact
-from dd_lab.parsers import cache, cookies, indexeddb, localstorage, prefs, sessionstorage
+from dd_lab.parsers import appdata, cache, cookies, indexeddb, localstorage, prefs, sessionstorage
 from dd_lab.parsers.base import ParseContext
 
 log = logging.getLogger("dd_lab.parsers")
 
-# ordered: cheap/structured first, memory-heavy last
+# ordered: cheap/structured first, memory-heavy last. appdata is last of all -
+# it only picks up what every other parser here left unclaimed (see its own
+# module docstring), so it needs them to have run first to know what "unclaimed"
+# means.
 PARSERS = [
     ("preferences", prefs.parse),
     ("local_storage", localstorage.parse),
@@ -25,6 +28,7 @@ PARSERS = [
     ("cookies", cookies.parse),
     ("cache", cache.parse),
     ("indexeddb", indexeddb.parse),
+    ("appdata", appdata.parse),
 ]
 
 

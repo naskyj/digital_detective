@@ -23,6 +23,7 @@ from dd_core.enums import CustodyEvent, SourceType
 from dd_core.evidence import (
     MEMORY,
     execute_copy,
+    plan_native_root_copy,
     plan_profile_copy,
     source_type_for_path,
 )
@@ -158,6 +159,12 @@ def acquire(
 
         say(f"[{app.name}] copying profile from {app.profile_dir}")
         specs = plan_profile_copy(app.profile_dir, sources)
+        if app.native_root is not None:
+            # the app's own native data (logs, XML/JSON config) sitting
+            # outside the Chromium profile WebView2/MSIX embeds well inside
+            # it - see iter_profiles_for_entry's docstring. A curated,
+            # extension-allowlisted pick, never a wholesale copy.
+            specs += plan_native_root_copy(app.native_root)
         if not specs:
             warnings.append(f"{app.name}: no recognisable Chromium data at {app.profile_dir}")
             say(f"[{app.name}] WARNING: nothing to copy")

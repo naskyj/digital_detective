@@ -68,6 +68,11 @@ class ImageApp:
     name: str
     profile_dir: TargetPath
     version: str | None = None
+    # see ElectronApp.native_root (dd_collector.discover) / iter_profiles_
+    # for_entry's own docstring - the app's own root when its profile was
+    # found nested well inside it (WebView2/MSIX), None for a normal
+    # Electron app whose profile already covers everything.
+    native_root: TargetPath | None = None
 
 
 def _safe_iterdir(d: TargetPath) -> list[TargetPath]:
@@ -112,12 +117,13 @@ def discover_apps(target: Target) -> list[ImageApp]:
             if key in seen_entries:
                 continue
             seen_entries.add(key)
-            for name, profile in iter_profiles_for_entry(entry):
+            for name, profile, native_root in iter_profiles_for_entry(entry):
                 pkey = str(profile).lower()
                 if pkey in seen_profiles:
                     continue
                 seen_profiles.add(pkey)
-                apps.append(ImageApp(name=name, profile_dir=profile, version=_guess_version(profile)))
+                apps.append(ImageApp(name=name, profile_dir=profile, version=_guess_version(profile),
+                                      native_root=native_root))
     return apps
 
 
@@ -147,10 +153,11 @@ def discover_apps_in_folder(folder: Path) -> list[ImageApp]:
         if key in seen_entries:
             continue
         seen_entries.add(key)
-        for name, profile in iter_profiles_for_entry(entry):
+        for name, profile, native_root in iter_profiles_for_entry(entry):
             pkey = str(profile).lower()
             if pkey in seen_profiles:
                 continue
             seen_profiles.add(pkey)
-            apps.append(ImageApp(name=name, profile_dir=profile, version=_guess_version(profile)))
+            apps.append(ImageApp(name=name, profile_dir=profile, version=_guess_version(profile),
+                                  native_root=native_root))
     return apps
