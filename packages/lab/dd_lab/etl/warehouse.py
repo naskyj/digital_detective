@@ -8,6 +8,7 @@ The classifier updates the classification columns in place after load.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,17 +19,42 @@ from dd_core.schema import NormalizedArtifact
 
 log = logging.getLogger("dd_lab.warehouse")
 
+# A _load_*.jsonl file younger than this is never touched by cleanup - see
+# _clean_orphaned_load_files. Generous relative to how long one app's load
+# actually takes (the write loop's mtime stays fresh the whole time; only
+# the write-closed-but-not-yet-read_json-and-deleted tail end has no writes
+# happening, and that's a DuckDB bulk read+insert, seconds even for a very
+# large app - not remotely close to this threshold).
+_ORPHAN_MIN_AGE_SECONDS = 300
 
-def _clean_orphaned_load_files(warehouse_dir: Path) -> None:
+
+def _clean_orphaned_load_files(warehouse_dir: Path, min_age_seconds: float = _ORPHAN_MIN_AGE_SECONDS) -> None:
     """`load_artifacts` streams to a `_load_<uuid>.jsonl` temp file and always
     deletes it in a `finally` - unless the whole process dies mid-load (killed,
     crashed, or the app was closed/restarted while a run was in progress), in
     which case that cleanup never runs and the file (which can be hundreds of
-    MB — one per interrupted load) sits there forever. Any such file found when
-    a Warehouse opens predates this instantiation, so it cannot belong to a
-    load in progress right now; it's an orphan, safe to remove."""
+    MB — one per interrupted load) sits there forever.
+
+    A file's age, not merely its existence, is what actually tells an orphan
+    apart from one a DIFFERENT, still-running Warehouse instance for the same
+    case is actively streaming into right now - a real failure this caused,
+    not a hypothetical one: `run_case`'s ingest job runs in a background
+    thread (JobManager.submit) while the server keeps handling other
+    requests, so any concurrent request that opens its own Warehouse for the
+    same case (e.g. a browser tab reading the case page while "Run analysis"
+    is in progress) used to delete the ingest job's own in-progress temp
+    file out from under it - confirmed on a real case: `read_json()` then
+    failed with "No files found that match the pattern .../_load_<uuid>.jsonl"
+    because the file it had just written was gone. An actively-written file's
+    mtime is refreshed by every line appended to it (see load_artifacts), so
+    it's never more than moments old for as long as the write loop runs; only
+    a file whose writer genuinely died stays stale. `min_age_seconds`
+    overridable for tests - production callers should never need to."""
+    now = time.time()
     for f in warehouse_dir.glob("_load_*.jsonl"):
         try:
+            if now - f.stat().st_mtime < min_age_seconds:
+                continue  # too recently written to safely assume orphaned
             f.unlink()
             log.info("removed orphaned load file from an interrupted run: %s", f.name)
         except OSError:
