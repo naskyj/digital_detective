@@ -59,14 +59,21 @@ _FIELDS = [
 # 41,405 rows. `category`/`confidence` are dropped entirely for cache - they
 # were being assigned PER METADATA FIELD (e.g. a bare content-type string
 # classified CHAT_CONTENT at 0.713), meaningless once those fields become
-# columns of one entry's row instead of independent classified values. See
+# columns of one entry's row instead of independent classified values.
+#
+# Column set is deliberately cache_files.csv's own (CacheFileEntry, minus
+# the live-browser-only `openable`) plus `value` (the decoded body) and the
+# columns needed to describe how `value` relates to the whole body
+# (body_kind/array_index) - the partner's own framing: "build it from
+# cache_files.csv... and just add the body", so the two exports never
+# independently drift on what a metadata column means. See
 # dd_lab/parsers/cache.py::iter_cache_entries_for_labeling/CacheLabelRow,
 # the single source of truth for this row shape.
 _CACHE_FIELDS = [
-    "entry_id", "app", "source_type", "cache_kind", "cache_dir", "url", "filename",
-    "http_status", "content_type", "content_encoding", "size_bytes",
-    "source_file", "cache_offset", "request_time", "response_time",
-    "body_kind", "array_index", "body", "label",
+    "entry_id", "app", "source_type", "cache_kind", "cache_dir", "key",
+    "physical_file", "offset", "url", "filename", "http_status", "content_type",
+    "content_encoding", "cache_control", "server", "size_bytes",
+    "request_time", "response_time", "deleted", "body_kind", "array_index", "value", "label",
 ]
 
 

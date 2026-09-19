@@ -83,27 +83,33 @@ def _canned_cache_rows():
     return [
         CacheLabelRow(
             entry_id="e1", app="app", cache_kind="http_cache", cache_dir="app/Cache/Cache_Data",
+            key="1/0/https://example.com/a.json",
             url="https://example.com/a.json", filename="a.json", http_status="HTTP/1.1 200",
-            content_type="application/json", content_encoding=None, size_bytes=42,
-            source_file="app/Cache/Cache_Data/data_1", cache_offset=100,
+            content_type="application/json", content_encoding=None, cache_control="no-cache",
+            server=None, size_bytes=42,
+            physical_file="data_1", offset=100,
             request_time=datetime(2026, 1, 1, tzinfo=UTC), response_time=datetime(2026, 1, 1, tzinfo=UTC),
-            body_kind="json_object", array_index=None, body='{"id": 1}',
+            body_kind="json_object", array_index=None, value='{"id": 1}',
         ),
         CacheLabelRow(
             entry_id="e2", app="app", cache_kind="http_cache", cache_dir="app/Cache/Cache_Data",
+            key="1/0/https://example.com/list.json",
             url="https://example.com/list.json", filename="list.json", http_status="HTTP/1.1 200",
-            content_type="application/json", content_encoding=None, size_bytes=20,
-            source_file="app/Cache/Cache_Data/data_1", cache_offset=200,
+            content_type="application/json", content_encoding=None, cache_control=None,
+            server=None, size_bytes=20,
+            physical_file="data_1", offset=200,
             request_time=None, response_time=None,
-            body_kind="json_array_element", array_index=0, body='{"n": 1}',
+            body_kind="json_array_element", array_index=0, value='{"n": 1}',
         ),
         CacheLabelRow(
             entry_id="e2", app="app", cache_kind="http_cache", cache_dir="app/Cache/Cache_Data",
+            key="1/0/https://example.com/list.json",
             url="https://example.com/list.json", filename="list.json", http_status="HTTP/1.1 200",
-            content_type="application/json", content_encoding=None, size_bytes=20,
-            source_file="app/Cache/Cache_Data/data_1", cache_offset=200,
+            content_type="application/json", content_encoding=None, cache_control=None,
+            server=None, size_bytes=20,
+            physical_file="data_1", offset=200,
             request_time=None, response_time=None,
-            body_kind="json_array_element", array_index=1, body='{"n": 2}',
+            body_kind="json_array_element", array_index=1, value='{"n": 2}',
         ),
     ]
 
@@ -128,7 +134,10 @@ def test_export_writes_one_csv_per_source_type(case, tmp_path, monkeypatch):
     # metadata field (the real bug this fixes: 41,405 rows for 5,946 entries).
     assert len(rows) == 3
     assert {r["entry_id"] for r in rows} == {"e1", "e2"}
-    for col in ("entry_id", "app", "source_type", "url", "body_kind", "array_index", "body", "label"):
+    for col in (
+        "entry_id", "app", "source_type", "cache_dir", "physical_file", "offset", "url",
+        "cache_control", "server", "deleted", "body_kind", "array_index", "value", "label",
+    ):
         assert col in rows[0]
     assert all(r["source_type"] == "cache" for r in rows)
     assert all(r["label"] == "" for r in rows)

@@ -21,6 +21,9 @@ import pytest
 from dd_core.casedir import CaseLayout
 from dd_lab.parsers.base import ParseContext
 from dd_lab.parsers.cache import (
+    CacheFileEntry,
+    CacheLabelRow,
+    _binary_placeholder,
     _classify_body_for_labeling,
     iter_cache_entries_for_labeling,
     list_cache_files,
@@ -104,6 +107,39 @@ def test_array_of_arrays_is_one_row_not_exploded():
     assert kind == "json_array"
 
 
+def test_binary_placeholder_names_content_type_and_size():
+    assert _binary_placeholder("image/png", 252) == "[binary image/png, 252 bytes]"
+
+
+def test_binary_placeholder_handles_missing_content_type():
+    assert _binary_placeholder("", 10) == "[binary unknown, 10 bytes]"
+
+
+def test_cache_label_row_column_set_matches_cache_files_csv_plus_value_columns():
+    """The partner's own framing: "build it from cache_files.csv... and just
+    add the body" - CacheLabelRow's metadata columns must be exactly
+    CacheFileEntry's (minus `openable`, a live-browser-only concept), plus
+    the columns needed to describe the body itself."""
+    file_entry_cols = set(CacheFileEntry.model_fields) - {"openable"}
+    label_row_cols = set(CacheLabelRow.model_fields)
+    added = label_row_cols - file_entry_cols
+    # `filename` (human-readable, guessed from the URL) is a deliberate
+    # extra beyond CacheFileEntry's own columns - genuinely useful for a
+    # labeller, absent from the live browser inventory only because the UI
+    # derives it client-side from `url` instead.
+    assert added == {"deleted", "body_kind", "array_index", "value", "filename"}
+    assert file_entry_cols <= label_row_cols
+
+
+def test_cache_label_row_deleted_defaults_false():
+    # a placeholder today - cache entries have no real deletion-tracking yet.
+    row = CacheLabelRow(
+        entry_id="e", app="a", cache_kind="http_cache", cache_dir="d", key="k",
+        url="https://x", filename="x", body_kind="empty",
+    )
+    assert row.deleted is False
+
+
 # --------------------------------------------------------------------- iter_cache_entries_for_labeling
 
 _CANDIDATES = {
@@ -184,9 +220,37 @@ def test_json_object_and_array_element_bodies_round_trip_as_valid_json(export_ro
     if not json_rows:
         pytest.skip("no JSON-bodied cache entry found in this profile right now")
     for r in json_rows[:200]:
-        if r.body.endswith("]") and "…[+" in r.body:
+        if r.value.endswith("]") and "…[+" in r.value:
             continue  # truncated - not expected to parse, by design
-        json.loads(r.body)  # must not raise
+        json.loads(r.value)  # must not raise
+
+
+@_skip_if_unavailable
+@pytest.mark.slow
+def test_binary_rows_get_a_placeholder_not_raw_bytes(export_rows):
+    binary_rows = [r for r in export_rows if r.body_kind == "binary"]
+    if not binary_rows:
+        pytest.skip("no binary-bodied cache entry found in this profile right now")
+    for r in binary_rows[:200]:
+        # placeholder's byte count is the DECODED body length, which can
+        # legitimately differ from `size_bytes` (the on-disk, possibly
+        # still-compressed stream size reported without reading the body -
+        # see _entry_size) - a compressed SVG is exactly such a case, found
+        # while writing this test. Only check the placeholder's own shape.
+        assert r.value.startswith("[binary ")
+        assert r.value.endswith(" bytes]")
+
+
+@_skip_if_unavailable
+@pytest.mark.slow
+def test_text_rows_are_capped_to_a_short_sample(export_rows):
+    from dd_lab.parsers.cache import _TEXT_SAMPLE_CHARS
+
+    text_rows = [r for r in export_rows if r.body_kind == "text"]
+    if not text_rows:
+        pytest.skip("no non-JSON text cache entry found in this profile right now")
+    for r in text_rows:
+        assert len(r.value) <= _TEXT_SAMPLE_CHARS + 40  # + room for the truncation marker
 
 
 @_skip_if_unavailable

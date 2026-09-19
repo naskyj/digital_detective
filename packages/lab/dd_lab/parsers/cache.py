@@ -310,9 +310,13 @@ def _entry_size(cache, key: str) -> int | None:
         return None
 
 
-def _describe_entry(
-    ctx: ParseContext, cache, key: str, cache_dir_rel: str, kind: str
-) -> CacheFileEntry | None:
+def _entry_metadata(ctx: ParseContext, cache, key: str, cache_dir_rel: str, kind: str) -> dict:
+    """Everything about one cache entry EXCEPT its body - the single source
+    of truth for both the live Cache Files inventory (CacheFileEntry, below)
+    and the labelling export (CacheLabelRow) so the two column sets can
+    never independently drift on how the same fact gets computed. Keys
+    match CacheFileEntry's own field names exactly, so `CacheFileEntry(**d)`
+    and `CacheLabelRow(**d, ...)` both unpack it directly."""
     try:
         meta = next((m for m in cache.get_metadata(key) if m), None)
     except Exception:
@@ -323,21 +327,30 @@ def _describe_entry(
     def attr(name: str) -> str | None:
         return (meta.get_attribute(name) or [None])[0] if meta else None
 
+    return {
+        "entry_id": stable_id(ctx.case_id, ctx.app, cache_dir_rel, key),
+        "app": ctx.app, "cache_kind": kind, "cache_dir": cache_dir_rel, "key": key,
+        "physical_file": body_loc.file_name if body_loc else None,
+        "offset": body_loc.offset if body_loc else None,
+        "url": url,
+        "http_status": _first(meta.http_header_declarations) if meta else None,
+        "content_type": attr("content-type"),
+        "content_encoding": attr("content-encoding"),
+        "cache_control": attr("cache-control"),
+        "server": attr("server"),
+        "size_bytes": _entry_size(cache, key),
+        "request_time": getattr(meta, "request_time", None) if meta else None,
+        "response_time": getattr(meta, "response_time", None) if meta else None,
+    }
+
+
+def _describe_entry(
+    ctx: ParseContext, cache, key: str, cache_dir_rel: str, kind: str
+) -> CacheFileEntry | None:
+    m = _entry_metadata(ctx, cache, key, cache_dir_rel, kind)
     return CacheFileEntry(
-        entry_id=stable_id(ctx.case_id, ctx.app, cache_dir_rel, key),
-        app=ctx.app, cache_kind=kind, cache_dir=cache_dir_rel, key=key,
-        physical_file=body_loc.file_name if body_loc else None,
-        offset=body_loc.offset if body_loc else None,
-        url=url,
-        http_status=_first(meta.http_header_declarations) if meta else None,
-        content_type=attr("content-type"),
-        content_encoding=attr("content-encoding"),
-        cache_control=attr("cache-control"),
-        server=attr("server"),
-        size_bytes=_entry_size(cache, key),
-        request_time=getattr(meta, "request_time", None) if meta else None,
-        response_time=getattr(meta, "response_time", None) if meta else None,
-        openable=body_loc is not None,
+        **m,
+        openable=m["physical_file"] is not None,
     )
 
 
@@ -460,34 +473,53 @@ def read_cache_entry(ctx: ParseContext, cache_dir_rel: str, key: str) -> tuple[b
 # which would be ambiguous or outright lossy for exactly the cases this
 # rule cares about getting right.
 
-# Body text this long or longer is truncated for the export (a generous cap
-# for content-matching, well above MAX_VALUE_CHARS in base.py - that cap is
-# tuned for the warehouse's own `value` column, a different consumer with a
-# tighter row-size budget).
-_EXPORT_BODY_CHARS = 20_000
+# JSON bodies (object/array/array-element) are capped generously - content-
+# matching wants the real structure, well above MAX_VALUE_CHARS in base.py
+# (tuned for the warehouse's own `value` column, a tighter row-size budget).
+# Non-JSON TEXT bodies (JS/CSS/HTML/plain text) get a much smaller sample -
+# a partner reconciling against a raw cache dump needs enough to confirm
+# content, not an inlined copy of a whole minified bundle; the physical
+# file itself (physical_file/offset/cache_dir) is the actual evidence.
+_JSON_BODY_CHARS = 20_000
+_TEXT_SAMPLE_CHARS = 2_000
 
 
 class CacheLabelRow(BaseModel):
+    """One row per physical cache entry (or one row per element of a JSON
+    array-of-objects body) - column set is CacheFileEntry's own (see
+    _entry_metadata) plus `value` (the decoded body) and the columns needed
+    to describe how `value` relates to the whole body. `openable` is
+    deliberately dropped - a live-browser navigation concept, meaningless
+    in a static export."""
+
     entry_id: str          # stable id, unique per (case, app, cache_dir, key) - NOT per exported row
     app: str
     cache_kind: str         # "http_cache" | "cache_api"
     cache_dir: str          # evidence-relative directory
+    key: str                # the raw Chromium cache key
+    physical_file: str | None = None   # e.g. "data_1" - the file this entry's body lives in
+    offset: int | None = None
     url: str
     filename: str           # human-readable, guessed from the URL (see url_filename_hint)
     http_status: str | None = None
     content_type: str | None = None
     content_encoding: str | None = None
+    cache_control: str | None = None
+    server: str | None = None
     size_bytes: int | None = None
-    source_file: str        # the physical evidence file backing the body, if resolved
-    cache_offset: int | None = None
     request_time: datetime | None = None
     response_time: datetime | None = None
+    # Always False today - cache entries have no deletion-tracking the way
+    # LevelDB tombstones do (a rotating disk cache just evicts, it doesn't
+    # leave a recoverable record). Column kept for schema parity with the
+    # rest of the export and as the landing spot for real detection later.
+    deleted: bool = False
     body_kind: str           # "empty" | "binary" | "text" | "json_object" | "json_array" | "json_array_element"
     array_index: int | None = None   # set only when body_kind == "json_array_element"
-    body: str = ""
+    value: str = ""
 
 
-def _cap_body(text: str, limit: int = _EXPORT_BODY_CHARS) -> str:
+def _cap_body(text: str, limit: int) -> str:
     if len(text) > limit:
         return text[:limit] + f"…[+{len(text) - limit} chars]"
     return text
@@ -545,33 +577,17 @@ def iter_cache_entries_for_labeling(ctx: ParseContext) -> Iterator[CacheLabelRow
             cache.close()
 
 
+def _binary_placeholder(content_type: str, size: int) -> str:
+    return f"[binary {content_type or 'unknown'}, {size} bytes]"
+
+
 def _describe_entry_for_labeling(
     ctx: ParseContext, cache, key: str, cache_dir_rel: str, kind: str
 ) -> Iterator[CacheLabelRow]:
-    try:
-        meta = next((m for m in cache.get_metadata(key) if m), None)
-    except Exception:
-        meta = None
-    body_loc = _location(cache, key, "body")
-    url = url_from_cache_key(key)
-
-    def attr(name: str) -> str | None:
-        return (meta.get_attribute(name) or [None])[0] if meta else None
-
-    content_encoding = attr("content-encoding") or ""
-    content_type = attr("content-type") or ""
-    common = dict(
-        entry_id=stable_id(ctx.case_id, ctx.app, cache_dir_rel, key),
-        app=ctx.app, cache_kind=kind, cache_dir=cache_dir_rel,
-        url=url, filename=url_filename_hint(url),
-        http_status=_first(meta.http_header_declarations) if meta else None,
-        content_type=content_type or None, content_encoding=content_encoding or None,
-        size_bytes=_entry_size(cache, key),
-        source_file=f"{cache_dir_rel}/{body_loc.file_name}" if body_loc else cache_dir_rel,
-        cache_offset=body_loc.offset if body_loc else None,
-        request_time=getattr(meta, "request_time", None) if meta else None,
-        response_time=getattr(meta, "response_time", None) if meta else None,
-    )
+    m = _entry_metadata(ctx, cache, key, cache_dir_rel, kind)
+    content_encoding = m["content_encoding"] or ""
+    content_type = m["content_type"] or ""
+    common = dict(m, filename=url_filename_hint(m["url"]))
 
     bodies = cache.get_cachefile(key)
     # `is not None`, not truthiness - a genuinely empty body (b"", a real
@@ -587,20 +603,23 @@ def _describe_entry_for_labeling(
         yield CacheLabelRow(**common, body_kind="empty")
         return
     if not any(t in content_type.lower() for t in _TEXTUAL_CT):
-        # a real, non-empty entry (image/font/wasm/...) - still counted, per
-        # the partner's own rule ("any non-JSON cache body = 1 artifact"),
-        # just with no meaningful text body to include.
-        yield CacheLabelRow(**common, body_kind="binary")
+        # a real, non-empty entry (image/video/audio/font/wasm/...) - still
+        # counted as one artifact (the physical file IS the evidence, even
+        # without its bytes inlined here), just with a short placeholder
+        # instead of raw bytes in a text column.
+        yield CacheLabelRow(**common, body_kind="binary", value=_binary_placeholder(content_type, len(body)))
         return
     try:
         text = body.decode("utf-8")
     except UnicodeDecodeError:
-        yield CacheLabelRow(**common, body_kind="binary")
+        yield CacheLabelRow(**common, body_kind="binary", value=_binary_placeholder(content_type, len(body)))
         return
 
     body_kind, values = _classify_body_for_labeling(text)
     if body_kind == "json_array_element":
         for i, v in enumerate(values):
-            yield CacheLabelRow(**common, body_kind=body_kind, array_index=i, body=_cap_body(v))
+            yield CacheLabelRow(**common, body_kind=body_kind, array_index=i, value=_cap_body(v, _JSON_BODY_CHARS))
+    elif body_kind == "text":
+        yield CacheLabelRow(**common, body_kind=body_kind, value=_cap_body(values[0], _TEXT_SAMPLE_CHARS))
     else:
-        yield CacheLabelRow(**common, body_kind=body_kind, body=_cap_body(values[0]))
+        yield CacheLabelRow(**common, body_kind=body_kind, value=_cap_body(values[0], _JSON_BODY_CHARS))
