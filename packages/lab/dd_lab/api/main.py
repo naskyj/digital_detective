@@ -19,7 +19,7 @@ from dd_core.custody import CustodyLog
 from dd_core.manifest import Manifest
 from dd_lab.agent.audit import AuditLog
 from dd_lab.agent.runner import run_agent, run_pipeline
-from dd_lab.agent.tools import InvestigationDeps, query_warehouse, search_keyword
+from dd_lab.agent.tools import InvestigationDeps, correlate_entities, query_warehouse, search_keyword
 from dd_lab.api.jobs import JobManager
 from dd_lab.api.settings import AppSettings, describe_llm
 from dd_lab.case import CaseMeta, CaseStatus, EvidenceSourceMeta, create_case, list_cases, parse_keywords
@@ -573,6 +573,71 @@ def _enrich_artifact_rows(wh, rows: list[dict]) -> None:
             else:
                 r["latest"] = None
         del r["source_locator"]
+
+
+@app.get("/api/cases/{case_id}/correlations")
+def case_correlations(case_id: str, min_distinct_sources: int = 2) -> dict:
+    """Interactive counterpart to the static report's §5 Cross-Source
+    Correlations section — same underlying build_correlation_report (via the
+    agent tool wrapper, so this endpoint and the agent see identical results,
+    not two independent implementations), but live and queryable instead of
+    generated once at report time. Phase 5 of the agent-improvement plan."""
+    deps = InvestigationDeps(cases_root=Path(_settings.cases_root), case_id=case_id)
+    if not deps.layout.warehouse.is_file():
+        raise HTTPException(409, "case not processed yet")
+    return correlate_entities(deps, min_distinct_sources)
+
+
+@app.get("/api/cases/{case_id}/timeline")
+def case_timeline(
+    case_id: str,
+    category: str | None = None,
+    app: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict:
+    """Interactive counterpart to the static report's §7 Evidence Timeline,
+    which is generated once, hard-capped at 120 rows, and always excludes
+    GENERAL — this is paginated like every other browse view instead, with
+    category/app left as optional filters the caller chooses (not forced),
+    matching /artifacts' own convention. Phase 5 of the agent-improvement
+    plan; the memory-derived CreateTime/ExitTime events this makes visible
+    at all were added by the immediately preceding phase (record_ts on
+    Volatility's own timestamps, dd_lab/memory/volatility.py)."""
+    deps = InvestigationDeps(cases_root=Path(_settings.cases_root), case_id=case_id)
+    if not deps.layout.warehouse.is_file():
+        raise HTTPException(409, "case not processed yet")
+    where, params = ["record_ts IS NOT NULL"], []
+    for col, val in (("category", category), ("app", app)):
+        if val:
+            where.append(f"{col} = ?")
+            params.append(val)
+    clause = "WHERE " + " AND ".join(where)
+    from dd_lab.etl.warehouse import Warehouse
+
+    wh = Warehouse(deps.layout.warehouse)
+    try:
+        total = wh.query(f"SELECT count(*) AS n FROM artifacts {clause}", list(params))[0]["n"]
+        rows = wh.query(
+            f"SELECT record_ts, app, source_type, category, key, substr(value,1,300) AS value, "
+            f"artifact_id, source_file, source_locator FROM artifacts {clause} "
+            f"ORDER BY record_ts LIMIT {int(limit)} OFFSET {int(offset)}",
+            list(params),
+        )
+        # unfiltered by the CURRENT category/app choice (same convention as
+        # /artifacts' own facets) so switching the category dropdown doesn't
+        # shrink its own option list down to just what's already selected -
+        # still scoped to record_ts IS NOT NULL, a category with no
+        # timestamped rows at all isn't a useful choice on this view.
+        facets = {
+            "categories": [r["category"] for r in wh.query(
+                "SELECT DISTINCT category FROM artifacts WHERE record_ts IS NOT NULL ORDER BY category")],
+            "apps": [r["app"] for r in wh.query(
+                "SELECT DISTINCT app FROM artifacts WHERE record_ts IS NOT NULL ORDER BY app")],
+        }
+    finally:
+        wh.close()
+    return {"rows": rows, "total": total, "shown": len(rows), "facets": facets}
 
 
 @app.get("/api/cases/{case_id}/classification")

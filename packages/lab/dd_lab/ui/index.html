@@ -777,6 +777,8 @@ async function caseExplorer(id, w){
   }
   async function paneFor(s){
     if(FILES_PANEL_FN[s.type]) return FILES_PANEL_FN[s.type](id, s.app);
+    if(s.type==='correlations') return correlationsPanel(id);
+    if(s.type==='timeline') return timelinePanel(id);
     if(s.type==='source') return browser(id, w.by_category.map(c=>c.category).filter(Boolean),
       {app:s.app, source_type:s.source_type});
     return overviewPanel(id, w);
@@ -825,6 +827,12 @@ async function caseExplorer(id, w){
     const s=state.explorerSelection;
     nav.append(el('div',{style:'font-weight:700;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:2px 0 8px'},'Explore'));
     nav.append(navRow('Overview', null, s.type==='overview', ()=>select({type:'overview'}), 0));
+    // case-wide investigation views, not tied to one app - siblings of
+    // Overview rather than nested under any app (Phase 5 of the
+    // agent-improvement plan: these were previously only reachable, once,
+    // baked into the static report's §5/§7 sections).
+    nav.append(navRow('Correlations', null, s.type==='correlations', ()=>select({type:'correlations'}), 0));
+    nav.append(navRow('Timeline', null, s.type==='timeline', ()=>select({type:'timeline'}), 0));
     nav.append(el('div',{style:'height:1px;background:var(--line);margin:10px 0'}));
 
     // Apps with no evidence-source label (every case before this feature,
@@ -920,6 +928,137 @@ async function classificationPanel(id){
   });
   t.append(tb);
   wrap.append(el('div',{class:'scroll'},t));
+  return wrap;
+}
+
+async function correlationsPanel(id){
+  // Interactive counterpart to the static report's §5 Cross-Source
+  // Correlations - same build_correlation_report backing both (via the
+  // /correlations endpoint, which wraps the identical agent tool), but
+  // browsable instead of generated once. Phase 5 of the agent-improvement
+  // plan (magical-dazzling-dragon.md).
+  const wrap=el('div',{class:'panel'});
+  const hint=el('div',{class:'hint',style:'margin-bottom:8px'});
+  const out=el('div',{class:'scroll',style:'margin-top:10px'});
+  const expanded=new Set();
+  let data=null;
+
+  function render(){
+    if(!data) return;
+    if(!data.entities.length){
+      hint.textContent='';
+      out.innerHTML=''; out.append(el('div',{class:'hint'},
+        "No identifier was found in more than one app or storage mechanism yet. Entity extraction "+
+        "isn't exhaustive - app-specific id/token shapes get added over time - so this being empty "+
+        "doesn't mean there's nothing to find, only that this pass didn't see it."));
+      return;
+    }
+    hint.textContent = `${data.entity_count.toLocaleString()} identifier(s) found across more than one app or storage mechanism`;
+    out.innerHTML='';
+    data.entities.forEach(e=>{
+      const key=e.entity_type+'::'+e.value;
+      const isOpen=expanded.has(key);
+      const head=el('div',{class:'row',style:'cursor:pointer;padding:8px 10px;border:1px solid var(--line);'+
+        'border-radius:8px;margin-bottom:'+(isOpen?'0':'8px')+';align-items:center;gap:8px'},
+        el('span',{style:'width:14px;flex-shrink:0;opacity:.7'},isOpen?'▾':'▸'),
+        el('span',{class:'pill'},e.entity_type.replace(/_/g,' ')),
+        el('span',{class:'mono',style:'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'},e.value),
+        el('span',{class:'muted',style:'flex-shrink:0'},e.apps.join(', ')),
+        el('span',{class:'muted',style:'flex-shrink:0'},e.timeline.length+' artifact(s)'));
+      head.onclick=()=>{ if(isOpen) expanded.delete(key); else expanded.add(key); render(); };
+      out.append(head);
+      if(!isOpen) return;
+      const t=el('table',{style:'table-layout:fixed;width:100%;margin-bottom:12px'},el('thead',{},el('tr',{},
+        ...['Time','App','Source','Key','Value'].map(h=>el('th',{},h)))));
+      const tb=el('tbody',{});
+      e.timeline.forEach(c=>{
+        tb.append(el('tr',{style:'cursor:pointer',title:'file: '+c.source_file+' · click for full detail',
+          onclick:()=>showArtifactDetail(id,c.artifact_id)},
+          el('td',{class:'mono',title:c.record_ts||''},c.record_ts?ago(c.record_ts):''),
+          el('td',{},c.app),
+          el('td',{},SRC_LABELS[c.source_type]||c.source_type),
+          el('td',{class:'mono',style:'overflow:hidden;text-overflow:ellipsis;white-space:nowrap'},c.key),
+          el('td',{class:'wrap'},c.value)));
+      });
+      t.append(tb); out.append(t);
+    });
+  }
+
+  out.innerHTML='<div class="muted" style="padding:10px">loading…</div>';
+  wrap.append(el('h2',{style:'margin-top:0'},'Correlations'),
+    el('div',{class:'hint',style:'margin-bottom:8px'},
+      'Identifiers (ids, invite links, emails, asset ids) that appear across more than one app or '+
+      'storage mechanism - the cross-source link a single-row classifier cannot see on its own. '+
+      'Click one to see every artifact it was found in, oldest first; click a row for full detail.'),
+    hint, out);
+  try{ data=await api('/cases/'+id+'/correlations'); }
+  catch(e){ out.innerHTML=''; out.append(el('div',{class:'hint'},'Could not load: '+e.message)); return wrap; }
+  render();
+  return wrap;
+}
+
+function timelinePanel(id){
+  // Interactive counterpart to the static report's §7 Evidence Timeline,
+  // which is generated once, hard-capped at 120 rows, and always excludes
+  // GENERAL - this is paginated and filterable instead, same conventions as
+  // cacheFilesPanel/browser(). The memory-derived CreateTime/ExitTime events
+  // this makes reachable at all (process start/exit) came from the phase
+  // immediately before this one (record_ts on Volatility's own timestamps,
+  // dd_lab/memory/volatility.py) - before that, this view would have been
+  // entirely disk-artifact events despite memory usually being the case's
+  // largest data source.
+  const wrap=el('div',{class:'panel'});
+  const catSel=el('select',{}, el('option',{value:''},'all categories'));
+  const appSel=el('select',{}, el('option',{value:''},'all apps'));
+  const count=el('div',{class:'hint'});
+  const out=el('div',{class:'scroll',style:'margin-top:10px'});
+  const pagWrap=el('div',{});
+  let offset=0; const limit=100; let total=0; let facetsLoaded=false;
+
+  async function load(){
+    out.innerHTML='<div class="muted" style="padding:10px">loading…</div>';
+    const p=new URLSearchParams({limit:String(limit), offset:String(offset)});
+    if(catSel.value) p.set('category', catSel.value);
+    if(appSel.value) p.set('app', appSel.value);
+    let d;
+    try{ d=await api('/cases/'+id+'/timeline?'+p); }
+    catch(e){ out.innerHTML=''; out.append(el('div',{class:'hint'},'Could not load: '+e.message)); return; }
+    total=d.total;
+    count.textContent = total
+      ? `showing ${offset+1}–${offset+d.shown} of ${total.toLocaleString()} timestamped event(s)`
+      : 'no timestamped events match this filter';
+    if(!facetsLoaded){
+      facetsLoaded=true;
+      d.facets.categories.forEach(c=>catSel.append(el('option',{value:c},c)));
+      d.facets.apps.forEach(a=>appSel.append(el('option',{value:a},a)));
+    }
+    pagWrap.innerHTML='';
+    pagWrap.append(paginationBar(offset, limit, total, newOffset=>{offset=newOffset; load();}));
+
+    const t=el('table',{style:'table-layout:fixed;width:100%'},el('thead',{},el('tr',{},
+      ...['Time','App','Category','Source','Key','Value'].map(h=>el('th',{},h)))));
+    const tb=el('tbody',{});
+    d.rows.forEach(r=>{
+      tb.append(el('tr',{style:'cursor:pointer',title:'file: '+r.source_file+' · click for full detail',
+        onclick:()=>showArtifactDetail(id,r.artifact_id)},
+        el('td',{class:'mono',title:r.record_ts||''},r.record_ts?ago(r.record_ts):''),
+        el('td',{},r.app),
+        el('td',{},el('span',{class:'pill cat'},r.category||'')),
+        el('td',{},SRC_LABELS[r.source_type]||r.source_type),
+        el('td',{class:'mono',style:'overflow:hidden;text-overflow:ellipsis;white-space:nowrap'},r.key),
+        el('td',{class:'wrap'},r.value)));
+    });
+    t.append(tb); out.innerHTML=''; out.append(t);
+  }
+  catSel.onchange=()=>{offset=0; load();};
+  appSel.onchange=()=>{offset=0; load();};
+  wrap.append(el('h2',{style:'margin-top:0'},'Timeline'),
+    el('div',{class:'hint',style:'margin-bottom:8px'},
+      "Every timestamped event across the case, oldest first - process start/exit from memory "+
+      "analysis included. Unlike the static report's Evidence Timeline section (capped at 120 rows, "+
+      "GENERAL excluded), this is the full, paginated, filterable set."),
+    el('div',{class:'row'}, catSel, appSel), count, out, pagWrap);
+  load();
   return wrap;
 }
 

@@ -247,6 +247,105 @@ def test_artifacts_search_matches_source_locator(client):
     assert miss["total"] == 0
 
 
+def test_correlations_endpoint_finds_a_cross_source_entity(client):
+    """Phase 5 - the interactive counterpart to the static report's §5.
+    Same setup as the design-discussion scenario in test_investigate.py: one
+    Roblox asset id in a Discord Cache blob and an IndexedDB message row,
+    hand-loaded directly (bypassing the slow full-ingest job)."""
+    from datetime import UTC, datetime
+
+    from dd_core.casedir import CaseLayout
+    from dd_core.enums import ArtifactCategory as C
+    from dd_core.enums import SourceType as S
+    from dd_core.schema import ClassificationResult, NormalizedArtifact
+    from dd_lab.api import main as main_mod
+    from dd_lab.etl.warehouse import Warehouse
+
+    layout = CaseLayout(main_mod._settings.cases_root, "case_api_1")
+    wh = Warehouse(layout.warehouse)
+    try:
+        wh.load_artifacts([
+            NormalizedArtifact(
+                artifact_id="corr-1", case_id="case_api_1", app="discord", source_type=S.CACHE,
+                source_file="discord/Cache/f1", source_locator="http-body",
+                key="cache.body.embed", value="rbxassetid://5551112223",
+                extracted_ts=datetime.now(UTC),
+                classification=ClassificationResult(category=C.CHAT_CONTENT, confidence=0.9),
+            ),
+            NormalizedArtifact(
+                artifact_id="corr-2", case_id="case_api_1", app="discord", source_type=S.INDEXEDDB,
+                source_file="discord/IndexedDB/messages.leveldb", source_locator="store/998",
+                key="content", value="check this rbxassetid://5551112223",
+                extracted_ts=datetime.now(UTC),
+                classification=ClassificationResult(category=C.CHAT_CONTENT, confidence=0.9),
+            ),
+        ])
+    finally:
+        wh.close()
+
+    d = client.get("/api/cases/case_api_1/correlations").json()
+    assert d["ok"] is True
+    hit = next((e for e in d["entities"] if e["value"] == "5551112223"), None)
+    assert hit is not None, d["entities"]
+    assert hit["entity_type"] == "roblox_asset_id"
+    assert set(hit["source_types"]) >= {"cache", "indexeddb"}
+
+
+def test_timeline_endpoint_paginates_and_filters(client):
+    """Phase 5 - the interactive counterpart to the static report's §7,
+    which is generated once and hard-capped at 120 rows excluding GENERAL.
+    This one is a normal paginated/filterable browse endpoint instead."""
+    from datetime import UTC, datetime, timedelta
+
+    from dd_core.casedir import CaseLayout
+    from dd_core.enums import ArtifactCategory as C
+    from dd_core.enums import SourceType as S
+    from dd_core.schema import ClassificationResult, NormalizedArtifact
+    from dd_lab.api import main as main_mod
+    from dd_lab.etl.warehouse import Warehouse
+
+    layout = CaseLayout(main_mod._settings.cases_root, "case_api_1")
+    now = datetime.now(UTC)
+    wh = Warehouse(layout.warehouse)
+    try:
+        wh.load_artifacts([
+            NormalizedArtifact(
+                artifact_id=f"tl-{i}", case_id="case_api_1", app="discord", source_type=S.MEMORY_PROCESS,
+                source_file="_system/memory/physmem.raw", source_locator=f"windows.pslist.PsList#{i}",
+                key="mem.process.CreateTime", value=f"process event {i}",
+                record_ts=now + timedelta(minutes=i), extracted_ts=now,
+                classification=ClassificationResult(
+                    category=C.GENERAL if i == 0 else C.SYSTEM_DETAIL, confidence=0.5,
+                ),
+            )
+            for i in range(3)
+        ] + [
+            # no record_ts at all - must never appear on the timeline
+            NormalizedArtifact(
+                artifact_id="tl-no-ts", case_id="case_api_1", app="discord", source_type=S.MEMORY_PROCESS,
+                source_file="_system/memory/physmem.raw", source_locator="windows.pslist.PsList#99",
+                key="mem.process.PID", value="99999", extracted_ts=now,
+            ),
+        ])
+    finally:
+        wh.close()
+
+    d = client.get("/api/cases/case_api_1/timeline").json()
+    assert d["total"] == 3  # the no-record_ts row is excluded
+    assert [r["value"] for r in d["rows"]] == [f"process event {i}" for i in range(3)]  # oldest first
+
+    paged = client.get("/api/cases/case_api_1/timeline", params={"limit": 2}).json()
+    assert paged["shown"] == 2
+    assert paged["total"] == 3
+
+    filtered = client.get(
+        "/api/cases/case_api_1/timeline", params={"category": "SYSTEM_DETAIL"}
+    ).json()
+    assert filtered["total"] == 2
+    assert all(r["category"] == "SYSTEM_DETAIL" for r in filtered["rows"])
+    assert "GENERAL" in filtered["facets"]["categories"]  # facets aren't narrowed by the active filter
+
+
 def test_cache_files_route_works_without_a_run(client):
     """Unlike /artifacts, the cache-file browser reads straight off the
     evidence directory - it must work before "Run analysis" has ever
