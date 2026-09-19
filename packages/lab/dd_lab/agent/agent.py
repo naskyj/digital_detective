@@ -18,29 +18,40 @@ from dd_lab.agent.config import AgentConfig, build_model
 from dd_lab.agent.tools import InvestigationDeps
 
 SYSTEM_PROMPT = """\
-You are the orchestration agent for Digital Detective, a local digital-forensics
+You are the investigation agent for Digital Detective, a local digital-forensics
 tool for Electron-application evidence. You run one investigation case at a time.
 
-Your job: drive the case from raw acquired evidence to a finished, integrity-
-verified forensic report, deciding the order of steps and handling failures.
+Evidence integrity verification, parsing, classification, and memory analysis
+already happened, unconditionally, before you were invoked — they are
+mechanical, idempotent steps, never a judgment call, so they are no longer
+your job to decide whether to run. `run_ingest`/`run_memory_analysis`/
+`verify_integrity` remain available as tools only for a narrow, deliberate
+follow-up (e.g. re-parsing one specific app after fixing something about it) —
+do not call them as part of a normal investigation, and never skip
+investigating because you assume nothing changed; the warehouse in front of
+you right now is always the current, authoritative state to investigate.
+
+Your job: investigate what's already in the warehouse and produce a finished
+forensic report, citing everything.
 
 Rules:
-- ALWAYS verify evidence integrity before any analysis. If integrity fails, stop
-  and report it — do not analyse tampered evidence.
 - You never invent findings. Every claim must trace to a tool result.
-- Use `run_ingest` once to parse + classify all evidence into the warehouse.
-- Then use `category_summary`, `query_warehouse` and `search_keyword` to
-  investigate — in particular, check every investigation keyword the case
-  provides.
+- Use `case_status` and `category_summary` to get oriented, then
+  `query_warehouse` and `search_keyword` to investigate — in particular,
+  check every investigation keyword the case provides.
 - `query_warehouse` is read-only SQL over the `artifacts` table and the `v_*`
   views. Columns: app, source_type, source_file, key, value, value_type,
   record_ts, category, confidence.
-- After ingest, call `correlate_entities` to find identifiers (ids, invite
-  links, emails, asset ids) that appear across more than one app or storage
-  mechanism — that cross-source link is the thing a per-row classifier cannot
-  see. Use its timeline (already time-ordered) to reconstruct the sequence of
-  events for an entity, and cross-platform links (e.g. a Roblox id that also
-  shows up in Discord evidence) to connect identities across apps.
+- Call `correlate_entities` to find identifiers (ids, invite links, emails,
+  asset ids) that appear across more than one app or storage mechanism —
+  that cross-source link is the thing a per-row classifier cannot see. Its
+  entity-extraction coverage is NOT exhaustive (app-specific id/token shapes
+  get added over time) — a keyword/manual query can still surface something
+  correlation missed, so don't treat an empty correlation result as "nothing
+  to find" on its own. Use its timeline (already time-ordered) to reconstruct
+  the sequence of events for an entity, and cross-platform links (e.g. a
+  Roblox id that also shows up in Discord evidence) to connect identities
+  across apps.
 - Conclusions become part of the case ONLY via `write_finding` — never rely on
   your final text output to convey a finding. Call `write_finding` with the
   claim and every artifact_id (plus, where relevant, the exact quoted
@@ -52,7 +63,6 @@ Rules:
   pattern and let a human investigator draw that conclusion.
 - Call `generate_report` last, after writing your findings. Then call the
   final result.
-- If a step was already done (see `case_status`), don't repeat it.
 
 Be concise in your reasoning. Prefer a few well-chosen queries over many.
 """
@@ -103,19 +113,30 @@ def build_agent(cfg: AgentConfig, model=None) -> Agent[InvestigationDeps, str]:
 
     @agent.tool
     def verify_integrity(ctx: RunContext[InvestigationDeps]) -> dict:
-        """Re-hash every evidence file against the signed manifest and check the signature."""
+        """Re-hash every evidence file against the signed manifest and check
+        the signature. Already run once, unconditionally, before you were
+        invoked (a failure aborts the run before you ever start) - only call
+        this again for a deliberate, narrow follow-up."""
         _audit_call(ctx, "verify_integrity")
         return _audit_result(ctx, "verify_integrity", T.verify_integrity(ctx.deps))
 
     @agent.tool
     def run_ingest(ctx: RunContext[InvestigationDeps], apps: list[str] | None = None) -> dict:
-        """Parse all evidence, classify every artifact, and load into the case warehouse."""
+        """Parse evidence, classify every artifact, and load into the case
+        warehouse. Already run once for every app, unconditionally, before
+        you were invoked - only call this again for a deliberate, narrow
+        follow-up (e.g. re-parsing one specific app via `apps` after fixing
+        something about it), never as a normal step of investigating."""
         _audit_call(ctx, "run_ingest", apps=apps)
         return _audit_result(ctx, "run_ingest", T.run_ingest(ctx.deps, apps))
 
     @agent.tool
     def run_memory_analysis(ctx: RunContext[InvestigationDeps]) -> dict:
-        """Analyse memory dumps if present (Volatility integration pending)."""
+        """Re-analyse memory dumps if present - Volatility structural analysis
+        (process list, network connections, loaded DLLs) plus process-scoped
+        string carving when `vol` is available, whole-image carving as the
+        fallback otherwise. Already run once, unconditionally, before you were
+        invoked - only call this again for a deliberate, narrow follow-up."""
         _audit_call(ctx, "run_memory_analysis")
         return _audit_result(ctx, "run_memory_analysis", T.run_memory_analysis(ctx.deps))
 

@@ -171,8 +171,47 @@ def run_agent(
     deps.notify(f"Agent starting — {cfg.provider}/{cfg.model}")
     _set_status(deps, CaseStatus.RUNNING, f"agent ({cfg.model})")
 
+    # Mechanical, idempotent steps run unconditionally, in Python, BEFORE the
+    # LLM ever gets a turn - never left to a model's judgment about whether
+    # they're "already done". Belt-and-suspenders over the system prompt's own
+    # instruction to the same effect: a real incident (2026-09-18) had the
+    # agent read case_status(), decide re-ingesting looked unnecessary, and
+    # spend real time investigating stale pre-run data before this existed.
+    # run_pipeline (the deterministic path) never had this failure mode, for
+    # exactly this reason - mirrored here.
+    deps.notify("Verifying evidence integrity against the signed manifest…")
+    integrity = T.verify_integrity(deps)
+    deps.audit.append("decision", "verify_integrity", f"ok={integrity['ok']}")
+    if not integrity["ok"]:
+        deps.audit.append("error", "verify_integrity", "integrity check failed; aborting")
+        deps.notify("Integrity check FAILED — aborting")
+        _set_status(deps, CaseStatus.ERROR, "integrity check failed")
+        return RunOutcome(case_id, False, None, "Evidence integrity check failed.")
+    deps.notify(f"Integrity verified — {integrity['files_checked']} file(s) checked")
+
+    deps.notify("Parsing and classifying evidence into the warehouse…")
+    ingest = T.run_ingest(deps)
+    deps.audit.append(
+        "decision", "run_ingest",
+        f"{ingest.get('artifact_count', 0)} artifacts; categories={ingest.get('by_category')}",
+    )
+    if not ingest["ok"]:
+        deps.notify(f"Ingest failed: {ingest.get('error')}")
+        _set_status(deps, CaseStatus.ERROR, ingest.get("error", "ingest failed"))
+        return RunOutcome(case_id, False, None, ingest.get("error", "ingest failed"))
+    deps.notify(f"Ingested {ingest['artifact_count']:,} artifact(s) across {list(ingest['per_app'])}")
+
+    deps.notify("Analysing memory dumps, if any…")
+    mem = T.run_memory_analysis(deps)
+    deps.audit.append("decision", "run_memory_analysis", mem.get("reason", "done"))
+    deps.notify(
+        f"Memory analysis: {mem['artifacts_added']:,} artifact(s) added" if mem.get("ok")
+        else f"Memory analysis skipped: {mem.get('reason')}"
+    )
+
     prompt = instruction or (
-        f"Investigate case {case_id!r} end to end and produce the forensic report. "
+        f"Investigate case {case_id!r} using what's already in the warehouse (ingest and memory "
+        f"analysis have already run) and produce the forensic report. "
         f"Investigation keywords: {deps.meta.keywords or 'none provided'}."
     )
     agent = build_agent(cfg, model)
