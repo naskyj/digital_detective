@@ -52,6 +52,11 @@ Rules:
   the sequence of events for an entity, and cross-platform links (e.g. a
   Roblox id that also shows up in Discord evidence) to connect identities
   across apps.
+- When memory analysis found processes for an app, use `list_processes` to
+  see them (PID/PPID/image name/command line/create time) and
+  `process_memory` to read what was carved from one specific process's own
+  memory — narrower and more targeted than `search_keyword` over everything,
+  useful once you have a PID of interest from `list_processes` or a citation.
 - Conclusions become part of the case ONLY via `write_finding` — never rely on
   your final text output to convey a finding. Call `write_finding` with the
   claim and every artifact_id (plus, where relevant, the exact quoted
@@ -166,6 +171,23 @@ def build_agent(cfg: AgentConfig, model=None) -> Agent[InvestigationDeps, str]:
         return _audit_result(
             ctx, "correlate_entities", T.correlate_entities(ctx.deps, min_distinct_sources)
         )
+
+    @agent.tool
+    def list_processes(ctx: RunContext[InvestigationDeps], app: str) -> dict:
+        """Every process Volatility found belonging to `app`, pivoted into one
+        row per process (PID/PPID/image name/command line/create time).
+        Requires memory analysis + `vol`; an empty result usually means one
+        of those, not that the app truly had no processes."""
+        _audit_call(ctx, "list_processes", app=app)
+        return _audit_result(ctx, "list_processes", T.list_processes(ctx.deps, app))
+
+    @agent.tool
+    def process_memory(ctx: RunContext[InvestigationDeps], pid: int, limit: int = 50) -> dict:
+        """Memory strings carved from one specific process's own memory
+        (found via `list_processes`), not the whole image - use this to zoom
+        into one PID instead of `search_keyword` over everything."""
+        _audit_call(ctx, "process_memory", pid=pid, limit=limit)
+        return _audit_result(ctx, "process_memory", T.process_memory(ctx.deps, pid, limit))
 
     @agent.tool
     def verify_finding(

@@ -243,6 +243,72 @@ def correlate_entities(deps: InvestigationDeps, min_distinct_sources: int = 2) -
     }
 
 
+def _pivot_processes_by_pid(rows: list[dict]) -> list[dict]:
+    """`rows` are flat memory_process artifacts - one row per Volatility
+    column, one shared source_locator per (plugin, row-index) group (e.g.
+    every column from the same pslist row carries source_locator
+    "windows.pslist.PsList#3"; cmdline's PID/Process/Args share their own
+    "windows.cmdline.CmdLine#3"). Pivot into one dict per process, keyed by
+    its own PID column's value - the exact logic the Processes UI view
+    (processesPanel's pivotByPid, dd_lab/ui/index.html) already does
+    client-side, ported here so agent tools don't hand-roll SQL for it."""
+    locator_pid: dict[str, str] = {}
+    for r in rows:
+        if r["key"].endswith(".PID"):
+            locator_pid[r["source_locator"]] = r["value"]
+    by_pid: dict[str, dict] = {}
+    for r in rows:
+        pid = locator_pid.get(r["source_locator"])
+        if pid is None:
+            continue  # a stray column with no PID sibling in its own group
+        col = r["key"].rsplit(".", 1)[-1]
+        by_pid.setdefault(pid, {"pid": pid})[col] = r["value"]
+    return sorted(by_pid.values(), key=lambda p: int(p["pid"]))
+
+
+def list_processes(deps: InvestigationDeps, app: str) -> dict:
+    """Every process Volatility found belonging to `app` (root matches plus
+    every spawned descendant, see match_target_processes), pivoted into one
+    row per process with its PID/PPID/image name/command line/create time.
+    Requires memory analysis to have run and `vol` to have been available on
+    the analysis machine — an empty result usually means one of those, not
+    that the app has no processes."""
+    wh = Warehouse(deps.layout.warehouse)
+    try:
+        rows = wh.query(
+            "SELECT key, value, source_locator FROM artifacts "
+            "WHERE app = ? AND source_type = 'memory_process' LIMIT 5000",
+            [app],
+        )
+    finally:
+        wh.close()
+    procs = _pivot_processes_by_pid(rows)
+    return {"ok": True, "app": app, "process_count": len(procs), "processes": procs}
+
+
+def process_memory(deps: InvestigationDeps, pid: int, limit: int = 50) -> dict:
+    """Memory strings carved from one specific process's own memory, not the
+    whole image — use this after `list_processes` to zoom into one PID
+    instead of `search_keyword` over everything. Matches the "pid<PID>:"
+    source_locator prefix the per-process carving path writes (see
+    dd_lab/memory/analyze.py); returns nothing for a PID that was found
+    structurally (in `list_processes`) but whose own memory couldn't be
+    extracted and carved separately, or for a whole-image fallback carve
+    (no target-app process matched, so nothing is PID-scoped at all)."""
+    wh = Warehouse(deps.layout.warehouse)
+    try:
+        rows = wh.query(
+            "SELECT app, source_type, category, key, substr(value,1,300) AS value, "
+            "record_ts, source_file, source_locator, artifact_id FROM artifacts "
+            "WHERE source_type = 'memory_string' AND source_locator LIKE ? "
+            "ORDER BY (category != 'GENERAL') DESC, confidence DESC LIMIT ?",
+            [f"pid{int(pid)}:%", int(limit)],
+        )
+    finally:
+        wh.close()
+    return {"ok": True, "pid": pid, "hits": len(rows), "rows": rows}
+
+
 def verify_finding(deps: InvestigationDeps, artifact_id: str, claim_substring: str | None = None) -> dict:
     """Self-verification: re-read `artifact_id` straight from the warehouse and
     confirm `claim_substring` (if given) is actually present in its stored
