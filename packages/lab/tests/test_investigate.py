@@ -95,6 +95,36 @@ def test_bare_snowflake_tagged_with_discord_context():
     )
 
 
+def test_extract_slack_token():
+    # a real xoxc- client token, found in real evidence this session -
+    # distinctive enough to scan unscoped, no app context needed.
+    hits = extract_entities(
+        "SomeApp", "local_storage.value",
+        "session token: xoxc-12052162462546-12047601193813-abc123",
+    )
+    assert any(h.entity_type == "slack_token" for h in hits)
+    assert any(h.normalized.startswith("xoxc-") for h in hits)
+
+
+def test_extract_slack_team_and_user_id_with_slack_context():
+    # real workspace/user ids found in real evidence this session (a Slack
+    # workspace "TP Gaming Clan"), embedded in a compound key string as
+    # commonly as in a value - both are scanned.
+    hits = extract_entities(
+        "Slack", "https://app.slack.com :: endpoints-v1-T0C1J4SDLG2",
+        '{"user_id": "U0C1DHP5PPX"}',
+    )
+    assert any(h.entity_type == "slack_team_id" and h.normalized == "T0C1J4SDLG2" for h in hits)
+    assert any(h.entity_type == "slack_user_id" and h.normalized == "U0C1DHP5PPX" for h in hits)
+
+
+def test_slack_team_id_shape_needs_slack_app_context():
+    # a "T" + alnum shape is generic enough that a hex/hash fragment could
+    # share it by chance - must not be tagged outside Slack's own evidence.
+    hits = extract_entities("SomeOtherApp", "some.key", "T0C1J4SDLG2")
+    assert not any(h.entity_type in ("slack_team_id", "slack_user_id") for h in hits)
+
+
 # --------------------------------------------------------------- build_correlation_report
 
 

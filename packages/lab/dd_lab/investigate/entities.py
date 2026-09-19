@@ -43,6 +43,18 @@ _ROBLOX_USER_URL = re.compile(r"\broblox\.com/users/(\d{1,15})\b", re.I)
 _ROBLOX_ASSET = re.compile(r"\brbxassetid[:=/]{1,3}(\d{1,15})\b", re.I)
 _SNOWFLAKE = re.compile(r"^\d{15,20}$")  # Discord snowflake shape (also matches raw Roblox ids)
 
+# Slack's own token-prefix scheme (xoxb- bot, xoxp- legacy user, xoxc- client,
+# xoxa- app-level, xoxe-/xoxr- refresh/rotation, ...) - distinctive enough on
+# its own, no app/key context needed, same as the URL/mention patterns above.
+# A real xoxc- client token was found in real evidence this session.
+_SLACK_TOKEN = re.compile(r"\bxox[a-z]-[0-9a-zA-Z-]{8,}\b")
+# Team/user ids ("T"/"U" + 8-10 alnum, e.g. real evidence: T0C1J4SDLG2,
+# U0C1DHP5PPX) are NOT distinctive enough to scan unscoped - a hex/hash
+# fragment can share this shape by pure chance. Only trusted with "slack" in
+# the app, same reasoning as the bare-snowflake case below for Discord/Roblox.
+_SLACK_TEAM_ID = re.compile(r"\bT[A-Z0-9]{8,10}\b")
+_SLACK_USER_ID = re.compile(r"\bU[A-Z0-9]{8,10}\b")
+
 # key-name hints that turn a bare numeric value into a typed id instead of "just a number"
 _ID_KEY_HINT = re.compile(
     r"(author|user|recipient|guild|channel|owner|sender|member|snowflake|dm_)?id\b", re.I
@@ -74,6 +86,19 @@ def extract_entities(app: str, key: str, value: str) -> list[EntityHit]:
 
     for m in _ROBLOX_ASSET.finditer(value):
         hits.append(EntityHit("roblox_asset_id", m.group(1), m.group(0)))
+
+    for m in _SLACK_TOKEN.finditer(value):
+        hits.append(EntityHit("slack_token", m.group(0), m.group(0)))
+
+    # team/user ids are generic-shaped enough that they need app context -
+    # scan both key and value together, since real evidence shows the id
+    # embedded in a compound key string as often as in the value itself.
+    if "slack" in app.lower():
+        haystack = f"{key} {value}"
+        for m in _SLACK_TEAM_ID.finditer(haystack):
+            hits.append(EntityHit("slack_team_id", m.group(0), m.group(0)))
+        for m in _SLACK_USER_ID.finditer(haystack):
+            hits.append(EntityHit("slack_user_id", m.group(0), m.group(0)))
 
     # a bare snowflake-shaped value: only treated as an id when key or app
     # context says so, to avoid tagging every long numeric string in a dump.
