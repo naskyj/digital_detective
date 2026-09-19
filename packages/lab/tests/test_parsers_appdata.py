@@ -81,6 +81,29 @@ def test_skips_files_already_claimed_by_a_named_parser(tmp_path):
     assert not any("leveldb" in a.source_file for a in artifacts)
 
 
+def test_skips_a_binary_log_file_not_caught_by_the_already_claimed_check(tmp_path):
+    """Real bug, found while regenerating a real case's app_data.csv export:
+    a LevelDB write-ahead log sitting somewhere source_type_for_path()
+    doesn't recognise at all (e.g. a Chromium extension's own internal
+    store, "Extension Rules/000003.log") still ends in ".log" and still
+    reaches this parser's generic line-based branch - unlike
+    test_skips_files_already_claimed_by_a_named_parser's Local Storage
+    case, there's no "already claimed" exclusion to save it here. Without
+    the NUL-byte check, read_text(errors="replace") "decodes" the binary
+    WAL content into thousands of garbage line artifacts - confirmed on
+    real evidence: literal NUL bytes among them, which breaks a standard
+    CSV reader on export, not just noise in the warehouse."""
+    ctx = _ctx(tmp_path, app="SomeApp")
+    native = ctx.app_root / "native"
+    ext_rules = native / "Extension Rules"
+    ext_rules.mkdir(parents=True)
+    (ext_rules / "000003.log").write_bytes(b"\x00\x01\x01\x00\x00\x00\x00binary leveldb wal\x00\x02")
+
+    artifacts = list(appdata.parse(ctx))
+    assert not any("Extension Rules" in a.source_file for a in artifacts)
+    assert not any("\x00" in a.value for a in artifacts)
+
+
 def test_ini_style_key_value_lines(tmp_path):
     ctx = _ctx(tmp_path, app="SomeApp")
     native = ctx.app_root / "native"

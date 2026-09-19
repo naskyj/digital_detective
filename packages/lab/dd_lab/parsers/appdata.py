@@ -81,7 +81,24 @@ def _parse_one_file(ctx: ParseContext, f: Path, rel: str) -> Iterator[Normalized
             # apps to assume; one artifact per substantive line, generic
             # `key=value` split where a line has one (.ini/.cfg's own shape),
             # else the bare line as the value.
+            #
+            # `.log` is ambiguous by extension alone: Roblox's own log files
+            # (the reason `.log` is in MISC_EXTENSIONS at all) are genuine
+            # plain text, but a *LevelDB* write-ahead log - e.g. a Chromium
+            # extension's own internal store, sitting inside a native app's
+            # profile tree under a name like "Extension Rules/000003.log" -
+            # also ends in `.log` and is pure binary. Found on real evidence:
+            # read_text(errors="replace") happily "decodes" that binary as
+            # thousands of garbage line artifacts, embedded NUL bytes and
+            # all, which breaks any standard CSV reader on export - not just
+            # a formatting nuisance, real noise in the warehouse too. A NUL
+            # byte essentially never appears in genuinely-authored text, so
+            # its presence is a reliable "this isn't text" signal - skip the
+            # whole file rather than emit garbage from it.
             text = f.read_text("utf-8", errors="replace")
+            if "\x00" in text:
+                log.debug("skipping %s - contains NUL bytes, not real text (likely a binary .log)", f)
+                return
             for n, line in enumerate(text.splitlines()):
                 if n >= MAX_LINES_PER_FILE:
                     break
