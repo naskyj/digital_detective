@@ -121,7 +121,7 @@
 
 <script>
 const $ = (s,r=document)=>r.querySelector(s);
-const el = (t,a={},...k)=>{const e=document.createElement(t);for(const[x,v]of Object.entries(a)){if(x==='class')e.className=v;else if(x==='html')e.innerHTML=v;else if(x.startsWith('on'))e.addEventListener(x.slice(2),v);else e.setAttribute(x,v);}k.flat().forEach(c=>e.append(c?.nodeType?c:document.createTextNode(c??'')));return e;};
+const el = (t,a={},...k)=>{const e=document.createElement(t);for(const[x,v]of Object.entries(a)){if(x==='class')e.className=v;else if(x==='html')e.innerHTML=v;else if(x.startsWith('on'))e.addEventListener(x.slice(2),v);else if(typeof v==='boolean'){if(v)e.setAttribute(x,'');}else e.setAttribute(x,v);}k.flat().forEach(c=>e.append(c?.nodeType?c:document.createTextNode(c??'')));return e;};
 // Standard SQL string-literal escaping (double embedded single quotes) for
 // the handful of places that build a SQL string client-side to send to the
 // read-only /query endpoint (server-side enforces SELECT-only + no writes,
