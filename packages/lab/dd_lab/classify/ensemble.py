@@ -18,6 +18,7 @@ from dd_core.enums import SourceType, ValueType
 from dd_core.schema import ClassificationResult
 from dd_lab.classify.entropy import entropy_vote
 from dd_lab.classify.gates import boosted_relevance, is_structurally_empty
+from dd_lab.classify.infra_gazetteer import is_infra_noise
 from dd_lab.classify.ner import ner_vote
 from dd_lab.classify.rules import CATEGORY_PRIORITY, keyword_hits, regex_hits
 
@@ -127,6 +128,15 @@ class Classifier:
             scores[C.TIMESTAMP] = 0.6
 
         category, confidence, relevance_score = _combine(scores)
+
+        # ID-in-plumbing carve-out (classifier_backend_spec.md): an id
+        # riding along in app plumbing or a telemetry URL isn't evidence -
+        # overrides whatever the voters above produced, same override tier
+        # as the empty-body gate but necessarily checked after voting since
+        # it needs the accumulated result, not just the raw key/value.
+        if is_infra_noise(key, value):
+            category, confidence, relevance_score = C.GENERAL, 0.0, 0.0
+
         relevance_score = boosted_relevance(
             relevance_score, deleted=deleted, is_general=category == C.GENERAL
         )

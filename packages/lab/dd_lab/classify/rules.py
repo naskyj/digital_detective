@@ -57,6 +57,14 @@ _VALUE_PATTERNS: dict[C, list[tuple[re.Pattern, float]]] = {
         (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), 0.9),  # Google API key
         (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), 0.95),  # AWS
         (re.compile(r"\bBearer\s+[A-Za-z0-9._-]{20,}"), 0.8),
+        # classifier_backend_spec.md's cross-app Chromium field: Local State's
+        # os_crypt.encrypted_key is the DPAPI-wrapped master key that
+        # decrypts the cookie store/saved secrets - high value for cookie
+        # decryption, present across all three apps since each is
+        # Electron/WebView2-hosted. Local State is kept whole as one JSON
+        # artifact (see parsers/prefs.py), so this matches inside `value`,
+        # never `key`.
+        (re.compile(r"os_crypt.*?encrypted_key", re.I), 0.85),
     ],
     C.PAYMENT_INFO: [
         (re.compile(r"\b(?:4\d{12}(?:\d{3})?|5[1-5]\d{14}|3[47]\d{13}|6(?:011|5\d{2})\d{12})\b"), 0.9),
@@ -80,6 +88,11 @@ _VALUE_PATTERNS: dict[C, list[tuple[re.Pattern, float]]] = {
         (re.compile(r"\b(?:Windows NT|Mac OS X|X11; Linux|Android \d)\b"), 0.7),
         (re.compile(r"[A-Za-z]:\\(?:Users|Windows|Program Files)\\"), 0.75),
         (re.compile(r"%(?:APPDATA|LOCALAPPDATA|USERPROFILE)%"), 0.7),
+        # Preferences' electron.media.device_id_salt - a persistent
+        # per-install device identifier (spec's "attribution" field); closest
+        # existing category to "this install can be re-identified across
+        # sessions". Same whole-JSON-blob reasoning as os_crypt above.
+        (re.compile(r"device_id_salt", re.I), 0.7),
     ],
     C.USER: [
         (re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]{2,}\b"), 0.7),  # email
@@ -153,6 +166,22 @@ _VALUE_KEYWORDS: dict[C, tuple[tuple[str, float], ...]] = {
     C.CHAT_CONTENT: (),
 }
 
+# classifier_backend_spec.md's cross-app cookie-NAME allowlist: cookie
+# *values* are opaque/encrypted (nothing to pattern-match), so the name
+# is the signal instead. parsers/cookies.py sets key="cookie.<host>.<name>",
+# so the name is always the final dot-separated segment - anchored at the
+# end of `key`, not run through _norm_key_tail's substring-in-tail
+# mechanism, because some of these names are short enough (`_ga`) that a
+# bare substring search would false-positive on unrelated keys (e.g.
+# "organization" contains "ga"). Deliberately excludes the spec's named
+# non-evidence cookies (__cf_bm, cf_clearance, __cflb, hmt_id - CDN/
+# bot-management, pure config) by simply not listing them.
+_COOKIE_CREDENTIAL_NAMES = re.compile(
+    r"\.(ROBLOSECURITY|ARID|__dcfduid|__sdcfduid|ssb_instance_id|persona_device_id|"
+    r"__stripe_mid|_ga(?:_[A-Z0-9]+)?|__utma|__utmz|_iidt|_vid_t)$",
+    re.I,
+)
+
 _PUNCT = re.compile(r"[^a-z0-9]+")
 
 
@@ -170,6 +199,9 @@ def regex_hits(key: str, value: str, app: str | None = None) -> list[RuleHit]:
             m = pat.search(sample)
             if m:
                 hits.append(RuleHit(cat, weight, m.group(0)[:80]))
+    m = _COOKIE_CREDENTIAL_NAMES.search(key)
+    if m:
+        hits.append(RuleHit(C.CREDENTIAL, 0.6, m.group(1)))
     # `app` is accepted here (and by keyword_hits below) so both functions
     # can grow the per-app profile lookup (classifier_backend_spec.md) in a
     # later phase without another signature change; a no-op until then.
