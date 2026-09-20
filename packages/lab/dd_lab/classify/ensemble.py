@@ -21,6 +21,7 @@ from dd_lab.classify.gates import boosted_relevance, is_structurally_empty
 from dd_lab.classify.infra_gazetteer import is_infra_noise
 from dd_lab.classify.ner import ner_vote
 from dd_lab.classify.rules import CATEGORY_PRIORITY, content_field_hits, keyword_hits, regex_hits
+from dd_lab.memory.extract import memory_derived_hits
 
 CLASSIFIER_VERSION = "ensemble-0.3.0"
 
@@ -144,6 +145,14 @@ class Classifier:
         spans: list[str] = []
 
         rx = regex_hits(key, value, app)
+        if content_tier:
+            # Memory-derived extraction (URL-embedded ids, WebAuthn
+            # records, Windows toast content - memory/extract.py) - source-
+            # agnostic (a URL's own host names the app), gated the same way
+            # as the content-field gazetteer above: content tier only,
+            # never for source_type=None. Mechanically a regex/value-shape
+            # match, so unioned straight into `rx` and reuses _W_REGEX.
+            rx = rx + memory_derived_hits(value)
         regex_vote = _best(rx)
         for hit in rx:
             scores[hit.category] += _W_REGEX * hit.weight

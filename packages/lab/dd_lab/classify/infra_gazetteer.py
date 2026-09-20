@@ -62,7 +62,15 @@ _PLUMBING = re.compile(
 _CONTENT_EXCEPTIONS = re.compile(
     r"/attachments/|files-tmb|files-pri|slack-files\.com|/forums/|invite_code|"
     r"invite_guild|message-content|message-username|chat-messages|"
-    r'"content"|"text"|/avatars/\d{17,20}|user-settings|birthdate',
+    r'"content"|"text"|/avatars/\d{17,20}|user-settings|birthdate|'
+    # Found while implementing phase 7 (memory/extract.py's URL-embedded
+    # id extraction): the generic "/profile" plumbing pattern above (meant
+    # for Discord's own api/v9/users/.../profile housekeeping route) also
+    # swallows a legitimate Roblox user/game/community page URL, since
+    # "/profile" is just a bare substring match with no app context. Same
+    # spirit as the /avatars/\d{17,20} exception two lines up - a real
+    # profile/game/community reference for a case's own user, not plumbing.
+    r"roblox\.com/(?:users|games|communities)/\d+",
     re.I,
 )
 
