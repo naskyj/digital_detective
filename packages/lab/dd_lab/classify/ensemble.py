@@ -37,6 +37,40 @@ _W_MODEL = 1.1
 # opinion, not to override a real signal from another voter.
 _W_ENTROPY = 0.5
 
+# Per-source-type voter routing (classifier_backend_spec.md's "PER-SOURCE
+# ROUTING" finding): on the collaborator's own back-test, structured
+# key/value sources already reach ~97% recall / ~82% precision on schema-
+# key + value-shape (regex/keyword) alone - adding the fuzzy voters there
+# (NER, model, entropy) gained 0 recall and only cost precision, since a
+# rogue vote on an already-precise structured record has nothing to rescue
+# and only adds a chance of a false positive. So for these source types,
+# NER/model/entropy are skipped outright, not just down-weighted - see
+# Classifier.classify() below. Content-dependent sources (cache/memory/
+# app_data) keep the full voter set, since that's where real recall was
+# actually missing. MEMORY_PROCESS is structured key=value process
+# metadata (PID/name/CreateTime, ...), not free text, so it's grouped with
+# the structured tier even though it's a memory-derived source type.
+_STRUCTURED_SOURCES = frozenset(
+    {
+        SourceType.LOCAL_STORAGE,
+        SourceType.SESSION_STORAGE,
+        SourceType.INDEXEDDB,
+        SourceType.COOKIES,
+        SourceType.PREFERENCES,
+        SourceType.LOCAL_STATE,
+        SourceType.MEMORY_PROCESS,
+    }
+)
+_CONTENT_SOURCES = frozenset(
+    {
+        SourceType.CACHE,
+        SourceType.MEMORY_STRING,
+        SourceType.MEMORY_ARTIFACT,
+        SourceType.MEMORY_NETWORK,
+        SourceType.APP_DATA,
+    }
+)
+
 
 def _combine(scores: dict[C, float]) -> tuple[C, float, float]:
     """(category, confidence, relevance_score). `relevance_score` is the
@@ -73,9 +107,18 @@ class Classifier:
         source_type: SourceType | str | None = None,
         deleted: bool = False,
     ) -> ClassificationResult:
-        # source_type-based voter routing and app-scoped rules land in later
-        # phases; source_type itself isn't consulted yet.
-        del source_type
+        # Normalize source_type once - classify_warehouse's re-classify path
+        # reads it back out of DuckDB as a plain string, not a SourceType
+        # instance (see pipeline.py). An unrecognized/absent value falls
+        # through to `None`, which routes as "run every voter" below - the
+        # same behavior as every pre-phase-4 caller that never passed
+        # source_type at all, so an unknown source type never silently
+        # loses recall by being mis-routed into the structured tier.
+        try:
+            st = SourceType(source_type) if source_type is not None else None
+        except ValueError:
+            st = None
+        structured = st in _STRUCTURED_SOURCES
 
         # Empty-body pre-gate (classifier_backend_spec.md): runs FIRST,
         # before any voter, and overrides everything - a structurally empty
@@ -104,24 +147,30 @@ class Classifier:
         for hit in kw:
             scores[hit.category] += _W_KEYWORD * hit.weight
 
-        nv = ner_vote(key, value)
+        # Structured sources: literally don't call these three voters (not
+        # just zero-weight them) - see _STRUCTURED_SOURCES' comment above.
+        # Skipping outright also means GLiNER/ONNX inference is never
+        # invoked for the ~70%+ of rows that are structured, a real perf
+        # win alongside the precision one.
         ner_cat = None
-        if nv:
-            ner_cat, ner_strength = nv
-            scores[ner_cat] += _W_NER * ner_strength
-
         model_cat = None
-        if self._model_voter is not None:
-            mv = self._model_voter(key, value)
-            if mv:
-                model_cat, model_strength = mv
-                scores[model_cat] += _W_MODEL * model_strength
-
-        ev = entropy_vote(key, value)
         entropy_cat = None
-        if ev:
-            entropy_cat, entropy_strength = ev
-            scores[entropy_cat] += _W_ENTROPY * entropy_strength
+        if not structured:
+            nv = ner_vote(key, value)
+            if nv:
+                ner_cat, ner_strength = nv
+                scores[ner_cat] += _W_NER * ner_strength
+
+            if self._model_voter is not None:
+                mv = self._model_voter(key, value)
+                if mv:
+                    model_cat, model_strength = mv
+                    scores[model_cat] += _W_MODEL * model_strength
+
+            ev = entropy_vote(key, value)
+            if ev:
+                entropy_cat, entropy_strength = ev
+                scores[entropy_cat] += _W_ENTROPY * entropy_strength
 
         # A bare timestamp / number with no other signal is TIMESTAMP / GENERAL.
         if not scores and str(value_type) == ValueType.TIMESTAMP:
