@@ -11,6 +11,7 @@ more reliable than value signals, so the ensemble weights them accordingly.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
@@ -160,10 +161,20 @@ _KEY_KEYWORDS: dict[C, tuple[tuple[str, float], ...]] = {
     ),
 }
 
-# Value keyword signals (weaker; matched anywhere in a lower-cased value).
+# Value keyword signals (weaker; matched anywhere in the value). Compiled
+# to word-boundary regex, not a bare substring-in check - free text has
+# real word boundaries (unlike _KEY_KEYWORDS' tail, see _norm_key_tail's
+# note below), so "password" here must not fire on e.g. "unpasswordable"
+# (not a real word, but illustrates the class of risk classifier_backend_
+# spec.md flags: a keyword voter must not fire on part of an unrelated
+# word - "card" inside "cardboard", "meet" inside "meeting").
 _VALUE_KEYWORDS: dict[C, tuple[tuple[str, float], ...]] = {
     C.CREDENTIAL: (("password", 0.35), ("unauthorized", 0.2), ("invalid token", 0.3)),
     C.CHAT_CONTENT: (),
+}
+_VALUE_KEYWORD_PATTERNS: dict[C, tuple[tuple[re.Pattern, float], ...]] = {
+    cat: tuple((re.compile(rf"\b{re.escape(word)}\b", re.I), w) for word, w in words)
+    for cat, words in _VALUE_KEYWORDS.items()
 }
 
 # classifier_backend_spec.md's cross-app cookie-NAME allowlist: cookie
@@ -191,6 +202,19 @@ def _norm_key_tail(key: str) -> str:
     return _PUNCT.sub("", "".join(segs[-2:]).lower())
 
 
+# _KEY_KEYWORDS below stays substring-in-tail (not word-boundary regex, unlike
+# _VALUE_KEYWORDS above): _norm_key_tail already strips every punctuation
+# character, so the tail is one continuous run of [a-z0-9] with no internal
+# word boundaries left for \b to anchor on at all - "password" inside the
+# normalized tail "apppassword" (from key "app.password") has no \b before
+# the "p" (both "p" and the preceding "p" are word characters), so a literal
+# \bpassword\b would silently stop matching real, currently-correct hits.
+# Fuzzy substring-on-normalized-tail is the deliberate design here, not an
+# oversight - real word-boundary hardening lands on _VALUE_KEYWORDS (free
+# text keeps its real punctuation/spacing) and the new content-field
+# gazetteer below (flattened JSON leaf keys also keep real dots/brackets).
+
+
 def regex_hits(key: str, value: str, app: str | None = None) -> list[RuleHit]:
     hits: list[RuleHit] = []
     sample = value[:4000]
@@ -216,10 +240,82 @@ def keyword_hits(key: str, value: str, app: str | None = None) -> list[RuleHit]:
         best = max((w for sub, w in kws if sub in ktail), default=0.0)
         if best:
             hits.append(RuleHit(cat, best, f"key~{ktail}"))
-    vlow = value[:2000].lower()
-    for cat, kws in _VALUE_KEYWORDS.items():
-        best = max((w for sub, w in kws if sub in vlow), default=0.0)
+    vsample = value[:2000]
+    for cat, pats in _VALUE_KEYWORD_PATTERNS.items():
+        best = max((w for pat, w in pats if pat.search(vsample)), default=0.0)
         if best:
             hits.append(RuleHit(cat, best, "value-keyword"))
     del app
+    return hits
+
+
+# --------------------------------------------------------- JSON leaf-key flattening
+# classifier_backend_spec.md's "JSON key-path flattening" fix: cache/
+# IndexedDB JSON bodies keep their fields nested (author.username,
+# message.content, attachments[0].url) - jsonflat.py deliberately keeps a
+# JSON *object* whole as one artifact (a different, documented design
+# decision for export/report readability, see that module's own
+# docstring), so the classifier never sees those nested field names as
+# their own artifact key the way a flat LevelDB record's key already is.
+# This flattens *only inside the classifier*, purely to let the content-
+# field gazetteer below see leaf field names - it changes nothing about
+# artifact storage/export granularity.
+_MAX_FLATTEN_LEAVES = 500
+
+
+def flatten_leaf_keys(value: str) -> list[str]:
+    """Best-effort: non-JSON or unparseable values return []. Dotted/
+    bracketed leaf paths, e.g. "author.username", "attachments[0].url" -
+    array indices use brackets (mirrors jsonflat.py's own convention) so a
+    leaf's own field name is always cleanly the text after the last '.'."""
+    s = value.strip()
+    if s[:1] not in "{[":
+        return []
+    try:
+        parsed = json.loads(s)
+    except (ValueError, TypeError):
+        return []
+    paths: list[str] = []
+
+    def walk(node: object, prefix: str) -> None:
+        if len(paths) >= _MAX_FLATTEN_LEAVES:
+            return
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, f"{prefix}.{k}" if prefix else str(k))
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                walk(v, f"{prefix}[{i}]" if prefix else f"[{i}]")
+        else:
+            paths.append(prefix)
+
+    walk(parsed, "")
+    return paths
+
+
+# Content-bearing field-name gazetteer: fields that only appear on real user
+# data, matched against each flattened leaf's own name (word-boundary, so
+# "content" matches "message.content" and "content[2]" alike but not
+# "contentType"). Deliberately excludes generic `name|value|status|body` -
+# the spec's own finding: those fire constantly on config JSON with no
+# recall benefit. +7pts cache recall / precision held, per the spec's
+# back-test, once this ran alongside the JSON-key-path flattening above.
+_CONTENT_FIELD_PATTERNS: tuple[tuple[re.Pattern, C], ...] = (
+    (re.compile(r"\b(?:content|text|insert)\b", re.I), C.CHAT_CONTENT),
+    (re.compile(r"\bdraft\b", re.I), C.DRAFT),
+    (re.compile(r"\bcustomStatus\b", re.I), C.ACCOUNT_SETTINGS),
+    (re.compile(r"\b(?:displayName|username|nickname|email)\b", re.I), C.CONTACT_PII),
+    (re.compile(r"\bbirth(?:Month|Day|Year)\b", re.I), C.CONTACT_PII),
+    (re.compile(r"\b(?:lastLocation|placeId)\b", re.I), C.NAVIGATION_ACTIVITY),
+    (re.compile(r"\b(?:subject|note|about|topic)\b", re.I), C.CHAT_CONTENT),
+)
+_CONTENT_FIELD_WEIGHT = 0.75  # matches an actual JSON field name, not a fuzzy tail guess
+
+
+def content_field_hits(value: str) -> list[RuleHit]:
+    hits: list[RuleHit] = []
+    for path in flatten_leaf_keys(value):
+        for pat, cat in _CONTENT_FIELD_PATTERNS:
+            if pat.search(path):
+                hits.append(RuleHit(cat, _CONTENT_FIELD_WEIGHT, path))
     return hits

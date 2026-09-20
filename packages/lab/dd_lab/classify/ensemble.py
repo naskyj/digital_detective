@@ -20,7 +20,7 @@ from dd_lab.classify.entropy import entropy_vote
 from dd_lab.classify.gates import boosted_relevance, is_structurally_empty
 from dd_lab.classify.infra_gazetteer import is_infra_noise
 from dd_lab.classify.ner import ner_vote
-from dd_lab.classify.rules import CATEGORY_PRIORITY, keyword_hits, regex_hits
+from dd_lab.classify.rules import CATEGORY_PRIORITY, content_field_hits, keyword_hits, regex_hits
 
 CLASSIFIER_VERSION = "ensemble-0.3.0"
 
@@ -119,6 +119,13 @@ class Classifier:
         except ValueError:
             st = None
         structured = st in _STRUCTURED_SOURCES
+        # Content-field flattening (below) is gated on explicit membership
+        # in _CONTENT_SOURCES, unlike the NER/model/entropy routing above -
+        # `source_type=None` (every pre-phase-5 caller) does NOT get it. A
+        # brand-new, JSON-parsing-on-every-value feature defaults off for
+        # "unspecified", rather than on-by-default like the pre-existing
+        # voters that predate this phase.
+        content_tier = st in _CONTENT_SOURCES
 
         # Empty-body pre-gate (classifier_backend_spec.md): runs FIRST,
         # before any voter, and overrides everything - a structurally empty
@@ -143,6 +150,15 @@ class Classifier:
             spans.append(hit.span)
 
         kw = keyword_hits(key, value, app)
+        if content_tier:
+            # Content-bearing field-name gazetteer, applied to flattened
+            # JSON leaf keys (rules.py::content_field_hits) - the spec's
+            # single biggest validated cache-recall fix (+7pts, precision
+            # held). Mechanically a keyword hit (a lexicon match on a field
+            # name), so it's unioned straight into `kw` rather than tracked
+            # as a separate signal - reuses _W_KEYWORD below like every
+            # other keyword-mechanism hit.
+            kw = kw + content_field_hits(value)
         keyword_vote = _best(kw)
         for hit in kw:
             scores[hit.category] += _W_KEYWORD * hit.weight
