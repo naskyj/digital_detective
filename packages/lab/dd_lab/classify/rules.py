@@ -16,6 +16,7 @@ import re
 from dataclasses import dataclass
 
 from dd_core.enums import ArtifactCategory as C
+from dd_lab.classify.app_profiles import app_profile_hits
 
 # Priority for tie-breaking: earlier = wins a tie. Sensitive categories first.
 CATEGORY_PRIORITY = [
@@ -226,10 +227,16 @@ def regex_hits(key: str, value: str, app: str | None = None) -> list[RuleHit]:
     m = _COOKIE_CREDENTIAL_NAMES.search(key)
     if m:
         hits.append(RuleHit(C.CREDENTIAL, 0.6, m.group(1)))
-    # `app` is accepted here (and by keyword_hits below) so both functions
-    # can grow the per-app profile lookup (classifier_backend_spec.md) in a
-    # later phase without another signature change; a no-op until then.
-    del app
+    if app:
+        # Per-app profiles (classifier_backend_spec.md's DISCORD/SLACK/
+        # ROBLOX sections, app_profiles.py) - mechanically the same thing
+        # this function already does generically (structural key/value
+        # pattern matches), just scoped to one app's real store/field
+        # names, so these are unioned straight in rather than tracked
+        # separately. `keyword_hits` also accepts `app` for call-site
+        # symmetry but doesn't use it - every app-profile rule here is a
+        # regex.search(), not a normalized-tail substring lookup.
+        hits.extend(app_profile_hits(app, key, value))
     return hits
 
 
