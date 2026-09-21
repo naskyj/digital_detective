@@ -544,6 +544,8 @@ def case_artifacts(
     category: str | None = None,
     app: str | None = None,
     source_type: str | None = None,
+    relevant: bool | None = None,
+    sort: str | None = None,
     q: str | None = None,
     limit: int = 200,
     offset: int = 0,
@@ -556,6 +558,9 @@ def case_artifacts(
         if val:
             where.append(f"{col} = ?")
             params.append(val)
+    if relevant is not None:
+        where.append("relevant = ?")
+        params.append(relevant)
     if q:
         # source_locator is included so a process detail view can filter
         # memory_string rows down to one PID (locators are "pid<PID>:string#n"
@@ -573,8 +578,9 @@ def case_artifacts(
             f"SELECT app, source_type, category, confidence, relevant, relevance_score, key, "
             f"substr(value,1,300) AS value, "
             f"record_ts, source_file, source_locator, artifact_id, regex_vote, keyword_vote, "
-            f"ner_vote, model_vote, entropy_vote, evidence_spans, deleted FROM artifacts {clause} "
-            f"ORDER BY relevant DESC, confidence DESC NULLS LAST, key, artifact_id "
+            f"ner_vote, model_vote, entropy_vote, relevance_model_score, evidence_spans, deleted "
+            f"FROM artifacts {clause} "
+            f"ORDER BY {_artifact_order_by(sort)} "
             f"LIMIT {int(limit)} OFFSET {int(offset)}",
             list(params),
         )
@@ -588,6 +594,24 @@ def case_artifacts(
     finally:
         wh.close()
     return {"rows": rows, "total": total, "shown": len(rows), "facets": facets}
+
+
+# Shared between /artifacts and /artifacts/export.csv, same reason
+# _enrich_artifact_rows is shared - one place, so they can't drift apart on
+# what a `sort` value means. A whitelist dict, not raw string interpolation
+# of the `sort` query param - ORDER BY can't be parametrized with `?` the
+# way WHERE values can, so an unvalidated column name here would be a real
+# SQL-injection surface.
+_ARTIFACT_SORTS = {
+    "": "relevant DESC, confidence DESC NULLS LAST, key, artifact_id",
+    "relevance": "relevance_score DESC NULLS LAST, key, artifact_id",
+    "confidence": "confidence DESC NULLS LAST, key, artifact_id",
+    "time": "record_ts DESC NULLS LAST, key, artifact_id",
+}
+
+
+def _artifact_order_by(sort: str | None) -> str:
+    return _ARTIFACT_SORTS.get(sort or "", _ARTIFACT_SORTS[""])
 
 
 def _enrich_artifact_rows(wh, rows: list[dict]) -> None:
@@ -665,6 +689,7 @@ def case_timeline(
     case_id: str,
     category: str | None = None,
     app: str | None = None,
+    relevant: bool | None = None,
     limit: int = 200,
     offset: int = 0,
 ) -> dict:
@@ -684,6 +709,9 @@ def case_timeline(
         if val:
             where.append(f"{col} = ?")
             params.append(val)
+    if relevant is not None:
+        where.append("relevant = ?")
+        params.append(relevant)
     clause = "WHERE " + " AND ".join(where)
     from dd_lab.etl.warehouse import Warehouse
 
@@ -691,7 +719,8 @@ def case_timeline(
     try:
         total = wh.query(f"SELECT count(*) AS n FROM artifacts {clause}", list(params))[0]["n"]
         rows = wh.query(
-            f"SELECT record_ts, app, source_type, category, key, substr(value,1,300) AS value, "
+            f"SELECT record_ts, app, source_type, category, relevant, relevance_score, key, "
+            f"substr(value,1,300) AS value, "
             f"artifact_id, source_file, source_locator FROM artifacts {clause} "
             f"ORDER BY record_ts LIMIT {int(limit)} OFFSET {int(offset)}",
             list(params),
@@ -820,6 +849,8 @@ def case_artifacts_export(
     category: str | None = None,
     app: str | None = None,
     source_type: str | None = None,
+    relevant: bool | None = None,
+    sort: str | None = None,
     q: str | None = None,
 ) -> Response:
     """A full CSV export of the currently filtered artifact view - unlike
@@ -833,6 +864,9 @@ def case_artifacts_export(
         if val:
             where.append(f"{col} = ?")
             params.append(val)
+    if relevant is not None:
+        where.append("relevant = ?")
+        params.append(relevant)
     if q:
         # source_locator is included so a process detail view can filter
         # memory_string rows down to one PID (locators are "pid<PID>:string#n"
@@ -852,7 +886,7 @@ def case_artifacts_export(
     try:
         rows = wh.query(
             f"SELECT {', '.join(query_cols)} FROM artifacts {clause} "
-            f"ORDER BY relevant DESC, confidence DESC NULLS LAST, key, artifact_id "
+            f"ORDER BY {_artifact_order_by(sort)} "
             f"LIMIT 200000",
             list(params),
         )

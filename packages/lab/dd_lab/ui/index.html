@@ -663,6 +663,22 @@ async function vCase(m){
     }
   }
 
+  async function startReclassify(btn){
+    // Cheap, in-place re-classify (classify_warehouse) - no re-parse of raw
+    // evidence, unlike Run analysis above. For when relevance_model_dir/
+    // classifier_model_dir just changed, or the ensemble's own logic did,
+    // and existing artifacts need to reflect that.
+    btn.disabled=true; btn.innerHTML='<span class="spin"></span>starting…';
+    runlog.style.display='block'; runlog.textContent='';
+    try{
+      const r=await api('/cases/'+id+'/reclassify',{method:'POST'});
+      await pollJob(r.job_id,runlog,()=>go('case',id));
+    }catch(err){
+      runlog.textContent='Could not start: '+err.message;
+      btn.disabled=false; btn.textContent='↻  Re-classify';
+    }
+  }
+
   if(running){
     actions.append(
       el('div',{class:'row'},
@@ -684,6 +700,9 @@ async function vCase(m){
       d.reports.length?el('button',{class:'primary',onclick:()=>go('report',id)},'📄  Open report'):'',
       el('button',{class:'sec',onclick:()=>go('chat',id)},'💬  Chat'),
       el('button',{class:'sec',onclick:e=>startRun(e.target)},'↻  Re-run analysis'),
+      el('button',{class:'sec',title:'Re-classify artifacts already in the warehouse, in place - no re-parse '+
+        '(cheaper than Re-run analysis; use after changing the relevance/category model directory)',
+        onclick:e=>startReclassify(e.target)},'↻  Re-classify'),
       el('button',{class:'sec',onclick:()=>document.getElementById('browser')
         ?.scrollIntoView({behavior:'smooth'})},'🔍  Browse artifacts'),
       el('button',{class:'ghost',onclick:()=>go('audit',id)},'📋  Audit trail')),
@@ -874,6 +893,10 @@ async function caseExplorer(id, w){
 
 async function overviewPanel(id, w){
   const box=el('div',{});
+  // Relevance first - the primary output this pipeline produces now,
+  // ahead of the category breakdown below (still useful for display/
+  // grouping, just no longer what "matters to the investigation" means).
+  box.append(await relevancePanel(id));
   const max=Math.max(...w.by_category.map(c=>c.artifacts),1);
   const bars=el('div',{class:'panel'});
   bars.append(el('h2',{style:'margin-top:0'},'Artifact categories'));
@@ -926,6 +949,51 @@ async function classificationPanel(id){
       el('td',{},c.entropy_agree.toLocaleString()));
     tb.append(row);
     const exRow=el('tr',{}); const exCell=el('td',{colspan:'8'},exBox);
+    exRow.append(exCell); tb.append(exRow);
+  });
+  t.append(tb);
+  wrap.append(el('div',{class:'scroll'},t));
+  return wrap;
+}
+
+async function relevancePanel(id){
+  // The primary output's own breakdown, mirroring classificationPanel's
+  // shape but for relevant/relevance_score instead of category - relevance
+  // is now what drives report/timeline/correlation, so it gets a first-
+  // class summary view of its own, not just a column in the artifact table.
+  const wrap=el('div',{class:'panel'});
+  wrap.append(el('h2',{style:'margin-top:0'},'Relevance breakdown'),
+    el('div',{class:'hint',style:'margin-bottom:8px'},
+      'The primary signal this pipeline produces - regex + keyword + NER evidence combined with '+
+      'a trained relevant/not_relevant model where configured. Independent of Category, which is '+
+      'a display/grouping label now. Click a row for example artifacts.'));
+  let d;
+  try{ d=await api('/cases/'+id+'/relevance'); }
+  catch(e){ wrap.append(el('div',{class:'hint'},'Could not load: '+e.message)); return wrap; }
+
+  const t=el('table',{},el('thead',{},el('tr',{},
+    ...['Relevant','Count','Mean relevance score','Mean relevance model score'].map(h=>el('th',{},h)))));
+  const tb=el('tbody',{});
+  d.by_relevance.forEach(row0=>{
+    const key=String(row0.relevant);
+    const exBox=el('div',{style:'display:none;padding:8px 0'});
+    const row=el('tr',{style:'cursor:pointer',onclick:()=>{
+      if(exBox.style.display==='none'){
+        if(!exBox.childNodes.length){
+          const examples=d.examples[key]||[];
+          exBox.append(examples.length
+            ? tbl(examples,['app','source_type','category','key','value','relevance_score','relevance_model_score'])
+            : el('div',{class:'hint'},'no examples'));
+        }
+        exBox.style.display='block';
+      } else exBox.style.display='none';
+    }},
+      el('td',{},row0.relevant?el('span',{class:'pill ok'},'relevant'):el('span',{class:'pill'},'not relevant')),
+      el('td',{},row0.artifacts.toLocaleString()),
+      el('td',{},row0.mean_relevance_score!=null?row0.mean_relevance_score.toFixed(3):''),
+      el('td',{},row0.mean_relevance_model_score!=null?row0.mean_relevance_model_score.toFixed(3):'—'));
+    tb.append(row);
+    const exRow=el('tr',{}); const exCell=el('td',{colspan:'4'},exBox);
     exRow.append(exCell); tb.append(exRow);
   });
   t.append(tb);
@@ -1012,6 +1080,10 @@ function timelinePanel(id){
   const wrap=el('div',{class:'panel'});
   const catSel=el('select',{}, el('option',{value:''},'all categories'));
   const appSel=el('select',{}, el('option',{value:''},'all apps'));
+  const relSel=el('select',{title:'Filter by the primary relevance signal'},
+    el('option',{value:''},'relevant + not relevant'),
+    el('option',{value:'true'},'relevant only'),
+    el('option',{value:'false'},'not relevant only'));
   const count=el('div',{class:'hint'});
   const out=el('div',{class:'scroll',style:'margin-top:10px'});
   const pagWrap=el('div',{});
@@ -1022,6 +1094,7 @@ function timelinePanel(id){
     const p=new URLSearchParams({limit:String(limit), offset:String(offset)});
     if(catSel.value) p.set('category', catSel.value);
     if(appSel.value) p.set('app', appSel.value);
+    if(relSel.value) p.set('relevant', relSel.value);
     let d;
     try{ d=await api('/cases/'+id+'/timeline?'+p); }
     catch(e){ out.innerHTML=''; out.append(el('div',{class:'hint'},'Could not load: '+e.message)); return; }
@@ -1038,11 +1111,13 @@ function timelinePanel(id){
     pagWrap.append(paginationBar(offset, limit, total, newOffset=>{offset=newOffset; load();}));
 
     const t=el('table',{style:'table-layout:fixed;width:100%'},el('thead',{},el('tr',{},
-      ...['Time','App','Category','Source','Key','Value'].map(h=>el('th',{},h)))));
+      ...['','Time','App','Category','Source','Key','Value'].map(h=>el('th',{},h)))));
     const tb=el('tbody',{});
     d.rows.forEach(r=>{
       tb.append(el('tr',{style:'cursor:pointer',title:'file: '+r.source_file+' · click for full detail',
         onclick:()=>showArtifactDetail(id,r.artifact_id)},
+        el('td',{title:r.relevance_score!=null?'relevance_score: '+r.relevance_score.toFixed(2):''},
+          r.relevant?el('span',{class:'pill ok'},'relevant'):''),
         el('td',{class:'mono',title:r.record_ts||''},r.record_ts?ago(r.record_ts):''),
         el('td',{},r.app),
         el('td',{},el('span',{class:'pill cat'},r.category||'')),
@@ -1054,12 +1129,13 @@ function timelinePanel(id){
   }
   catSel.onchange=()=>{offset=0; load();};
   appSel.onchange=()=>{offset=0; load();};
+  relSel.onchange=()=>{offset=0; load();};
   wrap.append(el('h2',{style:'margin-top:0'},'Timeline'),
     el('div',{class:'hint',style:'margin-bottom:8px'},
       "Every timestamped event across the case, oldest first - process start/exit from memory "+
       "analysis included. Unlike the static report's Evidence Timeline section (capped at 120 rows, "+
       "GENERAL excluded), this is the full, paginated, filterable set."),
-    el('div',{class:'row'}, catSel, appSel), count, out, pagWrap);
+    el('div',{class:'row'}, relSel, catSel, appSel), count, out, pagWrap);
   load();
   return wrap;
 }
@@ -1088,14 +1164,19 @@ async function vReport(m){
 // ever has data on cache rows.
 const COL_PREF_KEY = 'dd_artifact_columns';
 const ARTIFACT_COLS = [
-  {k:'category', label:'Category', always:true},
+  {k:'relevant', label:'Relevant', always:true,
+    title:'The primary signal this pipeline produces — "does this matter to the investigation", '+
+      'not "what kind of thing is this" (see Category). Its own combination of regex/keyword/NER '+
+      'evidence plus a trained relevant/not_relevant model where configured — independent of '+
+      'Category, which is display/grouping only now.'},
+  {k:'relevance_score', label:'Score', def:true,
+    title:'The relevance combination\'s own 0–1 score — Relevant is this crossing a threshold.'},
+  {k:'category', label:'Category', def:true,
+    title:'What kind of thing this is (CREDENTIAL, CHAT_CONTENT, …) — a display/grouping label, '+
+      'no longer what decides Relevant.'},
   {k:'confidence', label:'Conf', def:true,
-    title:'Classification confidence (0–1) — how sure the rule/keyword/NER/model ensemble was '+
-      'that this row belongs to its category. Higher is more certain.'},
-  {k:'relevant', label:'Relevant', def:false,
-    title:'A separate signal from Category — "does this matter to the investigation", not "what '+
-      'kind of thing is this". Computed from the same regex/keyword/NER/model/entropy voters as '+
-      'Category, but its own field: never a positive relevance for GENERAL.'},
+    title:'Category confidence (0–1) — how sure the rule/keyword/NER/model ensemble was about '+
+      'the category specifically, not about relevance.'},
   {k:'app', label:'App', def:true, need:f=>!f.app},
   {k:'source_type', label:'Source', def:true, need:f=>!f.source_type},
   {k:'record_ts', label:'Time', def:true},
@@ -1125,9 +1206,10 @@ function artifactCell(col,r){
   switch(col.k){
     case 'category': return el('td',{},...[].concat(catPill(r)));
     case 'confidence': return el('td',{title:col.title},r.confidence!=null?r.confidence.toFixed(2):'');
-    case 'relevant': return el('td',{title:r.relevance_score!=null?'relevance_score: '+r.relevance_score.toFixed(2):''},
+    case 'relevant': return el('td',{},
       r.relevant==null?'':(r.relevant
         ? el('span',{class:'pill ok'},'relevant') : el('span',{class:'pill'},'—')));
+    case 'relevance_score': return el('td',{title:col.title},r.relevance_score!=null?r.relevance_score.toFixed(2):'');
     case 'app': return el('td',{},r.app);
     case 'source_type': return el('td',{},SRC_LABELS[r.source_type]||r.source_type);
     case 'record_ts': return el('td',{title:r.record_ts||''},r.record_ts?ago(r.record_ts):'');
@@ -1164,12 +1246,17 @@ async function showArtifactDetail(caseId, artifactId){
   try{ r=await api('/cases/'+caseId+'/artifacts/'+encodeURIComponent(artifactId)); }
   catch(e){ box.append(el('div',{class:'hint'},'Could not load: '+e.message)); return; }
   const fields=[
+    ['Relevant',r.relevant==null?null:(r.relevant?'yes':'no')],
+    ['Relevance score',r.relevance_score!=null?r.relevance_score.toFixed(2):null],
     ['Category',r.category],['Confidence',r.confidence!=null?r.confidence.toFixed(2):null],
     ['App',r.app],['Source',SRC_LABELS[r.source_type]||r.source_type],['Time',r.record_ts],
     ['Deleted',r.deleted?'yes — recovered from a tombstoned/overwritten record, not the live value':null],
     ['Key',r.key],['Value',r.value],['File',r.source_file],['URL',r.url],['Filename',r.filename],
     ['Cache Offset',r.cache_offset],
     ['Latest',r.latest==null?null:(r.latest?'yes — the current value':'no — superseded by a later write')],
+    ['Regex vote',r.regex_vote],['Keyword vote',r.keyword_vote],['NER vote',r.ner_vote],
+    ['Model vote (category)',r.model_vote],['Entropy vote',r.entropy_vote],
+    ['Relevance model score',r.relevance_model_score!=null?r.relevance_model_score.toFixed(2):null],
     ['Artifact ID',r.artifact_id],
   ].filter(([,v])=>v!=null && v!=='');
   box.innerHTML=''; box.append(close, el('h3',{style:'margin:0 0 14px'},'Artifact detail'));
@@ -1185,6 +1272,15 @@ function browser(id,cats,fixed){
   fixed = fixed || {};
   const wrap=el('div',{class:'panel'});
   const cat=el('select',{}, el('option',{value:''},'all categories'), ...cats.map(c=>el('option',{value:c},c)));
+  const relSel=el('select',{title:'Filter by the primary relevance signal, independent of category'},
+    el('option',{value:''},'relevant + not relevant'),
+    el('option',{value:'true'},'relevant only'),
+    el('option',{value:'false'},'not relevant only'));
+  const sortSel=el('select',{title:'How matching rows are ordered'},
+    el('option',{value:''},'sort: relevant first'),
+    el('option',{value:'relevance'},'sort: relevance score'),
+    el('option',{value:'confidence'},'sort: category confidence'),
+    el('option',{value:'time'},'sort: time'));
   const appSel = fixed.app ? null : el('select',{}, el('option',{value:''},'all apps'));
   const srcSel = fixed.source_type ? null : el('select',{}, el('option',{value:''},'all sources'));
   // fixed.q: an initial search term the caller pins (e.g. a process detail
@@ -1223,6 +1319,8 @@ function browser(id,cats,fixed){
   function currentParams(){
     const p=new URLSearchParams();
     if(cat.value)p.set('category',cat.value);
+    if(relSel.value)p.set('relevant',relSel.value);
+    if(sortSel.value)p.set('sort',sortSel.value);
     if(fixed.app) p.set('app',fixed.app); else if(appSel.value) p.set('app',appSel.value);
     if(fixed.source_type) p.set('source_type',fixed.source_type); else if(srcSel.value) p.set('source_type',srcSel.value);
     if(q.value)p.set('q',q.value);
@@ -1263,6 +1361,8 @@ function browser(id,cats,fixed){
     renderTable();
   }
   cat.onchange=()=>{offset=0; load();};
+  relSel.onchange=()=>{offset=0; load();};
+  sortSel.onchange=()=>{offset=0; load();};
   if(appSel) appSel.onchange=()=>{offset=0; load();};
   if(srcSel) srcSel.onchange=()=>{offset=0; load();};
   let tmo; q.oninput=()=>{clearTimeout(tmo);tmo=setTimeout(()=>{offset=0; load();},300);};
@@ -1271,7 +1371,7 @@ function browser(id,cats,fixed){
     : 'Artifact browser';
   wrap.append(el('div',{class:'row'},
       el('h2',{style:'margin:0'},heading), el('span',{style:'flex:1'}), colPicker, dlBtn),
-    el('div',{class:'row',style:'margin-top:8px'},cat, ...(appSel?[appSel]:[]), ...(srcSel?[srcSel]:[]), q),
+    el('div',{class:'row',style:'margin-top:8px'},relSel, sortSel, cat, ...(appSel?[appSel]:[]), ...(srcSel?[srcSel]:[]), q),
     count, out, pagWrap);
   load();
   return wrap;
@@ -1757,6 +1857,7 @@ async function vSettings(m){
   const ag=el('input',{type:'checkbox',...(s.use_agent?{checked:''}:{})});
   const zs=el('input',{type:'checkbox',...(s.use_zeroshot?{checked:''}:{})});
   const md=el('input',{value:s.classifier_model_dir||'',placeholder:'(none — rules only)',style:'width:360px'});
+  const rmd=el('input',{value:s.relevance_model_dir||'',placeholder:'(none — rules only)',style:'width:360px'});
   box.append(
     el('label',{},'Cases directory'), cr,
     el('label',{},'LLM provider'), prov,
@@ -1765,9 +1866,15 @@ async function vSettings(m){
     el('label',{},'API key (OpenAI / Anthropic / Google)'), key,
     el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:12px'}, ag, 'Use the AI agent to orchestrate analysis (otherwise a fixed deterministic pipeline runs)'),
     el('div',{class:'muted',style:'margin-top:6px'},'Model selection only — installing a local model runtime or provisioning an API key is a separate, one-time setup step.'),
-    el('label',{},'Trained classifier model directory (optional)'), md,
+    el('label',{},'Trained category model directory (optional)'), md,
     el('label',{style:'display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:10px'}, zs, 'Use the pretrained zero-shot classifier as an additional voter'),
-    el('div',{class:'muted',style:'margin-top:6px'},'Classification runs on the built-in rule ensemble by default. Point this at a trained model to improve accuracy further.'));
+    el('div',{class:'muted',style:'margin-top:6px'},'Classification runs on the built-in rule ensemble by default. Point this at a trained model to improve category accuracy further.'),
+    el('label',{style:'margin-top:12px'},'Trained relevance model directory (optional)'), rmd,
+    el('div',{class:'muted',style:'margin-top:6px'},
+      'A DIFFERENT model from the one above - predicts relevant/not_relevant directly rather than '+
+      'a category, feeding the primary relevant/relevance_score output. Point this at a trained '+
+      'binary relevant/not_relevant ONNX model directory (model.onnx, tokenizer.json, labels.json) '+
+      'to improve relevance beyond the rule-based voters alone.'));
   m.append(box);
 
   const jbox=el('div',{class:'panel'});
@@ -1797,7 +1904,7 @@ async function vSettings(m){
         btn.disabled=true; btn.innerHTML='<span class="spin"></span>Saving…';
         try{
           const body={cases_root:cr.value,llm_provider:prov.value,llm_model:mdl.value,llm_base_url:url.value,
-            use_agent:ag.checked,use_zeroshot:zs.checked,classifier_model_dir:md.value,
+            use_agent:ag.checked,use_zeroshot:zs.checked,classifier_model_dir:md.value,relevance_model_dir:rmd.value,
             use_judge:juse.checked,judge_llm_provider:jprov.value,judge_llm_model:jmdl.value,judge_llm_base_url:jurl.value};
           if(key.value)body.llm_api_key=key.value;
           if(jkey.value)body.judge_llm_api_key=jkey.value;
