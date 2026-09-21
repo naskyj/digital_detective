@@ -73,6 +73,102 @@ def test_model_voter_is_optional_and_used_when_present():
     assert r.category == "GAME_DETAIL"
 
 
+# --------------------------------------------------------------------- relevance_voter
+#
+# A DIFFERENT slot from model_voter above: model_voter predicts a category,
+# relevance_voter predicts relevant/not_relevant directly and feeds
+# relevance_score/relevant, never category. See ensemble.py's module
+# docstring for the full design.
+
+
+def test_relevance_voter_is_optional_and_contributes_to_relevance_score():
+    def fake_relevance(key, value, source_type):
+        return 0.9  # high P(relevant)
+
+    clf = Classifier(relevance_voter=fake_relevance)
+    r = clf.classify("some.random.key", "value")
+    # rule_evidence is 0 here (nothing else fires on this key/value) -
+    # noisy-OR with rule_evidence=0 reduces to exactly the model's own
+    # score: 1 - (1-0)*(1-0.9) = 0.9.
+    assert r.relevance_model_score == 0.9
+    assert r.relevance_score == 0.9
+    assert r.relevant is True
+    # relevance_voter never influences category - it stays whatever the
+    # rule-based voters decided (GENERAL here, since nothing else fired).
+    assert r.category == "GENERAL"
+
+
+def test_relevance_voter_can_make_something_relevant_that_rules_missed():
+    """The core point of adding this voter: catch relevance the rule-based
+    voters miss entirely. Category can legitimately stay GENERAL (rules
+    found nothing) while relevance_score/relevant reflect the trained
+    model's own opinion - a real change from the no-relevance-model
+    behavior other tests in this file rely on (see
+    test_relevance_score_is_never_positive_when_category_is_general's own
+    comment: that invariant only holds when no relevance model is
+    configured)."""
+
+    def fake_relevance(key, value, source_type):
+        return 0.95
+
+    clf = Classifier(relevance_voter=fake_relevance)
+    r = clf.classify("some.totally.opaque.key", "nothing rule-shaped here")
+    assert r.category == "GENERAL"
+    assert r.relevant is True
+    assert r.relevance_score > 0.0
+
+
+def test_relevance_combination_is_noisy_or_not_an_average():
+    """Two independent moderate signals should reinforce each other, not
+    dilute toward their average - the property that makes noisy-OR the
+    right combination here instead of a plain weighted average (see
+    ensemble.py::classify's own comment for the bug a weighted average
+    had). A credential keyword hit gives some rule_evidence > 0; stack a
+    moderately-confident fake relevance model on top and the combined
+    score must exceed BOTH inputs individually."""
+
+    def fake_relevance(key, value, source_type):
+        return 0.4
+
+    clf = Classifier(relevance_voter=fake_relevance)
+    r = clf.classify("local_storage.app.password", "hunter2")
+    rule_only = C.classify("local_storage.app.password", "hunter2").relevance_score
+    assert r.relevance_score > rule_only
+    assert r.relevance_score > 0.4
+    assert r.relevance_score == round(1 - (1 - rule_only) * (1 - 0.4), 3)
+
+
+def test_relevance_voter_runs_even_for_structured_source_types():
+    """Unlike NER/model_voter/entropy, relevance_voter is NOT skipped for
+    _STRUCTURED_SOURCES - confirmed with the project owner: it was trained
+    across all 8 real source files (structured ones included), and
+    relevance is the primary signal now, so skipping ~70% of rows the way
+    the category-only fuzzy voters do would defeat the point."""
+    from dd_core.enums import SourceType
+
+    calls = []
+
+    def fake_relevance(key, value, source_type):
+        calls.append(source_type)
+        return 0.8
+
+    clf = Classifier(relevance_voter=fake_relevance)
+    r = clf.classify("k", "v", source_type=SourceType.LOCAL_STORAGE)
+    assert calls == [SourceType.LOCAL_STORAGE]
+    assert r.relevance_model_score == 0.8
+
+
+def test_entropy_alone_never_makes_something_relevant():
+    """Entropy is category-only (see _W_ENTROPY's comment in ensemble.py) -
+    it must never be able to push relevance_score/relevant on its own, even
+    though it can and does influence category."""
+    # No rule/keyword/NER/relevance-model signal at all for this input;
+    # if entropy fired and contributed to relevance, this would go positive.
+    r = C.classify("some.opaque.key", "xyz")
+    assert r.relevance_score == 0.0
+    assert r.relevant is False
+
+
 # --------------------------------------------------------------------- relevant/relevance_score
 #
 # A second, explicit output alongside category - "does this matter to the
@@ -104,9 +200,13 @@ def test_relevant_false_for_a_bare_boolean_or_short_number():
 
 
 def test_relevance_score_is_never_positive_when_category_is_general():
-    """However GENERAL was reached (empty scores, or GENERAL winning a real
-    vote), relevance_score must be pinned to 0.0 - never a positive
-    "relevance" for the category that means "nothing said this mattered"."""
+    """Holds for `C` (module-level fixture, no relevance_voter configured):
+    category==GENERAL only happens when the rule-based voters found
+    nothing at all, which also means rule_evidence is 0 - so with no
+    relevance model to contribute otherwise, relevance_score is 0 too.
+    This stops being a hard invariant once a real relevance_voter IS
+    configured - see test_relevance_voter_can_make_something_relevant_that_rules_missed,
+    which is the actual point of that voter."""
     for key, value in [("some.opaque.key", "xyz"), ("prefs.window.height", "800"), ("k", "true")]:
         r = C.classify(key, value)
         if r.category == "GENERAL":

@@ -51,6 +51,15 @@ class ClassificationResult(BaseModel):
     keyword_vote: ArtifactCategory | None = None
     model_vote: ArtifactCategory | None = None
     entropy_vote: ArtifactCategory | None = None
+    # The trained binary relevant/not_relevant model's own raw P(relevant),
+    # None when no relevance model is configured - a DIFFERENT signal from
+    # model_vote above (which is a category, from a different voter slot).
+    # Exposed for transparency/debugging, same reason every other voter's
+    # own contribution is individually exposed: relevance is now the
+    # primary output this pipeline produces, so being able to see WHY it
+    # landed where it did (rule evidence vs. the trained model's opinion)
+    # matters.
+    relevance_model_score: float | None = Field(default=None, ge=0.0, le=1.0)
     evidence_spans: list[str] = Field(default_factory=list)
     classifier_version: str = "unknown"
     classified_ts: datetime | None = None
