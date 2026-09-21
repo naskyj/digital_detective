@@ -64,6 +64,12 @@ def test_health_and_settings(client):
     assert "llm" in s and s["llm"]["provider"] in {"ollama", "openai", "anthropic"}
     # the judge is configurable from Settings alone - no CLI/env required
     assert "judge_llm" in s and "use_judge" in s
+    # relevance_model_dir is a SEPARATE field/model from classifier_model_dir
+    # (see ensemble.py's module docstring) - both must round-trip independently.
+    assert "relevance_model_dir" in s
+    updated = client.put("/api/settings", json={"relevance_model_dir": "/tmp/some-relevance-model"}).json()
+    assert updated["relevance_model_dir"] == "/tmp/some-relevance-model"
+    assert updated["classifier_model_dir"] == s["classifier_model_dir"]  # untouched by this update
 
     updated = client.put("/api/settings", json={
         "judge_llm_provider": "anthropic", "judge_llm_model": "claude-sonnet-5", "use_judge": False,
@@ -212,6 +218,31 @@ def test_case_lifecycle_via_api(client):
 
     audit = client.get("/api/cases/case_api_1/audit").json()
     assert audit["custody"] and audit["audit"]
+
+    # Relevance breakdown - the now-primary output, alongside the existing
+    # per-category classification breakdown checked above.
+    rel = client.get("/api/cases/case_api_1/relevance").json()
+    assert rel["by_relevance"]
+    for r in rel["by_relevance"]:
+        for col in ("relevant", "artifacts", "mean_relevance_score", "mean_relevance_model_score"):
+            assert col in r
+
+    # classify_warehouse's actual entry point - previously unreachable from
+    # any endpoint. Cheap in-place re-classify, no re-parse.
+    reclf_job = client.post("/api/cases/case_api_1/reclassify").json()
+    for _ in range(120):
+        j = client.get(f"/api/jobs/{reclf_job['job_id']}").json()
+        if j["status"] in {"done", "error"}:
+            break
+        time.sleep(0.5)
+    assert j["status"] == "done", j.get("error")
+    assert j["result"]["classified"] == detail["warehouse"]["artifacts"]
+
+    # Artifact detail now surfaces the vote fields it always had access to
+    # but never selected.
+    one = client.get(f"/api/cases/case_api_1/artifacts/{row['artifact_id']}").json()
+    for col in ("regex_vote", "keyword_vote", "ner_vote", "model_vote", "entropy_vote", "relevance_model_score"):
+        assert col in one
 
 
 def test_artifacts_search_matches_source_locator(client):

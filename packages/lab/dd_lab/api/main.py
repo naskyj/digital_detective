@@ -53,6 +53,7 @@ class SettingsIn(BaseModel):
     llm_api_key: str | None = None
     use_agent: bool | None = None
     classifier_model_dir: str | None = None
+    relevance_model_dir: str | None = None
     use_zeroshot: bool | None = None
     use_judge: bool | None = None
     judge_llm_provider: str | None = None
@@ -98,6 +99,7 @@ def get_settings() -> dict:
         "cases_root": s.cases_root,
         "use_agent": s.use_agent,
         "classifier_model_dir": s.classifier_model_dir,
+        "relevance_model_dir": s.relevance_model_dir,
         "use_zeroshot": s.use_zeroshot,
         "llm": describe_llm(s.agent_config()),
         "use_judge": s.use_judge,
@@ -413,6 +415,71 @@ def run_case(case_id: str) -> dict:
 
     job_id = _jobs.submit("run" if not use_agent else "agent", work, case_id=case_id)
     return {"job_id": job_id}
+
+
+@app.post("/api/cases/{case_id}/reclassify")
+def reclassify_case(case_id: str) -> dict:
+    """Re-run classification against artifacts already in the warehouse -
+    cheap and in-place (a single set-based UPDATE per batch via
+    classify_warehouse), unlike "Run analysis" above which re-parses from
+    raw evidence. classify_warehouse itself has existed, fully tested,
+    since the classifier_backend_spec rewrite, but had no caller anywhere
+    in the app until now - the only way to get artifacts re-classified was
+    a full re-run. Real use case this exists for: relevance_model_dir (or
+    classifier_model_dir) just got configured/changed, or the ensemble's
+    own logic changed, and existing artifacts need to reflect that without
+    burning a full re-ingest."""
+    layout = _layout(case_id)
+    if not layout.manifest.is_file():
+        raise HTTPException(404, "case not found")
+    if not layout.warehouse.is_file():
+        raise HTTPException(409, "case not processed yet - run analysis first")
+    if _jobs.active_for(case_id):
+        raise HTTPException(409, "a job is already running for this case")
+
+    def work(progress) -> dict:
+        from dd_lab.classify import classify_warehouse
+        from dd_lab.etl.warehouse import Warehouse
+
+        progress("re-classifying artifacts already in the warehouse...")
+        clf = _settings.build_classifier()
+        wh = Warehouse(layout.warehouse)
+        try:
+            result = classify_warehouse(wh, clf)
+        finally:
+            wh.close()
+        progress(f"re-classified {result.classified} artifacts")
+        return {"ok": True, "classified": result.classified, "by_category": result.by_category}
+
+    job_id = _jobs.submit("reclassify", work, case_id=case_id)
+    return {"job_id": job_id}
+
+
+@app.get("/api/cases/{case_id}/relevance")
+def case_relevance(case_id: str) -> dict:
+    """Relevance breakdown - mirrors case_classification's shape (by-
+    category vote-agreement) but for the now-primary relevant/
+    relevance_score output: how many artifacts landed on each side, and
+    the trained relevance model's own mean contribution where configured."""
+    deps = InvestigationDeps(cases_root=Path(_settings.cases_root), case_id=case_id)
+    if not deps.layout.warehouse.is_file():
+        raise HTTPException(409, "case not processed yet")
+    from dd_lab.etl.warehouse import Warehouse
+
+    wh = Warehouse(deps.layout.warehouse)
+    try:
+        rows = wh.query("SELECT * FROM v_by_relevance")
+        examples = {}
+        for r in rows:
+            examples[str(r["relevant"])] = wh.query(
+                "SELECT app, source_type, category, key, substr(value,1,200) AS value, "
+                "relevance_score, relevance_model_score, regex_vote, keyword_vote, ner_vote "
+                "FROM artifacts WHERE relevant = ? ORDER BY relevance_score DESC NULLS LAST LIMIT 5",
+                [r["relevant"]],
+            )
+    finally:
+        wh.close()
+    return {"by_relevance": rows, "examples": examples}
 
 
 @app.get("/api/cases/{case_id}/artifact-tree")
@@ -824,7 +891,9 @@ def case_artifact_detail(case_id: str, artifact_id: str) -> dict:
     try:
         rows = wh.query(
             "SELECT app, source_type, category, confidence, relevant, relevance_score, key, value, "
-            "record_ts, source_file, source_locator, artifact_id, deleted FROM artifacts WHERE artifact_id = ?",
+            "record_ts, source_file, source_locator, artifact_id, deleted, "
+            "regex_vote, keyword_vote, ner_vote, model_vote, entropy_vote, relevance_model_score "
+            "FROM artifacts WHERE artifact_id = ?",
             [artifact_id],
         )
         if not rows:

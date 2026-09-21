@@ -49,7 +49,12 @@ class AppSettings(BaseModel):
     llm_base_url: str = ""
     llm_api_key: str = ""
     use_agent: bool = False  # False -> deterministic pipeline
-    classifier_model_dir: str = ""  # trained ONNX model dir, when available
+    classifier_model_dir: str = ""  # trained category ONNX model dir, when available
+    relevance_model_dir: str = ""  # trained binary relevant/not_relevant ONNX model dir - a
+    # DIFFERENT model/slot from classifier_model_dir above (see
+    # dd_lab/classify/ensemble.py's module docstring and model.py's
+    # OnnxRelevanceModel) - this one predicts relevance directly, feeding
+    # the primary relevant/relevance_score output, not category.
     use_zeroshot: bool = False  # pretrained zero-shot voter (needs `zeroshot` extra)
     # The adversarial judge (agent/judge.py) reviews every finding independently
     # of the primary agent above. Left blank, it falls back to DD_JUDGE_LLM_*
@@ -66,7 +71,15 @@ class AppSettings(BaseModel):
     def build_classifier(self):
         from dd_lab.classify import build_classifier
 
-        return build_classifier(self.classifier_model_dir or None, self.use_zeroshot)
+        # Keyword args, deliberately - build_classifier() takes 3 positional-
+        # capable params now (model_dir, relevance_model_dir, zeroshot); a
+        # positional call here would silently bind use_zeroshot to the
+        # WRONG parameter after relevance_model_dir was added.
+        return build_classifier(
+            model_dir=self.classifier_model_dir or None,
+            relevance_model_dir=self.relevance_model_dir or None,
+            zeroshot=self.use_zeroshot,
+        )
 
     def agent_config(self) -> AgentConfig:
         cfg = AgentConfig.from_env()
