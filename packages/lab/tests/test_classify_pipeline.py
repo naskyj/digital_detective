@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 
 from dd_core.enums import SourceType, ValueType
 from dd_core.schema import NormalizedArtifact
+from dd_lab.classify.ensemble import Classifier
 from dd_lab.classify.pipeline import classify_warehouse
 from dd_lab.etl.warehouse import Warehouse
 
@@ -47,6 +48,30 @@ def test_classify_warehouse_reads_app_source_type_deleted_without_erroring(tmp_p
         rows = wh.query("SELECT category, relevant FROM artifacts ORDER BY artifact_id")
         assert len(rows) == 2
         assert all(r["category"] for r in rows)
+    finally:
+        wh.close()
+
+
+def test_classify_warehouse_round_trips_relevance_model_score(tmp_path):
+    """relevance_model_score (the trained relevance model's own raw
+    P(relevant), a new column alongside relevant/relevance_score) must
+    survive the full classify_warehouse round trip - apply_classifications'
+    hand-written temp-table/INSERT/UPDATE column lists are exactly the kind
+    of place a new field silently gets dropped if not threaded through
+    everywhere."""
+
+    def fake_relevance(key, value, source_type):
+        return 0.77
+
+    wh = Warehouse(tmp_path / "warehouse" / "case.duckdb")
+    try:
+        wh.load_artifacts([_artifact("k", "v")])
+        classify_warehouse(wh, Classifier(relevance_voter=fake_relevance))
+        rows = wh.query("SELECT relevance_model_score, relevant, relevance_score FROM artifacts")
+        assert len(rows) == 1
+        assert rows[0]["relevance_model_score"] == 0.77
+        assert rows[0]["relevant"] is True
+        assert rows[0]["relevance_score"] == 0.77
     finally:
         wh.close()
 

@@ -86,6 +86,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
     keyword_vote      VARCHAR,
     model_vote        VARCHAR,
     entropy_vote      VARCHAR,
+    relevance_model_score DOUBLE,  -- the trained relevant/not_relevant model's own raw
+                                    -- P(relevant), NULL when no relevance model is configured
     evidence_spans    VARCHAR,     -- JSON array
     classifier_version VARCHAR,
     classified_ts     TIMESTAMP
@@ -121,12 +123,24 @@ CREATE OR REPLACE VIEW v_timeline AS
     ORDER BY record_ts;
 
 CREATE OR REPLACE VIEW v_high_priority AS
-    SELECT artifact_id, app, source_type, category, confidence, key, value, record_ts
+    -- Was a hardcoded category whitelist, predating relevant/relevance_score
+    -- existing as real fields - silently ignored them even after they
+    -- shipped. Now keys off relevance directly (the actual "does this
+    -- matter" signal), category kept only to order ties.
+    SELECT artifact_id, app, source_type, category, confidence, relevance_score, key, value, record_ts
     FROM artifacts
-    WHERE category IN ('CREDENTIAL','PAYMENT_INFO','CHAT_CONTENT','LOCATION_INFO')
-    ORDER BY
-        array_position(['CREDENTIAL','PAYMENT_INFO','LOCATION_INFO','CHAT_CONTENT'], category),
-        confidence DESC;
+    WHERE relevant
+    ORDER BY relevance_score DESC, confidence DESC;
+
+CREATE OR REPLACE VIEW v_by_relevance AS
+    SELECT relevant,
+           count(*)                          AS artifacts,
+           avg(relevance_score)              AS mean_relevance_score,
+           avg(relevance_model_score)         AS mean_relevance_model_score
+    FROM artifacts
+    WHERE relevant IS NOT NULL
+    GROUP BY relevant
+    ORDER BY relevant DESC;
 
 CREATE OR REPLACE VIEW v_app_summary AS
     SELECT app,
@@ -154,6 +168,7 @@ _CORE_COLS = (
 _CLASS_COLS = (
     "category", "confidence", "relevant", "relevance_score",
     "regex_vote", "ner_vote", "keyword_vote", "model_vote", "entropy_vote",
+    "relevance_model_score",
     "evidence_spans", "classifier_version", "classified_ts",
 )
 _INSERT_COLS = _CORE_COLS + _CLASS_COLS
@@ -170,6 +185,7 @@ _JSON_COLUMNS = (
     ("regex_vote", "VARCHAR"),
     ("ner_vote", "VARCHAR"), ("keyword_vote", "VARCHAR"), ("model_vote", "VARCHAR"),
     ("entropy_vote", "VARCHAR"),
+    ("relevance_model_score", "DOUBLE"),
     ("evidence_spans", "VARCHAR"), ("classifier_version", "VARCHAR"), ("classified_ts", "TIMESTAMP"),
 )
 
@@ -186,6 +202,7 @@ _MIGRATIONS = (
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS entropy_vote VARCHAR",
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS relevant BOOLEAN",
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS relevance_score DOUBLE",
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS relevance_model_score DOUBLE",
 )
 
 
@@ -260,6 +277,7 @@ class Warehouse:
             "keyword_vote": _s(c.keyword_vote) if c else None,
             "model_vote": _s(c.model_vote) if c else None,
             "entropy_vote": _s(c.entropy_vote) if c else None,
+            "relevance_model_score": c.relevance_model_score if c else None,
             "evidence_spans": _json(c.evidence_spans) if c else None,
             "classifier_version": c.classifier_version if c else None,
             "classified_ts": c.classified_ts.isoformat() if (c and c.classified_ts) else None,
@@ -316,19 +334,21 @@ class Warehouse:
             "artifact_id VARCHAR, category VARCHAR, confidence DOUBLE, "
             "relevant BOOLEAN, relevance_score DOUBLE, regex_vote VARCHAR, "
             "ner_vote VARCHAR, keyword_vote VARCHAR, model_vote VARCHAR, entropy_vote VARCHAR, "
+            "relevance_model_score DOUBLE, "
             "evidence_spans VARCHAR, classifier_version VARCHAR, classified_ts TIMESTAMP)"
         )
         total = 0
         for batch in _batched(updates, 20000):
             self.con.execute("DELETE FROM _cls")
             self.con.executemany(
-                "INSERT INTO _cls VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO _cls VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [
                     (
                         aid, c["category"], c["confidence"],
                         c.get("relevant"), c.get("relevance_score"),
                         c.get("regex_vote"), c.get("ner_vote"),
                         c.get("keyword_vote"), c.get("model_vote"), c.get("entropy_vote"),
+                        c.get("relevance_model_score"),
                         c.get("evidence_spans"), c.get("classifier_version"), c.get("classified_ts"),
                     )
                     for aid, c in batch
@@ -340,7 +360,7 @@ class Warehouse:
                 "relevant = c.relevant, relevance_score = c.relevance_score, "
                 "regex_vote = c.regex_vote, "
                 "ner_vote = c.ner_vote, keyword_vote = c.keyword_vote, model_vote = c.model_vote, "
-                "entropy_vote = c.entropy_vote, "
+                "entropy_vote = c.entropy_vote, relevance_model_score = c.relevance_model_score, "
                 "evidence_spans = c.evidence_spans, classifier_version = c.classifier_version, "
                 "classified_ts = c.classified_ts "
                 "FROM _cls c WHERE a.artifact_id = c.artifact_id"
