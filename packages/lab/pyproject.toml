@@ -22,7 +22,14 @@ memory = ["volatility3>=2.7"]
 # rights. Lets the lab extract evidence from an image instead of needing a
 # live collection. See dd_lab/imaging/.
 image = ["dissect.target>=3.20,<4", "dissect.fat>=3.10,<4"]
-classify = ["gliner>=0.2", "onnxruntime>=1.19"]
+# onnxruntime upper-bounded: confirmed on a real x86_64 Mac dev machine -
+# `uv sync --extra classify` resolved onnxruntime==1.29.0 (the unbounded
+# latest) and failed outright ("doesn't have a source distribution or wheel
+# for the current platform") - that release dropped macosx x86_64 wheels
+# entirely (only manylinux/macosx arm64/win wheels remain). 1.23.x still
+# ships one; pin below it until a newer release restores x86_64 mac support
+# or this project drops x86_64 Mac from its supported dev platforms.
+classify = ["gliner>=0.2", "onnxruntime>=1.19,<1.24"]
 zeroshot = ["transformers>=4.44", "torch>=2.2"]
 anthropic = ["pydantic-ai-slim[anthropic]>=1.0"]
 google = ["pydantic-ai-slim[google]>=1.0"]
