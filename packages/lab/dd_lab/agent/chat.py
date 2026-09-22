@@ -18,7 +18,8 @@ Deliberately narrower than the investigation agent (agent.py):
 
 Everything registered here is a read: case_status, list_evidence,
 category_summary, query_warehouse, search_keyword, correlate_entities,
-list_processes, process_memory, list_findings, verify_finding.
+case_timeline, explain_classification, list_processes, process_memory,
+list_findings, verify_finding.
 """
 
 from __future__ import annotations
@@ -59,11 +60,21 @@ Rules:
   `correlate_entities` when asked about links between apps or identifiers
   that show up in more than one place. Use `list_processes`/`process_memory`
   for questions about a specific process's own memory.
-- You cannot write findings or generate a report from chat — those actions
-  require the full investigation run (Run analysis) with its own citation
-  verification. If asked to write a finding or produce the report, say so
-  plainly and suggest running (or re-running) the investigation instead of
-  attempting a workaround.
+- Use `case_timeline` when asked to reconstruct the sequence of events
+  across the WHOLE case (not one specific identifier — that's
+  `correlate_entities`' own per-entity timeline instead).
+- Use `explain_classification` whenever asked why a specific artifact was
+  (or wasn't) marked relevant, or what category it landed in — answer from
+  its actual per-voter breakdown (regex/keyword/NER/model/entropy votes,
+  the relevance score and, if a relevance model is configured, its own raw
+  score), not a guess about what probably happened.
+- You cannot write findings or generate a report from chat yourself — that
+  requires the investigator's own explicit action (a "Save as finding"
+  step outside this conversation, which independently re-verifies whatever
+  you cite before it becomes part of the case), or the full investigation
+  run. If asked to write a finding or produce the report, say so plainly
+  and point at the specific artifact_id(s)/quotes the investigator would
+  need to save it themselves, rather than attempting a workaround.
 - `list_findings`/`verify_finding` are read-only checks on findings already
   written by that investigation run — you may report and verify those.
 - Be direct and concise. Prefer answering with a short synthesis backed by
@@ -171,6 +182,26 @@ def build_chat_agent(cfg: AgentConfig, model=None) -> Agent[InvestigationDeps, s
         _audit_call(ctx, "correlate_entities", min_distinct_sources=min_distinct_sources)
         return _audit_result(
             ctx, "correlate_entities", T.correlate_entities(ctx.deps, min_distinct_sources)
+        )
+
+    @agent.tool
+    def case_timeline(
+        ctx: RunContext[InvestigationDeps], relevant_only: bool = True, limit: int = 200
+    ) -> dict:
+        """The case-wide event timeline, oldest first (not scoped to one
+        entity the way correlate_entities' own timeline is)."""
+        _audit_call(ctx, "case_timeline", relevant_only=relevant_only, limit=limit)
+        return _audit_result(
+            ctx, "case_timeline", T.case_timeline(ctx.deps, relevant_only=relevant_only, limit=limit)
+        )
+
+    @agent.tool
+    def explain_classification(ctx: RunContext[InvestigationDeps], artifact_id: str) -> dict:
+        """Why one artifact was (or wasn't) marked relevant and what category
+        it landed in - the real per-voter breakdown, not a guess."""
+        _audit_call(ctx, "explain_classification", artifact_id=artifact_id)
+        return _audit_result(
+            ctx, "explain_classification", T.explain_classification(ctx.deps, artifact_id)
         )
 
     @agent.tool

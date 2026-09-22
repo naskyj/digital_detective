@@ -121,6 +121,9 @@ def test_chat_agent_has_no_mutating_or_expensive_tools(tmp_path):
     forbidden = {"write_finding", "generate_report", "run_ingest", "run_memory_analysis", "verify_integrity"}
     assert not (tool_names & forbidden), tool_names & forbidden
     assert "query_warehouse" in tool_names and "correlate_entities" in tool_names
+    # New, still read-only - safe for chat the same way every other read
+    # tool here is (neither mutates anything).
+    assert "case_timeline" in tool_names and "explain_classification" in tool_names
 
 
 def test_history_for_ui_ignores_a_tool_call_only_response():

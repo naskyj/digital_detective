@@ -248,6 +248,55 @@ def correlate_entities(deps: InvestigationDeps, min_distinct_sources: int = 2) -
     }
 
 
+def case_timeline(deps: InvestigationDeps, *, relevant_only: bool = True, limit: int = 200) -> dict:
+    """The case-wide event timeline, oldest first - every timestamped
+    artifact, not scoped to one correlated entity the way
+    correlate_entities' own per-entity timeline is. Use this to reconstruct
+    the overall sequence of events across the whole case; use
+    correlate_entities when you already have a specific identifier and want
+    just its own occurrences in order. Defaults to relevant_only=True (the
+    primary signal this pipeline produces) - pass relevant_only=False only
+    if you deliberately need the unfiltered view, e.g. to sanity-check
+    whether something borderline was excluded."""
+    wh = Warehouse(deps.layout.warehouse)
+    try:
+        clause = "WHERE record_ts IS NOT NULL" + (" AND relevant" if relevant_only else "")
+        rows = wh.query(
+            f"SELECT record_ts, app, source_type, category, relevant, relevance_score, "
+            f"key, substr(value,1,300) AS value, artifact_id FROM artifacts {clause} "
+            f"ORDER BY record_ts LIMIT ?",
+            [int(limit)],
+        )
+    finally:
+        wh.close()
+    return {"relevant_only": relevant_only, "event_count": len(rows), "events": rows}
+
+
+def explain_classification(deps: InvestigationDeps, artifact_id: str) -> dict:
+    """Why one specific artifact was (or wasn't) marked relevant, and what
+    category it landed in - the real per-voter breakdown (regex/keyword/
+    NER/model/entropy votes, the trained relevance model's own raw score if
+    one is configured, and the combined relevance_score/confidence), not a
+    guess. Use this whenever asked to explain/justify a classification
+    decision on a specific artifact, so the answer is grounded in what the
+    ensemble actually did (see dd_lab/classify/ensemble.py's module
+    docstring for how these combine) rather than invented."""
+    wh = Warehouse(deps.layout.warehouse)
+    try:
+        rows = wh.query(
+            "SELECT artifact_id, app, source_type, key, value, category, confidence, "
+            "relevant, relevance_score, regex_vote, keyword_vote, ner_vote, model_vote, "
+            "entropy_vote, relevance_model_score, deleted "
+            "FROM artifacts WHERE artifact_id = ?",
+            [artifact_id],
+        )
+    finally:
+        wh.close()
+    if not rows:
+        return {"ok": False, "reason": f"no artifact with id {artifact_id!r}"}
+    return {"ok": True, **rows[0]}
+
+
 def _pivot_processes_by_pid(rows: list[dict]) -> list[dict]:
     """`rows` are flat memory_process artifacts - one row per Volatility
     column, one shared source_locator per (plugin, row-index) group (e.g.

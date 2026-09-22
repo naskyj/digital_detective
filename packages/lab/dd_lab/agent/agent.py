@@ -41,17 +41,28 @@ Rules:
   check every investigation keyword the case provides.
 - `query_warehouse` is read-only SQL over the `artifacts` table and the `v_*`
   views. Columns: app, source_type, source_file, key, value, value_type,
-  record_ts, category, confidence.
+  record_ts, category, confidence, relevant, relevance_score. `relevant`/
+  `relevance_score` are the PRIMARY signal — "does this matter to the
+  investigation" — computed independently of `category`, which is a
+  display/grouping label only now; don't assume a GENERAL/low-confidence
+  category means irrelevant, or a specific category means relevant, check
+  `relevant` itself. Use `explain_classification` on a specific artifact_id
+  when you need the actual per-voter reasoning behind why it landed where it
+  did, rather than guessing from the category alone.
 - Call `correlate_entities` to find identifiers (ids, invite links, emails,
   asset ids) that appear across more than one app or storage mechanism —
   that cross-source link is the thing a per-row classifier cannot see. Its
   entity-extraction coverage is NOT exhaustive (app-specific id/token shapes
   get added over time) — a keyword/manual query can still surface something
   correlation missed, so don't treat an empty correlation result as "nothing
-  to find" on its own. Use its timeline (already time-ordered) to reconstruct
-  the sequence of events for an entity, and cross-platform links (e.g. a
-  Roblox id that also shows up in Discord evidence) to connect identities
-  across apps.
+  to find" on its own. Every citation it returns carries its own `relevant`/
+  `relevance_score` too — a corroborating citation is kept even when it
+  isn't itself independently relevant (recall over precision), so check that
+  field before treating every citation as equally significant. Use its
+  timeline (already time-ordered) to reconstruct the sequence of events for
+  one entity specifically, or `case_timeline` for the whole case's sequence
+  of events, not just one identifier's. Cross-platform links (e.g. a Roblox
+  id that also shows up in Discord evidence) connect identities across apps.
 - When memory analysis found processes for an app, use `list_processes` to
   see them (PID/PPID/image name/command line/create time) and
   `process_memory` to read what was carved from one specific process's own
@@ -170,6 +181,28 @@ def build_agent(cfg: AgentConfig, model=None) -> Agent[InvestigationDeps, str]:
         _audit_call(ctx, "correlate_entities", min_distinct_sources=min_distinct_sources)
         return _audit_result(
             ctx, "correlate_entities", T.correlate_entities(ctx.deps, min_distinct_sources)
+        )
+
+    @agent.tool
+    def case_timeline(
+        ctx: RunContext[InvestigationDeps], relevant_only: bool = True, limit: int = 200
+    ) -> dict:
+        """The case-wide event timeline, oldest first (not scoped to one
+        entity the way correlate_entities' own timeline is) - use this to
+        reconstruct the overall sequence of events, not just one identifier's."""
+        _audit_call(ctx, "case_timeline", relevant_only=relevant_only, limit=limit)
+        return _audit_result(
+            ctx, "case_timeline", T.case_timeline(ctx.deps, relevant_only=relevant_only, limit=limit)
+        )
+
+    @agent.tool
+    def explain_classification(ctx: RunContext[InvestigationDeps], artifact_id: str) -> dict:
+        """Why one artifact was (or wasn't) marked relevant and what category
+        it landed in - the real per-voter breakdown, not a guess. Use before
+        citing an artifact whose relevance is in question."""
+        _audit_call(ctx, "explain_classification", artifact_id=artifact_id)
+        return _audit_result(
+            ctx, "explain_classification", T.explain_classification(ctx.deps, artifact_id)
         )
 
     @agent.tool
