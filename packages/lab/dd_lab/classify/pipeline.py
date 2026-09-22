@@ -48,20 +48,24 @@ def classify_stream(
 def classify_warehouse(
     wh: Warehouse, classifier: Classifier | None = None
 ) -> ClassifyResult:
-    """Re-classify every artifact already in the warehouse."""
+    """Re-classify every artifact already in the warehouse.
+
+    Uses classify_batch(), not classify() in a per-row loop - a real,
+    measured perf win when a relevance model is configured (see
+    ensemble.py::Classifier.classify_batch and model.py::
+    OnnxRelevanceModel.batch): the one expensive, genuinely batchable step
+    (the ONNX relevance model) runs once per warehouse batch instead of
+    once per row. iter_for_classification() already reads rows in large
+    (20,000-row) batches for the UPDATE side of this; classify_batch()
+    reuses that same batch shape for the model side too, no extra
+    batching layer needed here.
+    """
     classifier = classifier or Classifier()
     result = ClassifyResult()
     for rows in wh.iter_for_classification():
+        crs = classifier.classify_batch(rows)
         updates = []
-        for r in rows:
-            cr = classifier.classify(
-                r["key"],
-                r["value"],
-                r["value_type"],
-                app=r["app"],
-                source_type=r["source_type"],
-                deleted=r["deleted"],
-            )
+        for r, cr in zip(rows, crs, strict=True):
             cat = str(cr.category)
             result.by_category[cat] = result.by_category.get(cat, 0) + 1
             updates.append(

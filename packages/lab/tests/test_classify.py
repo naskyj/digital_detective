@@ -158,6 +158,87 @@ def test_relevance_voter_runs_even_for_structured_source_types():
     assert r.relevance_model_score == 0.8
 
 
+def test_classify_batch_matches_classify_one_row_at_a_time():
+    """classify_batch() must produce identical results to calling classify()
+    in a loop - it's a perf optimization (batches the relevance-model call),
+    not a behavior change. Exercises a real mix: an empty-body-gated row
+    (skips the relevance model entirely), a real category hit, and a
+    GENERAL row - all through a fake relevance_voter with no .batch()
+    method, so this also confirms the per-item fallback works."""
+
+    def fake_relevance(key, value, source_type):
+        return {"password": 0.9}.get(key, 0.2)
+
+    clf = Classifier(relevance_voter=fake_relevance)
+    rows = [
+        {"key": "x", "value": "{}"},  # empty-body gate
+        {"key": "local_storage.app.password", "value": "hunter2"},  # real hit
+        {"key": "some.opaque.key", "value": "xyz"},  # GENERAL
+    ]
+    batched = clf.classify_batch(rows)
+    singles = [clf.classify(r["key"], r["value"]) for r in rows]
+    assert len(batched) == 3
+    for b, s in zip(batched, singles, strict=True):
+        assert b.category == s.category
+        assert b.relevant == s.relevant
+        assert b.relevance_score == s.relevance_score
+        assert b.relevance_model_score == s.relevance_model_score
+
+
+def test_classify_batch_uses_a_real_batch_method_when_the_voter_has_one():
+    """When the configured relevance_voter exposes a `.batch()` method
+    (duck-typed, matching OnnxRelevanceModel's real shape), classify_batch()
+    must call it ONCE for every row needing scoring, not per-row - the
+    actual point of this method existing."""
+    calls = []
+
+    class FakeBatchVoter:
+        def __call__(self, key, value, source_type):
+            raise AssertionError("classify_batch should never use the single-item call path here")
+
+        def batch(self, items):
+            calls.append(list(items))
+            return [0.9 for _ in items]
+
+    clf = Classifier(relevance_voter=FakeBatchVoter())
+    rows = [{"key": f"k{i}", "value": f"v{i}"} for i in range(5)]
+    results = clf.classify_batch(rows)
+    assert len(calls) == 1  # one batched call, not five
+    assert len(calls[0]) == 5
+    assert all(r.relevance_model_score == 0.9 for r in results)
+
+
+def test_classify_batch_skips_empty_body_gated_rows_in_the_model_batch():
+    """An empty-body-gated row must not be sent to the relevance model at
+    all - same as classify() (see the empty-body gate's own comment:
+    "runs FIRST... overrides everything"), just verified at batch
+    granularity too."""
+    calls = []
+
+    class FakeBatchVoter:
+        def batch(self, items):
+            calls.append(list(items))
+            return [0.9 for _ in items]
+
+    clf = Classifier(relevance_voter=FakeBatchVoter())
+    rows = [
+        {"key": "a", "value": "{}"},  # empty-body gated - must be excluded
+        {"key": "b", "value": "real content here"},
+    ]
+    results = clf.classify_batch(rows)
+    assert len(calls[0]) == 1  # only the non-gated row was sent to the model
+    assert results[0].relevant is False and results[0].relevance_model_score is None
+    assert results[1].relevance_model_score == 0.9
+
+
+def test_classify_batch_with_no_relevance_voter_configured():
+    rows = [{"key": "local_storage.app.password", "value": "hunter2"}, {"key": "k", "value": "v"}]
+    results = C.classify_batch(rows)
+    assert len(results) == 2
+    assert all(r.relevance_model_score is None for r in results)
+    assert results[0].relevant is True
+
+
 def test_entropy_alone_never_makes_something_relevant():
     """Entropy is category-only (see _W_ENTROPY's comment in ensemble.py) -
     it must never be able to push relevance_score/relevant on its own, even
