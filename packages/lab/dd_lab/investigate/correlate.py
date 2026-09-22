@@ -26,7 +26,7 @@ from dd_lab.investigate.entities import extract_entities
 
 _CITE_COLS = (
     "artifact_id, app, source_type, source_file, source_locator, "
-    "key, value, category, record_ts"
+    "key, value, category, record_ts, relevant, relevance_score"
 )
 # below this length an exact value match is required; substring search on a
 # very short value would match almost everything and swamp the result with noise.
@@ -44,6 +44,19 @@ class Citation:
     value: str
     category: str | None
     record_ts: datetime | None
+    # Relevance is a PER-CITATION signal, deliberately kept alongside
+    # category rather than used to exclude a citation outright - an entity
+    # is seeded only from relevant artifacts (see build_correlation_report),
+    # but once seeded, _related_rows() deliberately looks across the WHOLE
+    # warehouse for corroborating occurrences, relevant or not (recall
+    # matters more than precision for forensic evidence - this project's
+    # consistent choice elsewhere too: deleted records kept not deleted,
+    # superseded values kept not dropped). These fields let a reader (or
+    # the agent) tell a genuinely relevant corroborating hit apart from an
+    # incidental match on the same value, instead of losing that
+    # distinction entirely.
+    relevant: bool | None
+    relevance_score: float | None
 
     @classmethod
     def from_row(cls, row: dict) -> Citation:
@@ -52,6 +65,7 @@ class Citation:
             source_file=row["source_file"], source_locator=row["source_locator"],
             key=row["key"], value=row["value"], category=row.get("category"),
             record_ts=row.get("record_ts"),
+            relevant=row.get("relevant"), relevance_score=row.get("relevance_score"),
         )
 
 

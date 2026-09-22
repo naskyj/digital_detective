@@ -169,6 +169,53 @@ def test_correlates_asset_id_across_app_cache_memory_and_leveldb(wh):
     assert all(c.artifact_id and c.source_file and c.source_locator for c in ordered)
 
 
+def test_correlation_keeps_a_non_relevant_matching_citation_but_flags_it(wh):
+    """Citation.relevant/relevance_score exist specifically so a citation
+    pulled in by _related_rows() (which deliberately does NOT filter by
+    relevance - see correlate.py's own comment on why: recall over
+    precision for forensic evidence) can still be told apart from a
+    genuinely relevant one. This is the actual behavior, not just the
+    absence of filtering - a plumbing/telemetry-style match sharing the
+    same value as a real finding must still show up as a citation (kept),
+    but with relevant=False (flagged), not silently equal-weighted."""
+    asset_id = "5551112223"
+    seed = _artifact(
+        "Discord", S.CACHE, "discord/Cache/f_seed", "http-body",
+        "cache.body.embed", f"rbxassetid://{asset_id} shared", C.CHAT_CONTENT,
+    )
+    # Same value, second source type (satisfies min_distinct_sources), but
+    # explicitly marked not relevant - e.g. an infra/plumbing hit that just
+    # happens to share the id, distinct from category (which alone would
+    # default relevant=True here per ClassificationResult's own fallback).
+    noise = NormalizedArtifact(
+        artifact_id="Discord:memory:offset99:noise",
+        case_id="c1",
+        app="Discord",
+        source_type=S.MEMORY_STRING,
+        source_file="_system/memory/physmem.raw",
+        source_locator="offset:99000",
+        key="telemetry.beacon",
+        value=f"beacon?id={asset_id}",
+        record_ts=_NOW + timedelta(minutes=1),
+        extracted_ts=_NOW,
+        classification=ClassificationResult(
+            category=C.NETWORK_DETAIL, confidence=0.4, classifier_version="test",
+            relevant=False, relevance_score=0.0,
+        ),
+    )
+    wh.load_artifacts([seed, noise])
+
+    report = build_correlation_report(wh, min_distinct_sources=2)
+    hit = next((e for e in report if asset_id in e.value), None)
+    assert hit is not None, [e.value for e in report]
+
+    by_id = {c.artifact_id: c for c in hit.artifacts}
+    assert seed.artifact_id in by_id and noise.artifact_id in by_id  # both KEPT (recall preserved)
+    assert by_id[seed.artifact_id].relevant is True
+    assert by_id[noise.artifact_id].relevant is False  # but correctly FLAGGED, not equal-weighted
+    assert by_id[noise.artifact_id].relevance_score == 0.0
+
+
 def test_single_occurrence_is_not_correlated(wh):
     wh.load_artifacts([
         _artifact(

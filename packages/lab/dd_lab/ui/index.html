@@ -1039,11 +1039,14 @@ async function correlationsPanel(id){
       out.append(head);
       if(!isOpen) return;
       const t=el('table',{style:'table-layout:fixed;width:100%;margin-bottom:12px'},el('thead',{},el('tr',{},
-        ...['Time','App','Source','Key','Value'].map(h=>el('th',{},h)))));
+        ...['','Time','App','Source','Key','Value'].map(h=>el('th',{},h)))));
       const tb=el('tbody',{});
       e.timeline.forEach(c=>{
         tb.append(el('tr',{style:'cursor:pointer',title:'file: '+c.source_file+' · click for full detail',
           onclick:()=>showArtifactDetail(id,c.artifact_id)},
+          el('td',{title:c.relevance_score!=null?'relevance_score: '+c.relevance_score.toFixed(2):
+            'kept as corroborating evidence, not independently relevant'},
+            c.relevant?el('span',{class:'pill ok'},'relevant'):''),
           el('td',{class:'mono',title:c.record_ts||''},c.record_ts?ago(c.record_ts):''),
           el('td',{},c.app),
           el('td',{},SRC_LABELS[c.source_type]||c.source_type),

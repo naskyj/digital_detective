@@ -172,7 +172,11 @@ def build_report(
         "<p class='sub'>Identifiers (ids, invite links, emails, asset ids) that appear in more "
         "than one application or storage mechanism — a link a single artifact cannot show on its "
         "own. Each row cites its source file and in-file locator; times are the record's own "
-        "timestamp, oldest first, as a reconstructed sequence for that identifier.</p>"
+        "timestamp, oldest first, as a reconstructed sequence for that identifier. An entity is "
+        "only ever found by scanning independently RELEVANT artifacts (see the Relevant column "
+        "below), but once found, every occurrence of it anywhere in the case is cited as "
+        "corroborating evidence, relevant or not — a plumbing/telemetry match sharing the same "
+        "value is kept, not hidden, just clearly marked apart from a genuinely relevant hit.</p>"
     )
     if correlations:
         for e in correlations:
@@ -181,9 +185,9 @@ def build_report(
                 f"({len(e.artifacts)} artifacts across {_esc(', '.join(e.apps))})</h3>"
             )
             parts.append(_rows(
-                ["Timestamp", "App", "Source", "File", "Locator", "Key", "Value"],
-                [[c.record_ts, c.app, c.source_type, c.source_file, c.source_locator, c.key,
-                  c.value[:160]] for c in e.timeline()],
+                ["Relevant", "Timestamp", "App", "Source", "File", "Locator", "Key", "Value"],
+                [["✓" if c.relevant else "—", c.record_ts, c.app, c.source_type, c.source_file,
+                  c.source_locator, c.key, c.value[:160]] for c in e.timeline()],
                 highlight=True,
             ))
     else:
@@ -191,8 +195,9 @@ def build_report(
 
     if meta.keywords:
         parts.append(f"<h2>6. Investigation Keyword Hits ({sum(k['hits'] for k in kw_hits)})</h2>")
-        parts.append(_rows(["Keyword", "Hits", "Example"],
-                           [[k["keyword"], k["hits"], k["example"]] for k in kw_hits]))
+        parts.append(_rows(["Keyword", "Hits", "Relevant hits", "Example"],
+                           [[k["keyword"], k["hits"], k["relevant_hits"], k["example"]]
+                            for k in kw_hits]))
 
     parts.append(f"<h2>7. Evidence Timeline ({len(timeline)} of the earliest non-generic events)</h2>")
     parts.append(_rows(["Timestamp", "App", "Category", "Key", "Value"],
@@ -266,10 +271,21 @@ def verify_report(layout: CaseLayout, report_path: str | Path) -> tuple[bool, st
 def _keyword_hits(wh: Warehouse, keywords: list[str]) -> list[dict]:
     hits = []
     for kw in keywords:
+        # Not filtered to relevant-only - an investigation keyword search
+        # is deliberately broader than the primary relevance signal (the
+        # investigator chose these terms specifically, independent of what
+        # the ensemble scored) - but the relevant-hit count is surfaced
+        # alongside the raw one so a reader can see how much of a keyword's
+        # hit count is independently-relevant vs. everything else.
         rows = wh.query(
-            "SELECT count(*) AS n, min(substr(value,1,100)) AS example FROM artifacts "
+            "SELECT count(*) AS n, "
+            "count(*) FILTER (WHERE relevant) AS relevant_n, "
+            "min(substr(value,1,100)) AS example FROM artifacts "
             "WHERE value ILIKE ? OR key ILIKE ?",
             [f"%{kw}%", f"%{kw}%"],
         )
-        hits.append({"keyword": kw, "hits": rows[0]["n"], "example": rows[0]["example"] or ""})
+        hits.append({
+            "keyword": kw, "hits": rows[0]["n"], "relevant_hits": rows[0]["relevant_n"],
+            "example": rows[0]["example"] or "",
+        })
     return hits

@@ -234,6 +234,11 @@ def correlate_entities(deps: InvestigationDeps, min_distinct_sources: int = 2) -
                         "source_file": c.source_file, "source_locator": c.source_locator,
                         "key": c.key, "value": c.value, "record_ts": c.record_ts.isoformat()
                         if c.record_ts else None,
+                        # Corroborating citations are kept regardless of relevance (see
+                        # correlate.py::Citation's own comment) - surfaced here so the
+                        # agent/chat can tell a genuinely relevant hit apart from an
+                        # incidental one instead of treating every citation as equal.
+                        "relevant": c.relevant, "relevance_score": c.relevance_score,
                     }
                     for c in e.timeline()
                 ],
