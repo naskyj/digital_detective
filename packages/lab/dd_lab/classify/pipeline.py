@@ -46,9 +46,19 @@ def classify_stream(
 
 
 def classify_warehouse(
-    wh: Warehouse, classifier: Classifier | None = None
+    wh: Warehouse, classifier: Classifier | None = None, *, reuse_model_scores: bool = False
 ) -> ClassifyResult:
     """Re-classify every artifact already in the warehouse.
+
+    `reuse_model_scores=True` re-derives relevance from each row's
+    ALREADY-STORED `relevance_model_score` instead of re-running the
+    relevance model - see Classifier.classify_batch's own docstring. Use it
+    when the combination logic changed but the model did not: measured on
+    the real 675k-artifact case, the model is ~27 hours of the work and
+    everything else is ~30 minutes, and the model's output depends only on
+    artifact text that hasn't changed. Do NOT use it after configuring a
+    different relevance model, or for rows that never had one - there is
+    nothing stored to reuse, and those rows fall back to rules-only.
 
     Uses classify_batch(), not classify() in a per-row loop - a real,
     measured perf win when a relevance model is configured (see
@@ -63,7 +73,7 @@ def classify_warehouse(
     classifier = classifier or Classifier()
     result = ClassifyResult()
     for rows in wh.iter_for_classification():
-        crs = classifier.classify_batch(rows)
+        crs = classifier.classify_batch(rows, reuse_model_scores=reuse_model_scores)
         updates = []
         for r, cr in zip(rows, crs, strict=True):
             cat = str(cr.category)

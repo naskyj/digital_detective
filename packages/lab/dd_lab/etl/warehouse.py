@@ -306,16 +306,21 @@ class Warehouse:
 
     def iter_for_classification(self, batch_size: int = 20000) -> Iterator[list[dict]]:
         """Yield batches of {artifact_id, key, value, value_type, app,
-        source_type, deleted} for re-classification. app/source_type/deleted
-        are needed by Classifier.classify()'s routing/gating (see
-        classifier_backend_spec.md's implementation) - without them,
-        re-classifying an already-ingested warehouse would skip every
-        source-type-aware rule that the ingest-time classify_stream() path
-        gets for free from the NormalizedArtifact it's already holding."""
+        source_type, deleted, relevance_model_score} for re-classification.
+        app/source_type/deleted are needed by Classifier.classify()'s
+        routing/gating (see classifier_backend_spec.md's implementation) -
+        without them, re-classifying an already-ingested warehouse would
+        skip every source-type-aware rule that the ingest-time
+        classify_stream() path gets for free from the NormalizedArtifact
+        it's already holding. relevance_model_score is the previously-stored
+        model output, for classify_batch(reuse_model_scores=True) - lets a
+        re-classify that only changes the COMBINATION logic skip re-running
+        the (very expensive) relevance model entirely."""
         offset = 0
         while True:
             rows = self.query(
-                "SELECT artifact_id, key, value, value_type, app, source_type, deleted FROM artifacts "
+                "SELECT artifact_id, key, value, value_type, app, source_type, deleted, "
+                "relevance_model_score FROM artifacts "
                 f"ORDER BY artifact_id LIMIT {batch_size} OFFSET {offset}"
             )
             if not rows:

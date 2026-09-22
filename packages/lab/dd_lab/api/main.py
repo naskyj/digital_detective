@@ -431,7 +431,7 @@ def run_case(case_id: str) -> dict:
 
 
 @app.post("/api/cases/{case_id}/reclassify")
-def reclassify_case(case_id: str) -> dict:
+def reclassify_case(case_id: str, reuse_model_scores: bool = False) -> dict:
     """Re-run classification against artifacts already in the warehouse -
     cheap and in-place (a single set-based UPDATE per batch via
     classify_warehouse), unlike "Run analysis" above which re-parses from
@@ -441,7 +441,13 @@ def reclassify_case(case_id: str) -> dict:
     a full re-run. Real use case this exists for: relevance_model_dir (or
     classifier_model_dir) just got configured/changed, or the ensemble's
     own logic changed, and existing artifacts need to reflect that without
-    burning a full re-ingest."""
+    burning a full re-ingest.
+
+    `reuse_model_scores=true` additionally skips re-running the relevance
+    model, re-deriving relevance from each row's already-stored score
+    instead (see classify_warehouse). On the real 675k-artifact case that
+    is the difference between ~30 minutes and ~27 hours - use it whenever
+    only the combination logic changed, not the model itself."""
     layout = _layout(case_id)
     if not layout.manifest.is_file():
         raise HTTPException(404, "case not found")
@@ -454,11 +460,15 @@ def reclassify_case(case_id: str) -> dict:
         from dd_lab.classify import classify_warehouse
         from dd_lab.etl.warehouse import Warehouse
 
-        progress("re-classifying artifacts already in the warehouse...")
+        progress(
+            "re-classifying artifacts already in the warehouse"
+            + (" (reusing stored relevance-model scores)" if reuse_model_scores else "")
+            + "..."
+        )
         clf = _settings.build_classifier()
         wh = Warehouse(layout.warehouse)
         try:
-            result = classify_warehouse(wh, clf)
+            result = classify_warehouse(wh, clf, reuse_model_scores=reuse_model_scores)
         finally:
             wh.close()
         progress(f"re-classified {result.classified} artifacts")

@@ -66,6 +66,34 @@ _W_ENTROPY = 0.5
 # actual case reclassification.
 _RELEVANCE_THRESHOLD = 0.5
 
+# Model veto. Noisy-OR above can only ever RAISE relevance - which turned
+# out to be a real, measured problem on the first full run against the real
+# case (675,463 artifacts): rule_evidence saturates at 1.0 easily (regex 1.0
+# + keyword 0.85, both capped), and 1 - (1-1.0)*(1-x) == 1.0 for ANY x, so a
+# confident model "not relevant" was arithmetically incapable of lowering
+# the score. 156,697 of the 213,016 artifacts flagged relevant (74%) were
+# flagged despite the trained model scoring them under 0.01 - measured, not
+# estimated. Real examples: `cache.content_type = image/png`, `text/css`,
+# and minified webpack JS bundles, all sitting at relevance_score 1.0.
+#
+# So below this threshold the model is treated as confidently negative and
+# its own score stands instead of the noisy-OR result (no invented cap
+# constant - the model's probability IS the answer in that case). Observed
+# noise scored ~5e-6 to ~5e-3, far below 0.05; genuinely borderline rows
+# (~0.3-0.5) are nowhere near it and are never vetoed.
+_MODEL_VETO_THRESHOLD = 0.05
+
+# ...except here. The model has measured 0.86 recall on this data - it
+# misses ~14% of genuinely relevant artifacts - so it must NOT get the final
+# word on the categories where a false negative is a serious forensic error
+# (a missed credential is not the same kind of mistake as a retained CSS
+# header). These are exactly the top 3 of rules.py's own CATEGORY_PRIORITY
+# ranking, i.e. this project's existing definition of "most sensitive",
+# not a new list invented here. On the real case this preserves ~2,400
+# rule-detected credential/payment/location hits while still letting the
+# veto clear ~154,000 noise rows. Confirmed with the project owner.
+_VETO_PROOF_CATEGORIES = frozenset({C.CREDENTIAL, C.PAYMENT_INFO, C.LOCATION_INFO})
+
 # Per-source-type voter routing (classifier_backend_spec.md's "PER-SOURCE
 # ROUTING" finding): on the collaborator's own back-test, structured
 # key/value sources already reach ~97% recall / ~82% precision on schema-
@@ -175,7 +203,9 @@ class Classifier:
         )
         return self._finish(prepared, relevance_model_score)
 
-    def classify_batch(self, rows: list[dict]) -> list[ClassificationResult]:
+    def classify_batch(
+        self, rows: list[dict], *, reuse_model_scores: bool = False
+    ) -> list[ClassificationResult]:
         """Batched form of classify() - same result as calling classify()
         once per row, but the relevance-model call (the one genuinely
         expensive, genuinely batchable step - see model.py::
@@ -195,6 +225,17 @@ class Classifier:
         calls classify() per-artifact - ingest is a generator over
         artifacts as they're parsed from evidence, not a natural batch
         shape to retrofit here.
+
+        `reuse_model_scores=True` reads each row's already-stored
+        `relevance_model_score` instead of running the model at all. The
+        model is by far the most expensive part of a re-classify (a
+        measured ~27 hours for 675k artifacts on CPU, vs ~30 minutes for
+        everything else) and its output only depends on the artifact's own
+        text, which does not change - so re-deriving relevance after a
+        CHANGE TO THE COMBINATION LOGIC (not to the model itself) never
+        needs to pay that cost twice. Requires the caller to actually
+        supply the column; a row missing it simply scores None (rules
+        only) rather than silently re-running inference.
         """
         prepared = [
             self._prepare(
@@ -211,7 +252,10 @@ class Classifier:
         # relevance-model call entirely, same as classify() does.
         to_score = [(i, p) for i, p in enumerate(prepared) if isinstance(p, _Pending)]
         model_scores: list[float | None] = [None] * len(rows)
-        if self._relevance_voter is not None and to_score:
+        if reuse_model_scores:
+            for i, _ in to_score:
+                model_scores[i] = rows[i].get("relevance_model_score")
+        elif self._relevance_voter is not None and to_score:
             items = [(p.key, p.value, p.source_type) for _, p in to_score]
             # Duck-typed: use a real batched call if the configured voter
             # offers one (OnnxRelevanceModel does), else fall back to
@@ -415,6 +459,21 @@ class Classifier:
             relevance_score = p.rule_evidence
 
         category, confidence = p.category, p.confidence
+
+        # Model veto (see _MODEL_VETO_THRESHOLD / _VETO_PROOF_CATEGORIES).
+        # Keyed on the final category OR the regex vote specifically: regex
+        # is the deterministic, highest-trust voter, so a regex hit on a
+        # credential/payment/location pattern protects the row even if the
+        # combined vote landed on some other category. Keyword/NER are
+        # deliberately NOT consulted here - they're the voters that produced
+        # the `content_type` -> CHAT_CONTENT style false fires this veto
+        # exists to clear, so letting them confer immunity would defeat it.
+        if (
+            relevance_model_score is not None
+            and relevance_model_score < _MODEL_VETO_THRESHOLD
+            and not ({category, p.regex_vote} & _VETO_PROOF_CATEGORIES)
+        ):
+            relevance_score = min(relevance_score, round(relevance_model_score, 3))
         # ID-in-plumbing carve-out (classifier_backend_spec.md): an id
         # riding along in app plumbing or a telemetry URL isn't evidence -
         # overrides whatever the voters above produced (category AND

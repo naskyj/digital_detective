@@ -239,6 +239,64 @@ def test_classify_batch_with_no_relevance_voter_configured():
     assert results[0].relevant is True
 
 
+# --------------------------------------------------------------------- model veto
+#
+# Found by measuring a real full run (675,463 artifacts): noisy-OR can only
+# ever RAISE relevance, so a confident model "not relevant" was
+# arithmetically incapable of lowering a saturated rule_evidence - 156,697
+# of 213,016 artifacts flagged relevant were flagged despite the model
+# scoring them under 0.01 (content_type headers, minified JS bundles).
+
+
+def test_confident_model_negative_vetoes_a_saturated_rule_hit():
+    def fake_relevance(key, value, source_type):
+        return 0.000005  # what the real model actually returned for `image/png`
+
+    clf = Classifier(relevance_voter=fake_relevance)
+    # Exactly reproduces a real row from the 675k-artifact case: rules alone
+    # saturate this at relevance 1.0 (the actual bug - content_type headers
+    # sitting at the top of the report as CHAT_CONTENT).
+    args = ("cache.content_type", "image/png")
+    kwargs = {"source_type": "cache", "app": "Slack"}
+    rules_only = C.classify(*args, **kwargs)
+    assert rules_only.relevance_score == 1.0 and rules_only.relevant is True
+
+    # With the model's confident negative, it is no longer relevant.
+    r = clf.classify(*args, **kwargs)
+    assert r.relevance_score < 0.5
+    assert r.relevant is False
+
+
+def test_veto_does_not_touch_the_most_sensitive_categories():
+    """The model has 0.86 recall - it misses ~14% of genuinely relevant
+    artifacts - so it must never get the final word on the categories where
+    a false negative is a serious forensic error. These are exactly the top
+    3 of rules.py's CATEGORY_PRIORITY."""
+    def fake_relevance(key, value, source_type):
+        return 0.000005
+
+    clf = Classifier(relevance_voter=fake_relevance)
+    r = clf.classify("local_storage.app.password", "hunter2")
+    assert r.category == "CREDENTIAL"
+    assert r.relevant is True, "a confident model negative must not suppress a credential"
+    assert r.relevance_score >= 0.5
+
+
+def test_veto_only_fires_when_the_model_is_actually_confident():
+    """A genuinely borderline model score (~0.3-0.5) is nowhere near the
+    veto threshold and must leave the noisy-OR result alone."""
+    def borderline(key, value, source_type):
+        return 0.3
+
+    clf = Classifier(relevance_voter=borderline)
+    args, kwargs = ("cache.content_type", "image/png"), {"source_type": "cache", "app": "Slack"}
+    r = clf.classify(*args, **kwargs)
+    baseline = C.classify(*args, **kwargs)
+    # noisy-OR of the rule evidence with 0.3 - raised, never vetoed down
+    assert r.relevance_score >= baseline.relevance_score
+    assert r.relevant is True
+
+
 def test_entropy_alone_never_makes_something_relevant():
     """Entropy is category-only (see _W_ENTROPY's comment in ensemble.py) -
     it must never be able to push relevance_score/relevant on its own, even

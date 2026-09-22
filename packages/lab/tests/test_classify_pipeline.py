@@ -76,6 +76,42 @@ def test_classify_warehouse_round_trips_relevance_model_score(tmp_path):
         wh.close()
 
 
+def test_reuse_model_scores_skips_the_model_but_keeps_its_stored_score(tmp_path):
+    """The expensive part of a re-classify is the relevance model (~27 hours
+    of a measured ~27.5-hour run on the real 675k-artifact case). Its output
+    depends only on artifact text, which doesn't change - so re-deriving
+    relevance after a COMBINATION-LOGIC change must be able to reuse the
+    stored score instead of paying that cost again."""
+    calls = []
+
+    class CountingVoter:
+        def batch(self, items):
+            calls.append(len(items))
+            return [0.9 for _ in items]
+
+    wh = Warehouse(tmp_path / "warehouse" / "case.duckdb")
+    try:
+        wh.load_artifacts([_artifact("k", "v")])
+        # First pass: the model actually runs and its score is persisted.
+        classify_warehouse(wh, Classifier(relevance_voter=CountingVoter()))
+        assert calls == [1]
+        stored = wh.query("SELECT relevance_model_score FROM artifacts")[0]
+        assert stored["relevance_model_score"] == 0.9
+
+        # Second pass with reuse: the model is NOT called again, but the
+        # stored score still informs the result.
+        calls.clear()
+        classify_warehouse(
+            wh, Classifier(relevance_voter=CountingVoter()), reuse_model_scores=True
+        )
+        assert calls == [], "the relevance model must not run when reusing stored scores"
+        after = wh.query("SELECT relevance_model_score, relevant FROM artifacts")[0]
+        assert after["relevance_model_score"] == 0.9  # preserved, not wiped
+        assert after["relevant"] is True
+    finally:
+        wh.close()
+
+
 def test_iter_for_classification_yields_app_source_type_deleted(tmp_path):
     wh = Warehouse(tmp_path / "warehouse" / "case.duckdb")
     try:
