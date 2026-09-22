@@ -19,7 +19,13 @@ from dd_core.custody import CustodyLog
 from dd_core.manifest import Manifest
 from dd_lab.agent.audit import AuditLog
 from dd_lab.agent.runner import run_agent, run_pipeline
-from dd_lab.agent.tools import InvestigationDeps, correlate_entities, query_warehouse, search_keyword
+from dd_lab.agent.tools import (
+    InvestigationDeps,
+    correlate_entities,
+    query_warehouse,
+    search_keyword,
+    write_finding,
+)
 from dd_lab.api.jobs import JobManager
 from dd_lab.api.settings import AppSettings, describe_llm
 from dd_lab.case import CaseMeta, CaseStatus, EvidenceSourceMeta, create_case, list_cases, parse_keywords
@@ -87,6 +93,13 @@ class QueryIn(BaseModel):
 
 class ChatIn(BaseModel):
     message: str
+
+
+class AddFindingIn(BaseModel):
+    claim: str
+    citations: list[dict]
+    entity_type: str | None = None
+    entity_value: str | None = None
 
 
 # --------------------------------------------------------------------- settings
@@ -1085,6 +1098,31 @@ def case_chat_send(case_id: str, body: ChatIn) -> dict:
     if not result.ok:
         return {"ok": False, "error": result.error}
     return {"ok": True, "reply": result.reply}
+
+
+@app.post("/api/cases/{case_id}/findings")
+def case_add_finding(case_id: str, body: AddFindingIn) -> dict:
+    """Investigator-triggered save - the "Save as finding" action on a chat
+    reply (or anywhere else in the UI that wants to record a claim). Calls
+    write_finding directly, the same citation-verification path the
+    investigation agent's own write_finding tool call uses - it is NOT
+    reachable from the chat LLM itself (chat.py's deliberately read-only
+    toolset excludes write_finding entirely; see that module's docstring),
+    this is the investigator's own explicit action instead. created_by is
+    hardcoded to "investigator" here - the caller can never claim to be the
+    agent, keeping every finding's real provenance visible in the report
+    (§4 already renders created_by per finding, no report-builder change
+    needed). Every citation is still independently re-verified against the
+    warehouse; a wrong/hallucinated artifact_id fails safely
+    (REJECTED_UNVERIFIED), never silently accepted."""
+    layout = _layout(case_id)
+    if not layout.manifest.is_file():
+        raise HTTPException(404, "case not found")
+    deps = InvestigationDeps(cases_root=Path(_settings.cases_root), case_id=case_id)
+    return write_finding(
+        deps, body.claim, body.citations, body.entity_type, body.entity_value,
+        created_by="investigator",
+    )
 
 
 @app.get("/api/cases/{case_id}/report", response_class=HTMLResponse)

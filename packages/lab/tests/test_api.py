@@ -241,7 +241,8 @@ def test_case_lifecycle_via_api(client):
     # Artifact detail now surfaces the vote fields it always had access to
     # but never selected.
     one = client.get(f"/api/cases/case_api_1/artifacts/{row['artifact_id']}").json()
-    for col in ("regex_vote", "keyword_vote", "ner_vote", "model_vote", "entropy_vote", "relevance_model_score"):
+    vote_cols = ("regex_vote", "keyword_vote", "ner_vote", "model_vote", "entropy_vote")
+    for col in (*vote_cols, "relevance_model_score"):
         assert col in one
 
 
@@ -257,9 +258,8 @@ def test_artifacts_search_matches_source_locator(client):
     from dd_core.casedir import CaseLayout
     from dd_core.enums import SourceType, ValueType
     from dd_core.schema import NormalizedArtifact
-    from dd_lab.etl.warehouse import Warehouse
-
     from dd_lab.api import main as main_mod
+    from dd_lab.etl.warehouse import Warehouse
 
     layout = CaseLayout(main_mod._settings.cases_root, "case_api_1")
     wh = Warehouse(layout.warehouse)
@@ -433,6 +433,56 @@ def test_chat_send_and_history_via_api(client, monkeypatch):
 def test_chat_routes_404_for_an_unknown_case(client):
     assert client.get("/api/cases/does-not-exist/chat").status_code == 404
     assert client.post("/api/cases/does-not-exist/chat", json={"message": "hi"}).status_code == 404
+
+
+def test_investigator_can_save_a_finding_via_the_api(client):
+    """The "Save as finding" action (Phase C, plan magical-dazzling-dragon.md)
+    - an investigator-triggered save, NOT reachable from the chat LLM itself
+    (chat.py's toolset deliberately excludes write_finding entirely). Goes
+    through the exact same citation-verification write_finding always uses,
+    so a real artifact_id is genuinely verified/attributed to "investigator",
+    and a wrong one fails safely rather than being silently accepted."""
+    from datetime import UTC, datetime
+
+    from dd_core.casedir import CaseLayout
+    from dd_core.enums import ArtifactCategory as C
+    from dd_core.enums import SourceType as S
+    from dd_core.schema import ClassificationResult, NormalizedArtifact
+    from dd_lab.api import main as main_mod
+    from dd_lab.etl.warehouse import Warehouse
+
+    layout = CaseLayout(main_mod._settings.cases_root, "case_api_1")
+    wh = Warehouse(layout.warehouse)
+    try:
+        wh.load_artifacts([NormalizedArtifact(
+            artifact_id="finding-a1", case_id="case_api_1", app="discord", source_type=S.INDEXEDDB,
+            source_file="discord/IndexedDB/x", source_locator="loc1", key="content",
+            value="the password is hunter2", extracted_ts=datetime.now(UTC),
+            classification=ClassificationResult(category=C.CREDENTIAL, confidence=0.9),
+        )])
+    finally:
+        wh.close()
+
+    good = client.post("/api/cases/case_api_1/findings", json={
+        "claim": "Discord evidence shows a credential.",
+        "citations": [{"artifact_id": "finding-a1", "quote": "hunter2"}],
+    }).json()
+    assert good["ok"] is True
+    assert good["unverified_citations"] == []
+    # Getting this into an actual generated report (attributed to
+    # "investigator", not "agent") needs Phase D's regenerate-report
+    # endpoint - covered by that phase's own test, not here (no report
+    # exists yet for a case that's never been run/regenerated).
+
+    bad = client.post("/api/cases/case_api_1/findings", json={
+        "claim": "made up claim", "citations": [{"artifact_id": "does-not-exist"}],
+    }).json()
+    assert bad["ok"] is False
+    assert bad["unverified_citations"] == ["does-not-exist"]
+
+    assert client.post(
+        "/api/cases/does-not-exist/findings", json={"claim": "x", "citations": []}
+    ).status_code == 404
 
 
 def test_cache_files_route_works_without_a_run(client):

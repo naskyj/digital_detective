@@ -1788,12 +1788,68 @@ async function vChat(m){
 
   function bubble(role,text){
     const isUser = role==='user';
-    return el('div',{style:
+    const box=el('div',{style:
       'align-self:'+(isUser?'flex-end':'flex-start')+';max-width:78%;'+
       'background:'+(isUser?'var(--accent2)':'var(--bg)')+';color:'+(isUser?'#fff':'var(--fg)')+';'+
       'border:1px solid var(--line);border-radius:10px;padding:8px 12px;'+
       'white-space:pre-wrap;word-break:break-word;font-size:13.5px'},
       text);
+    if(!isUser) box.append(saveAsFindingRow(text));
+    return box;
+  }
+
+  // Investigator-triggered save (Phase C, magical-dazzling-dragon.md) - the
+  // chat LLM itself can never write a finding (chat.py's toolset excludes
+  // write_finding entirely); this is the human's own explicit action,
+  // going through the exact same citation-verification write_finding
+  // always uses. The reply's own tool calls aren't surfaced to the UI
+  // (history_for_ui flattens them away), so the investigator pastes the
+  // artifact_id(s) themselves - a wrong one just fails verification
+  // safely, never silently accepted.
+  function saveAsFindingRow(replyText){
+    const toggle=el('a',{style:'display:block;margin-top:6px;font-size:12px;cursor:pointer;opacity:.75'},'💾 Save as finding');
+    const form=el('div',{hidden:true,style:'margin-top:8px;padding-top:8px;border-top:1px solid var(--line)'});
+    const wrap=el('div',{},toggle,form);
+
+    function buildForm(){
+      const claim=el('textarea',{style:'width:100%;min-height:50px;font-size:13px'},replyText);
+      const citeWrap=el('div',{});
+      const status=el('div',{class:'hint',style:'margin-top:6px'});
+      function citeRow(){
+        return el('div',{class:'row',style:'margin-top:4px;gap:6px'},
+          el('input',{placeholder:'artifact_id',class:'mono',style:'flex:1'}),
+          el('input',{placeholder:'exact quote (optional)',style:'flex:1'}));
+      }
+      citeWrap.append(citeRow());
+      const addCite=el('a',{style:'font-size:12px;cursor:pointer;opacity:.75;display:inline-block;margin-top:4px'},
+        '+ add another citation');
+      addCite.onclick=()=>citeWrap.append(citeRow());
+      const saveBtn=el('button',{class:'sec'},'Save');
+      saveBtn.onclick=async()=>{
+        const citations=[...citeWrap.children].map(r=>{
+          const [aid,quote]=r.querySelectorAll('input');
+          return {artifact_id: aid.value.trim(), quote: quote.value.trim()||undefined};
+        }).filter(c=>c.artifact_id);
+        if(!citations.length){ status.textContent='At least one artifact_id is required.'; return; }
+        saveBtn.disabled=true; status.textContent='Saving…';
+        try{
+          const r=await api('/cases/'+id+'/findings',{method:'POST',
+            body:JSON.stringify({claim: claim.value, citations})});
+          status.innerHTML='';
+          status.append(r.ok
+            ? el('span',{class:'pill ok'},'✓ verified — saved to findings')
+            : el('span',{class:'pill bad'},'✗ rejected — '+(r.unverified_citations||[]).join(', ')+' failed verification'));
+        }catch(e){ status.textContent='Could not save: '+e.message; }
+        finally{ saveBtn.disabled=false; }
+      };
+      form.append(claim, citeWrap, addCite, el('div',{}, saveBtn), status);
+    }
+
+    toggle.onclick=()=>{
+      if(form.hidden && !form.childNodes.length) buildForm();
+      form.hidden=!form.hidden;
+    };
+    return wrap;
   }
 
   async function loadHistory(){

@@ -386,6 +386,7 @@ def write_finding(
     citations: list[dict],
     entity_type: str | None = None,
     entity_value: str | None = None,
+    created_by: str = "agent",
 ) -> dict:
     """Register a conclusion with its supporting evidence. `citations` is a
     list of {"artifact_id": ..., "quote": <exact substring you are relying on,
@@ -395,7 +396,16 @@ def write_finding(
     citation that fails verification — or with no citations at all — is
     rejected immediately: it is never usable, never judged, never reported.
     This is the ONLY way a claim becomes part of the case; do not put
-    conclusions only in your final text output."""
+    conclusions only in your final text output.
+
+    `created_by` defaults to "agent" (every existing caller - the
+    investigation agent's own tool call, the deterministic pipeline's
+    correlate_and_write_findings). The investigator-triggered "save as
+    finding" endpoint (api/main.py's case_add_finding) passes
+    "investigator" instead - report §4 already renders created_by per
+    finding, so this is visible provenance for free, distinguishing a
+    human-saved claim from one the agent wrote autonomously during its own
+    investigation."""
     wh = Warehouse(deps.layout.warehouse)
     try:
         cite_results = [
@@ -413,7 +423,7 @@ def write_finding(
         entity_value=entity_value,
         citations=cite_results,
         status=FindingStatus.VERIFIED if all_ok else FindingStatus.REJECTED_UNVERIFIED,
-        created_by="agent",
+        created_by=created_by,
     )
     FindingsStore(deps.layout.findings_log).add(finding)
     return {

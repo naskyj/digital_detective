@@ -41,6 +41,26 @@ def test_write_finding_with_good_citation_is_verified(tmp_path):
     assert result["unverified_citations"] == []
 
 
+def test_write_finding_created_by_defaults_to_agent_but_can_be_overridden(tmp_path):
+    """Every existing caller (the investigation agent's own tool call, the
+    deterministic pipeline's correlate_and_write_findings) relies on the
+    "agent" default - confirmed unchanged. The investigator-triggered
+    "save as finding" API endpoint (main.py::case_add_finding) is the one
+    real caller that passes created_by="investigator" - this is the direct,
+    tools.py-level proof that value actually lands on the stored Finding
+    (visible in the report's §4 provenance line), not just accepted and
+    dropped."""
+    deps = _deps(tmp_path)
+    default_result = write_finding(deps, "default caller", [{"artifact_id": "a1"}])
+    investigator_result = write_finding(
+        deps, "investigator caller", [{"artifact_id": "a1"}], created_by="investigator",
+    )
+
+    findings = {f["finding_id"]: f for f in list_findings(deps)["findings"]}
+    assert findings[default_result["finding_id"]]["created_by"] == "agent"
+    assert findings[investigator_result["finding_id"]]["created_by"] == "investigator"
+
+
 def test_write_finding_with_bad_artifact_id_is_rejected(tmp_path):
     deps = _deps(tmp_path)
     result = write_finding(deps, "made up claim", [{"artifact_id": "does-not-exist"}])
