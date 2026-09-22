@@ -485,6 +485,59 @@ def test_investigator_can_save_a_finding_via_the_api(client):
     ).status_code == 404
 
 
+def test_regenerate_report_gets_a_saved_finding_into_an_actual_report(client):
+    """The other half of "Save as finding": build_report/generate_report
+    exist and work, but the only way to get a NEW report was the full /run
+    job - a finding saved via POST /findings had nowhere to actually reach
+    the report without it. This is the full round trip: load one artifact,
+    save a finding citing it, regenerate the report (no /run at all), and
+    confirm the finding shows up - attributed to "investigator", not
+    "agent", proving provenance survives all the way through."""
+    from datetime import UTC, datetime
+
+    from dd_core.casedir import CaseLayout
+    from dd_core.enums import ArtifactCategory as C
+    from dd_core.enums import SourceType as S
+    from dd_core.schema import ClassificationResult, NormalizedArtifact
+    from dd_lab.api import main as main_mod
+    from dd_lab.etl.warehouse import Warehouse
+
+    layout = CaseLayout(main_mod._settings.cases_root, "case_api_1")
+    wh = Warehouse(layout.warehouse)
+    try:
+        wh.load_artifacts([NormalizedArtifact(
+            artifact_id="regen-a1", case_id="case_api_1", app="discord", source_type=S.INDEXEDDB,
+            source_file="discord/IndexedDB/x", source_locator="loc1", key="content",
+            value="a very specific claim marker xyz123", extracted_ts=datetime.now(UTC),
+            classification=ClassificationResult(category=C.CHAT_CONTENT, confidence=0.9),
+        )])
+        wh.build_views()  # not automatic outside the full ingest pipeline - build_report needs the v_* views
+    finally:
+        wh.close()
+
+    saved = client.post("/api/cases/case_api_1/findings", json={
+        "claim": "Marker xyz123 found in Discord evidence.",
+        "citations": [{"artifact_id": "regen-a1", "quote": "xyz123"}],
+    }).json()
+    assert saved["ok"] is True
+
+    assert client.get("/api/cases/case_api_1/report").status_code == 404  # no report yet, confirms the gap
+
+    job = client.post("/api/cases/case_api_1/regenerate-report").json()
+    for _ in range(60):
+        j = client.get(f"/api/jobs/{job['job_id']}").json()
+        if j["status"] in {"done", "error"}:
+            break
+        time.sleep(0.2)
+    assert j["status"] == "done", j.get("error")
+
+    report_text = client.get("/api/cases/case_api_1/report").text
+    assert "Marker xyz123 found in Discord evidence." in report_text
+    assert "investigator" in report_text
+
+    assert client.post("/api/cases/does-not-exist/regenerate-report").status_code == 404
+
+
 def test_cache_files_route_works_without_a_run(client):
     """Unlike /artifacts, the cache-file browser reads straight off the
     evidence directory - it must work before "Run analysis" has ever

@@ -468,6 +468,40 @@ def reclassify_case(case_id: str) -> dict:
     return {"job_id": job_id}
 
 
+@app.post("/api/cases/{case_id}/regenerate-report")
+def regenerate_report(case_id: str) -> dict:
+    """Rebuild the report from whatever's currently in the warehouse and
+    logs/findings.json - no re-parse, re-classify, or re-investigate,
+    unlike "Run analysis"/"Re-run analysis" above. Same real gap this
+    session already found and fixed once for classification
+    (classify_warehouse existed, fully tested, with zero production call
+    sites until /reclassify was added): build_report/generate_report exist
+    and work, but the ONLY way to get a new report was the full /run job -
+    a finding saved via POST /findings (the "Save as finding" chat action)
+    had nowhere to actually reach the report without it. build_report
+    reads findings.json fresh every call and seal_report's the new file
+    with its own timestamp+hash - no in-place edit, no conflict with a
+    previous report's own seal."""
+    layout = _layout(case_id)
+    if not layout.manifest.is_file():
+        raise HTTPException(404, "case not found")
+    if not layout.warehouse.is_file():
+        raise HTTPException(409, "case not processed yet - run analysis first")
+    if _jobs.active_for(case_id):
+        raise HTTPException(409, "a job is already running for this case")
+
+    def work(progress) -> dict:
+        from dd_lab.report import build_report
+
+        progress("regenerating report...")
+        path = build_report(_settings.cases_root, case_id, actor="investigator")
+        progress(f"report written to {path}")
+        return {"ok": True, "report_path": str(path)}
+
+    job_id = _jobs.submit("regenerate-report", work, case_id=case_id)
+    return {"job_id": job_id}
+
+
 @app.get("/api/cases/{case_id}/relevance")
 def case_relevance(case_id: str) -> dict:
     """Relevance breakdown - mirrors case_classification's shape (by-

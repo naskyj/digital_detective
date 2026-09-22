@@ -679,6 +679,22 @@ async function vCase(m){
     }
   }
 
+  async function startRegenerateReport(btn){
+    // Rebuilds the report from whatever's currently in the warehouse and
+    // logs/findings.json - no re-parse/re-classify/re-investigate. Use
+    // after saving a finding from chat (Save as finding), or after
+    // Re-classify, to get those changes into an actual report file.
+    btn.disabled=true; btn.innerHTML='<span class="spin"></span>starting…';
+    runlog.style.display='block'; runlog.textContent='';
+    try{
+      const r=await api('/cases/'+id+'/regenerate-report',{method:'POST'});
+      await pollJob(r.job_id,runlog,()=>go('case',id));
+    }catch(err){
+      runlog.textContent='Could not start: '+err.message;
+      btn.disabled=false; btn.textContent='🔄  Regenerate report';
+    }
+  }
+
   if(running){
     actions.append(
       el('div',{class:'row'},
@@ -703,6 +719,9 @@ async function vCase(m){
       el('button',{class:'sec',title:'Re-classify artifacts already in the warehouse, in place - no re-parse '+
         '(cheaper than Re-run analysis; use after changing the relevance/category model directory)',
         onclick:e=>startReclassify(e.target)},'↻  Re-classify'),
+      el('button',{class:'sec',title:'Rebuild the report from what\'s currently in the warehouse and '+
+        'findings - no re-parse/re-classify (use after Save as finding, or after Re-classify)',
+        onclick:e=>startRegenerateReport(e.target)},'🔄  Regenerate report'),
       el('button',{class:'sec',onclick:()=>document.getElementById('browser')
         ?.scrollIntoView({behavior:'smooth'})},'🔍  Browse artifacts'),
       el('button',{class:'ghost',onclick:()=>go('audit',id)},'📋  Audit trail')),
