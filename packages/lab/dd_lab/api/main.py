@@ -451,6 +451,7 @@ def reclassify_case(
     reuse_model_scores: bool = False,
     only_unscored: bool = False,
     exclude_source_types: str | None = None,
+    source_types: str | None = None,
 ) -> dict:
     """Re-run classification against artifacts already in the warehouse -
     cheap and in-place (a single set-based UPDATE per batch via
@@ -490,6 +491,8 @@ def reclassify_case(
 
     excluded = tuple(s.strip() for s in exclude_source_types.split(",") if s.strip()) \
         if exclude_source_types else None
+    included = tuple(s.strip() for s in source_types.split(",") if s.strip()) \
+        if source_types else None
 
     def work(progress) -> dict:
         from dd_lab.classify import classify_warehouse
@@ -500,6 +503,7 @@ def reclassify_case(
             + ("only artifacts with no stored model score" if only_unscored else "artifacts")
             + " already in the warehouse"
             + (f", skipping source types: {', '.join(excluded)}" if excluded else "")
+            + (f", ONLY source types: {', '.join(included)}" if included else "")
             + (" (reusing stored relevance-model scores)" if reuse_model_scores else "")
             + "..."
         )
@@ -508,7 +512,7 @@ def reclassify_case(
         try:
             result = classify_warehouse(
                 wh, clf, reuse_model_scores=reuse_model_scores, only_unscored=only_unscored,
-                exclude_source_types=excluded,
+                exclude_source_types=excluded, source_types=included,
             )
         finally:
             wh.close()

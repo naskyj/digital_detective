@@ -52,6 +52,7 @@ def classify_warehouse(
     reuse_model_scores: bool = False,
     only_unscored: bool = False,
     exclude_source_types: tuple[str, ...] | None = None,
+    source_types: tuple[str, ...] | None = None,
 ) -> ClassifyResult:
     """Re-classify every artifact already in the warehouse.
 
@@ -90,7 +91,8 @@ def classify_warehouse(
     classifier = classifier or Classifier()
     result = ClassifyResult()
     for rows in wh.iter_for_classification(
-        only_unscored=only_unscored, exclude_source_types=exclude_source_types
+        only_unscored=only_unscored, exclude_source_types=exclude_source_types,
+        source_types=source_types,
     ):
         crs = classifier.classify_batch(rows, reuse_model_scores=reuse_model_scores)
         updates = []

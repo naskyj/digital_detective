@@ -310,6 +310,7 @@ class Warehouse:
         *,
         only_unscored: bool = False,
         exclude_source_types: tuple[str, ...] | None = None,
+        source_types: tuple[str, ...] | None = None,
     ) -> Iterator[list[dict]]:
         """Yield batches of {artifact_id, key, value, value_type, app,
         source_type, deleted, relevance_model_score} for re-classification.
@@ -337,6 +338,12 @@ class Warehouse:
         artifact still gets a category/relevant/relevance_score from the
         ingest-time or rules-only pass.
 
+        `source_types` is the inverse: process ONLY these. Combined with
+        `only_unscored=True` this is how a long model pass over one huge
+        source type (e.g. memory_string) runs in the background without
+        touching anything already scored - every other row is simply never
+        selected, so nothing else is rewritten.
+
         Pagination is KEYSET (artifact_id > last seen), not LIMIT/OFFSET,
         specifically because of `only_unscored`: the caller writes scores
         into the very column being filtered on, so the result set shrinks
@@ -353,6 +360,10 @@ class Warehouse:
             placeholders = ", ".join("?" * len(exclude_source_types))
             clauses.append(f"source_type NOT IN ({placeholders})")
             params.extend(exclude_source_types)
+        if source_types:
+            placeholders = ", ".join("?" * len(source_types))
+            clauses.append(f"source_type IN ({placeholders})")
+            params.extend(source_types)
         where = "".join(f"{c} AND " for c in clauses)
         last_id = ""
         while True:

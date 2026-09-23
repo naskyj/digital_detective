@@ -97,7 +97,26 @@ _VALUE_PATTERNS: dict[C, list[tuple[re.Pattern, float]]] = {
         (re.compile(r"device_id_salt", re.I), 0.7),
     ],
     C.USER: [
-        (re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]{2,}\b"), 0.7),  # email
+        # Email. The final label must look like a real TLD, NOT a file
+        # extension - `name@2x.png` (the retina-image naming convention) is
+        # syntactically identical to an email address and the naive pattern
+        # matched it. Measured on a real 675k-artifact case: 24,255
+        # artifacts matched `@<something>.<file-ext>`, 24,141 of them
+        # flagged relevant, and every one of the top 100 cross-source
+        # "correlated identifiers" was a bogus email of this shape
+        # (alert@2x.png, chat@2x.png, connection@3x.png ...), which made the
+        # whole correlation view useless.
+        (
+            re.compile(
+                r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)*\."
+                r"(?!(?:png|jpe?g|gif|svg|webp|ico|bmp|tiff?|css|js|mjs|json|xml|html?|"
+                r"woff2?|ttf|otf|eot|map|mp[34]|wav|ogg|webm|mov|avi|pdf|zip|gz|tar|"
+                r"exe|dll|dylib|so|bin|dat|log|txt|md)\b)"
+                r"[A-Za-z]{2,24}\b",
+                re.I,
+            ),
+            0.7,
+        ),
     ],
 }
 

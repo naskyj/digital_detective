@@ -50,6 +50,44 @@ def test_expected_category(key, value, expected):
     )
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "noconnection@2x.png",   # retina-image naming - the real offender
+        "chat@2x.png",
+        "connection@3x.png",
+        "icon@3x.svg",
+        "sprite@2x.webp",
+        "x@y.woff2",
+        "a@b.js",
+    ],
+)
+def test_image_and_asset_filenames_are_not_emails(value):
+    """`name@2x.png` is syntactically identical to an email address, and the
+    naive email pattern matched it. Measured on a real 675k-artifact case:
+    24,255 artifacts matched `@<something>.<file-ext>`, 24,141 flagged
+    relevant, and ALL of the top 100 cross-source "correlated identifiers"
+    were bogus emails of this shape - which made the correlation view
+    useless."""
+    r = C.classify("mem.string", value, source_type="memory_string")
+    assert r.regex_vote != "USER", f"{value!r} was treated as an email address"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "suspect@example.com",
+        "appro@openssl.org",
+        "user@mail.co.uk",
+        "First.Last+tag@sub.domain.io",
+    ],
+)
+def test_real_emails_still_detected(value):
+    """The fix above must not cost real email recall."""
+    r = C.classify("cache.body.account.email", value)
+    assert r.category == "USER"
+
+
 def test_confidence_bounds_and_votes_recorded():
     r = C.classify("local_storage.app.password", "s3cr3t")
     assert 0.0 <= r.confidence <= 1.0

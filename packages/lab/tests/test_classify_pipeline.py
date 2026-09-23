@@ -210,6 +210,45 @@ def test_exclude_source_types_skips_them_but_leaves_them_classified(tmp_path):
         wh.close()
 
 
+def test_source_types_processes_only_those_leaving_everything_else_untouched(tmp_path):
+    """The inverse of exclude_source_types: run a long model pass over ONE
+    huge source type in the background without rewriting anything else.
+    Rows outside the filter must not be selected at all - not re-scored,
+    not re-classified, not touched."""
+    seen = []
+
+    class CountingVoter:
+        def batch(self, items):
+            seen.extend(st for _k, _v, st in items)
+            return [0.9 for _ in items]
+
+    wh = Warehouse(tmp_path / "warehouse" / "case.duckdb")
+    try:
+        wh.load_artifacts([
+            _artifact("k1", "some cache value", source_type=SourceType.CACHE),
+            _artifact("k2", "a carved memory string", source_type=SourceType.MEMORY_STRING),
+        ])
+        # Give the cache row a score, as a prior scoped pass would have.
+        wh.apply_classifications([
+            ("a-k1", {"category": "GENERAL", "confidence": 0.1, "relevance_model_score": 0.42}),
+        ])
+
+        result = classify_warehouse(
+            wh, Classifier(relevance_voter=CountingVoter()),
+            only_unscored=True, source_types=("memory_string",),
+        )
+        assert seen == ["memory_string"], "only the named source type may reach the model"
+        assert result.classified == 1
+
+        rows = {r["source_type"]: r for r in wh.query(
+            "SELECT source_type, relevance_model_score FROM artifacts")}
+        assert rows["memory_string"]["relevance_model_score"] == 0.9
+        # Untouched - still exactly what the earlier pass stored.
+        assert rows["cache"]["relevance_model_score"] == 0.42
+    finally:
+        wh.close()
+
+
 def test_iter_for_classification_yields_app_source_type_deleted(tmp_path):
     wh = Warehouse(tmp_path / "warehouse" / "case.duckdb")
     try:
