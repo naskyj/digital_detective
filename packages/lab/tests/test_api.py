@@ -84,6 +84,34 @@ def test_health_and_settings(client):
     assert "ok" in probe and probe["provider"] == "anthropic"
 
 
+def test_saving_settings_does_not_kill_a_running_job(client):
+    """Regression for a real, destructive bug hit on a live 675k-artifact
+    case. JobManager.__init__ marks every running job as errored (correct
+    on a genuine app restart - those threads are gone). put_settings used
+    to rebuild it unconditionally, so saving settings mid-run falsely
+    flagged the in-flight job "interrupted", which ALSO cleared the
+    active_for() guard that blocks a second job on the same case - letting
+    a full Run analysis start on top of it and delete an app's artifacts
+    via reset_app() mid-flight."""
+    from dd_lab.api import main as main_mod
+
+    def slow_work(progress):
+        time.sleep(1.5)
+        return {"ok": True}
+
+    job_id = main_mod._jobs.submit("test", slow_work, case_id="case_api_1")
+    for _ in range(20):
+        if main_mod._jobs.get(job_id)["status"] == "running":
+            break
+        time.sleep(0.05)
+
+    client.put("/api/settings", json={"use_zeroshot": False})
+
+    assert main_mod._jobs.get(job_id)["status"] == "running", "settings save killed a live job"
+    assert main_mod._jobs.active_for("case_api_1"), "settings save cleared the concurrent-job guard"
+    assert client.post("/api/cases/case_api_1/run").status_code == 409
+
+
 def test_active_jobs_listing(client):
     """Backs the persistent sidebar indicator: a job shows up while it's
     queued/running and disappears once it finishes - proof the indicator

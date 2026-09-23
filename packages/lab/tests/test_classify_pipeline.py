@@ -166,6 +166,50 @@ def test_only_unscored_terminates_even_when_a_row_never_gets_a_score(tmp_path):
         wh.close()
 
 
+def test_exclude_source_types_skips_them_but_leaves_them_classified(tmp_path):
+    """Relevance-model inference is too slow on CPU to run over a whole
+    large case (memory_string alone was ~547k of 675k on the real case), so
+    a model pass can be scoped away from a source type. The excluded rows
+    must still end up fully classified - just with rules-only relevance."""
+    seen = []
+
+    class CountingVoter:
+        def batch(self, items):
+            seen.extend(st for _k, _v, st in items)
+            return [0.9 for _ in items]
+
+    wh = Warehouse(tmp_path / "warehouse" / "case.duckdb")
+    try:
+        wh.load_artifacts([
+            _artifact("k1", "some cache value", source_type=SourceType.CACHE),
+            _artifact("k2", "a password is hunter2", source_type=SourceType.MEMORY_STRING),
+        ])
+        # The real sequence: everything is classified first (rules-only, fast),
+        # THEN an expensive model pass runs scoped to the sources worth it.
+        classify_warehouse(wh, Classifier())
+        before = {r["source_type"]: r["category"] for r in wh.query(
+            "SELECT source_type, category FROM artifacts")}
+        assert before["memory_string"] is not None
+
+        result = classify_warehouse(
+            wh, Classifier(relevance_voter=CountingVoter()),
+            exclude_source_types=("memory_string",),
+        )
+        assert seen == ["cache"], "memory_string must never reach the model"
+        assert result.classified == 1  # only the non-excluded row was re-processed
+
+        rows = {r["source_type"]: r for r in wh.query(
+            "SELECT source_type, category, relevant, relevance_model_score FROM artifacts")}
+        assert rows["cache"]["relevance_model_score"] == 0.9
+        assert rows["memory_string"]["relevance_model_score"] is None
+        # The excluded row KEEPS its earlier classification - skipped by the
+        # MODEL, not wiped or left unclassified.
+        assert rows["memory_string"]["category"] == before["memory_string"]
+        assert rows["memory_string"]["relevant"] is not None
+    finally:
+        wh.close()
+
+
 def test_iter_for_classification_yields_app_source_type_deleted(tmp_path):
     wh = Warehouse(tmp_path / "warehouse" / "case.duckdb")
     try:

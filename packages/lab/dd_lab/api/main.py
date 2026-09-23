@@ -138,10 +138,25 @@ def test_judge_llm() -> dict:
 def put_settings(body: SettingsIn) -> dict:
     global _jobs
     data = body.model_dump(exclude_none=True)
+    old_root = _settings.cases_root
     for k, v in data.items():
         setattr(_settings, k, v)
     _settings.save()
-    _jobs = JobManager(Path(_settings.cases_root) / ".dd_jobs.sqlite")
+    # ONLY rebuild the job manager when the cases root actually moved (the
+    # jobs DB lives under it, so it's a genuinely different database then).
+    #
+    # Rebuilding it unconditionally was a real, destructive bug, hit for
+    # real on a live case: JobManager.__init__ marks every 'queued'/
+    # 'running' job as errored, because on a genuine app restart those
+    # worker threads are gone. But a settings save does NOT restart the
+    # app - the threads are still running. So saving settings mid-run
+    # falsely flagged an in-flight job as "interrupted", which ALSO
+    # cleared the `_jobs.active_for(case_id)` guard that stops a second
+    # job starting on the same case. On the real 675k-artifact case that
+    # let a full "Run analysis" start on top of a running re-classify,
+    # and its reset_app() step deleted an app's artifacts mid-flight.
+    if _settings.cases_root != old_root:
+        _jobs = JobManager(Path(_settings.cases_root) / ".dd_jobs.sqlite")
     return get_settings()
 
 
@@ -432,7 +447,10 @@ def run_case(case_id: str) -> dict:
 
 @app.post("/api/cases/{case_id}/reclassify")
 def reclassify_case(
-    case_id: str, reuse_model_scores: bool = False, only_unscored: bool = False
+    case_id: str,
+    reuse_model_scores: bool = False,
+    only_unscored: bool = False,
+    exclude_source_types: str | None = None,
 ) -> dict:
     """Re-run classification against artifacts already in the warehouse -
     cheap and in-place (a single set-based UPDATE per batch via
@@ -455,7 +473,13 @@ def reclassify_case(
     a score yet - for finishing an interrupted model run without redoing
     its completed work. Typical sequence after an interrupted run:
     `?only_unscored=true` (fills the gap), then `?reuse_model_scores=true`
-    (re-derives relevance uniformly across the whole case, ~30 min)."""
+    (re-derives relevance uniformly across the whole case, ~30 min).
+
+    `exclude_source_types` is a comma-separated list of source types to
+    skip - for scoping an expensive model pass away from a source type too
+    large to be worth CPU inference (e.g. `memory_string`, ~547k of 675k
+    artifacts on the real case). Skipped rows stay fully classified, just
+    with rules-only relevance."""
     layout = _layout(case_id)
     if not layout.manifest.is_file():
         raise HTTPException(404, "case not found")
@@ -463,6 +487,9 @@ def reclassify_case(
         raise HTTPException(409, "case not processed yet - run analysis first")
     if _jobs.active_for(case_id):
         raise HTTPException(409, "a job is already running for this case")
+
+    excluded = tuple(s.strip() for s in exclude_source_types.split(",") if s.strip()) \
+        if exclude_source_types else None
 
     def work(progress) -> dict:
         from dd_lab.classify import classify_warehouse
@@ -472,6 +499,7 @@ def reclassify_case(
             "re-classifying "
             + ("only artifacts with no stored model score" if only_unscored else "artifacts")
             + " already in the warehouse"
+            + (f", skipping source types: {', '.join(excluded)}" if excluded else "")
             + (" (reusing stored relevance-model scores)" if reuse_model_scores else "")
             + "..."
         )
@@ -479,7 +507,8 @@ def reclassify_case(
         wh = Warehouse(layout.warehouse)
         try:
             result = classify_warehouse(
-                wh, clf, reuse_model_scores=reuse_model_scores, only_unscored=only_unscored
+                wh, clf, reuse_model_scores=reuse_model_scores, only_unscored=only_unscored,
+                exclude_source_types=excluded,
             )
         finally:
             wh.close()

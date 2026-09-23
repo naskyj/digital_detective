@@ -305,7 +305,11 @@ class Warehouse:
         return self.con.execute("SELECT count(*) FROM artifacts").fetchone()[0]
 
     def iter_for_classification(
-        self, batch_size: int = 20000, *, only_unscored: bool = False
+        self,
+        batch_size: int = 20000,
+        *,
+        only_unscored: bool = False,
+        exclude_source_types: tuple[str, ...] | None = None,
     ) -> Iterator[list[dict]]:
         """Yield batches of {artifact_id, key, value, value_type, app,
         source_type, deleted, relevance_model_score} for re-classification.
@@ -324,6 +328,15 @@ class Warehouse:
         without redoing the rows it already got through (on the real case
         that was 116,725 rows instead of 675,463).
 
+        `exclude_source_types` skips whole source types. Relevance-model
+        inference is far too slow on CPU to run over every artifact of a
+        big case (memory_string alone was ~547k of 675k on the real case,
+        i.e. days of compute), so this scopes an expensive model pass to
+        the sources worth paying for while the excluded ones keep
+        rules-only relevance. It does NOT leave them unclassified - every
+        artifact still gets a category/relevant/relevance_score from the
+        ingest-time or rules-only pass.
+
         Pagination is KEYSET (artifact_id > last seen), not LIMIT/OFFSET,
         specifically because of `only_unscored`: the caller writes scores
         into the very column being filtered on, so the result set shrinks
@@ -333,14 +346,21 @@ class Warehouse:
         NULL and be re-yielded forever. Keying on artifact_id always moves
         forward regardless of what was or wasn't written.
         """
-        where = "WHERE relevance_model_score IS NULL AND " if only_unscored else "WHERE "
+        clauses, params = [], []
+        if only_unscored:
+            clauses.append("relevance_model_score IS NULL")
+        if exclude_source_types:
+            placeholders = ", ".join("?" * len(exclude_source_types))
+            clauses.append(f"source_type NOT IN ({placeholders})")
+            params.extend(exclude_source_types)
+        where = "".join(f"{c} AND " for c in clauses)
         last_id = ""
         while True:
             rows = self.query(
                 "SELECT artifact_id, key, value, value_type, app, source_type, deleted, "
-                f"relevance_model_score FROM artifacts {where} artifact_id > ? "
+                f"relevance_model_score FROM artifacts WHERE {where} artifact_id > ? "
                 f"ORDER BY artifact_id LIMIT {batch_size}",
-                [last_id],
+                [*params, last_id],
             )
             if not rows:
                 return

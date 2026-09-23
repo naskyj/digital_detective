@@ -51,6 +51,7 @@ def classify_warehouse(
     *,
     reuse_model_scores: bool = False,
     only_unscored: bool = False,
+    exclude_source_types: tuple[str, ...] | None = None,
 ) -> ClassifyResult:
     """Re-classify every artifact already in the warehouse.
 
@@ -71,6 +72,11 @@ def classify_warehouse(
     plain reuse_model_scores pass (model never runs, on everything) to
     re-derive relevance uniformly across the whole case.
 
+    `exclude_source_types` scopes an expensive model pass away from source
+    types not worth paying CPU inference for (memory_string was ~547k of
+    675k artifacts on the real case - days of compute). Excluded rows are
+    still fully classified, just with rules-only relevance.
+
     Uses classify_batch(), not classify() in a per-row loop - a real,
     measured perf win when a relevance model is configured (see
     ensemble.py::Classifier.classify_batch and model.py::
@@ -83,7 +89,9 @@ def classify_warehouse(
     """
     classifier = classifier or Classifier()
     result = ClassifyResult()
-    for rows in wh.iter_for_classification(only_unscored=only_unscored):
+    for rows in wh.iter_for_classification(
+        only_unscored=only_unscored, exclude_source_types=exclude_source_types
+    ):
         crs = classifier.classify_batch(rows, reuse_model_scores=reuse_model_scores)
         updates = []
         for r, cr in zip(rows, crs, strict=True):
