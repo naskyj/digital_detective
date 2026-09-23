@@ -304,7 +304,9 @@ class Warehouse:
     def count(self) -> int:
         return self.con.execute("SELECT count(*) FROM artifacts").fetchone()[0]
 
-    def iter_for_classification(self, batch_size: int = 20000) -> Iterator[list[dict]]:
+    def iter_for_classification(
+        self, batch_size: int = 20000, *, only_unscored: bool = False
+    ) -> Iterator[list[dict]]:
         """Yield batches of {artifact_id, key, value, value_type, app,
         source_type, deleted, relevance_model_score} for re-classification.
         app/source_type/deleted are needed by Classifier.classify()'s
@@ -315,18 +317,35 @@ class Warehouse:
         it's already holding. relevance_model_score is the previously-stored
         model output, for classify_batch(reuse_model_scores=True) - lets a
         re-classify that only changes the COMBINATION logic skip re-running
-        the (very expensive) relevance model entirely."""
-        offset = 0
+        the (very expensive) relevance model entirely.
+
+        `only_unscored=True` yields just the rows that have no stored
+        relevance_model_score yet - for finishing an interrupted model run
+        without redoing the rows it already got through (on the real case
+        that was 116,725 rows instead of 675,463).
+
+        Pagination is KEYSET (artifact_id > last seen), not LIMIT/OFFSET,
+        specifically because of `only_unscored`: the caller writes scores
+        into the very column being filtered on, so the result set shrinks
+        as it iterates and OFFSET would silently skip rows. Taking "the
+        first N unscored" each time instead would be worse still - rows the
+        empty-body gate resolves never GET a model score, so they'd stay
+        NULL and be re-yielded forever. Keying on artifact_id always moves
+        forward regardless of what was or wasn't written.
+        """
+        where = "WHERE relevance_model_score IS NULL AND " if only_unscored else "WHERE "
+        last_id = ""
         while True:
             rows = self.query(
                 "SELECT artifact_id, key, value, value_type, app, source_type, deleted, "
-                "relevance_model_score FROM artifacts "
-                f"ORDER BY artifact_id LIMIT {batch_size} OFFSET {offset}"
+                f"relevance_model_score FROM artifacts {where} artifact_id > ? "
+                f"ORDER BY artifact_id LIMIT {batch_size}",
+                [last_id],
             )
             if not rows:
                 return
             yield rows
-            offset += batch_size
+            last_id = rows[-1]["artifact_id"]
 
     def apply_classifications(self, updates: Iterable[tuple[str, dict]]) -> int:
         """Bulk-apply classification results in a single UPDATE ... FROM join per batch.

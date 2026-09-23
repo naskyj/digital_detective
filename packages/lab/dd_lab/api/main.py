@@ -431,7 +431,9 @@ def run_case(case_id: str) -> dict:
 
 
 @app.post("/api/cases/{case_id}/reclassify")
-def reclassify_case(case_id: str, reuse_model_scores: bool = False) -> dict:
+def reclassify_case(
+    case_id: str, reuse_model_scores: bool = False, only_unscored: bool = False
+) -> dict:
     """Re-run classification against artifacts already in the warehouse -
     cheap and in-place (a single set-based UPDATE per batch via
     classify_warehouse), unlike "Run analysis" above which re-parses from
@@ -447,7 +449,13 @@ def reclassify_case(case_id: str, reuse_model_scores: bool = False) -> dict:
     model, re-deriving relevance from each row's already-stored score
     instead (see classify_warehouse). On the real 675k-artifact case that
     is the difference between ~30 minutes and ~27 hours - use it whenever
-    only the combination logic changed, not the model itself."""
+    only the combination logic changed, not the model itself.
+
+    `only_unscored=true` runs the model over ONLY the rows that don't have
+    a score yet - for finishing an interrupted model run without redoing
+    its completed work. Typical sequence after an interrupted run:
+    `?only_unscored=true` (fills the gap), then `?reuse_model_scores=true`
+    (re-derives relevance uniformly across the whole case, ~30 min)."""
     layout = _layout(case_id)
     if not layout.manifest.is_file():
         raise HTTPException(404, "case not found")
@@ -461,14 +469,18 @@ def reclassify_case(case_id: str, reuse_model_scores: bool = False) -> dict:
         from dd_lab.etl.warehouse import Warehouse
 
         progress(
-            "re-classifying artifacts already in the warehouse"
+            "re-classifying "
+            + ("only artifacts with no stored model score" if only_unscored else "artifacts")
+            + " already in the warehouse"
             + (" (reusing stored relevance-model scores)" if reuse_model_scores else "")
             + "..."
         )
         clf = _settings.build_classifier()
         wh = Warehouse(layout.warehouse)
         try:
-            result = classify_warehouse(wh, clf, reuse_model_scores=reuse_model_scores)
+            result = classify_warehouse(
+                wh, clf, reuse_model_scores=reuse_model_scores, only_unscored=only_unscored
+            )
         finally:
             wh.close()
         progress(f"re-classified {result.classified} artifacts")

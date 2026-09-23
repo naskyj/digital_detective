@@ -46,7 +46,11 @@ def classify_stream(
 
 
 def classify_warehouse(
-    wh: Warehouse, classifier: Classifier | None = None, *, reuse_model_scores: bool = False
+    wh: Warehouse,
+    classifier: Classifier | None = None,
+    *,
+    reuse_model_scores: bool = False,
+    only_unscored: bool = False,
 ) -> ClassifyResult:
     """Re-classify every artifact already in the warehouse.
 
@@ -60,6 +64,13 @@ def classify_warehouse(
     different relevance model, or for rows that never had one - there is
     nothing stored to reuse, and those rows fall back to rules-only.
 
+    `only_unscored=True` processes ONLY the rows with no stored model score
+    - for finishing an interrupted model run without redoing what it
+    already completed. The two flags are opposites in practice: use
+    only_unscored (model runs, on the remainder) to fill the gap, then a
+    plain reuse_model_scores pass (model never runs, on everything) to
+    re-derive relevance uniformly across the whole case.
+
     Uses classify_batch(), not classify() in a per-row loop - a real,
     measured perf win when a relevance model is configured (see
     ensemble.py::Classifier.classify_batch and model.py::
@@ -72,7 +83,7 @@ def classify_warehouse(
     """
     classifier = classifier or Classifier()
     result = ClassifyResult()
-    for rows in wh.iter_for_classification():
+    for rows in wh.iter_for_classification(only_unscored=only_unscored):
         crs = classifier.classify_batch(rows, reuse_model_scores=reuse_model_scores)
         updates = []
         for r, cr in zip(rows, crs, strict=True):

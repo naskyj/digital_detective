@@ -112,6 +112,60 @@ def test_reuse_model_scores_skips_the_model_but_keeps_its_stored_score(tmp_path)
         wh.close()
 
 
+def test_only_unscored_processes_just_the_rows_missing_a_model_score(tmp_path):
+    """Finishing an interrupted model run without redoing its completed
+    work - on the real case that's 116,725 rows instead of 675,463."""
+    scored_items = []
+
+    class CountingVoter:
+        def batch(self, items):
+            scored_items.extend(k for k, _v, _st in items)
+            return [0.8 for _ in items]
+
+    wh = Warehouse(tmp_path / "warehouse" / "case.duckdb")
+    try:
+        wh.load_artifacts([_artifact("already", "v1"), _artifact("missing", "v2")])
+        # Give exactly one row a stored score, as an interrupted run would have.
+        wh.apply_classifications([
+            ("a-already", {"category": "GENERAL", "confidence": 0.0, "relevance_model_score": 0.5}),
+        ])
+
+        classify_warehouse(wh, Classifier(relevance_voter=CountingVoter()), only_unscored=True)
+        assert scored_items == ["missing"], "only the row without a stored score should be processed"
+        # The already-scored row keeps its original score, untouched.
+        rows = {r["key"]: r for r in wh.query("SELECT key, relevance_model_score FROM artifacts")}
+        assert rows["already"]["relevance_model_score"] == 0.5
+        assert rows["missing"]["relevance_model_score"] == 0.8
+    finally:
+        wh.close()
+
+
+def test_only_unscored_terminates_even_when_a_row_never_gets_a_score(tmp_path):
+    """The trap this pagination exists to avoid: rows the empty-body gate
+    resolves never get a model score at all, so they stay NULL forever. A
+    naive "take the first N unscored each time" loop would re-yield them
+    endlessly. Keyset pagination on artifact_id always moves forward."""
+    wh = Warehouse(tmp_path / "warehouse" / "case.duckdb")
+    try:
+        # "{}" is structurally empty -> the gate short-circuits before the
+        # relevance model is ever consulted, so this row can never be scored.
+        wh.load_artifacts([_artifact("empty", "{}"), _artifact("real", "actual content")])
+        batches = list(wh.iter_for_classification(batch_size=1, only_unscored=True))
+        assert len(batches) == 2, "must terminate, yielding each unscored row exactly once"
+
+        # And the same through the real pipeline, which does write scores.
+        result = classify_warehouse(
+            wh, Classifier(relevance_voter=lambda k, v, st: 0.9), only_unscored=True
+        )
+        assert result.classified == 2
+        still_null = wh.query(
+            "SELECT count(*) AS n FROM artifacts WHERE relevance_model_score IS NULL"
+        )[0]["n"]
+        assert still_null == 1, "the gated row legitimately stays unscored - and that's fine"
+    finally:
+        wh.close()
+
+
 def test_iter_for_classification_yields_app_source_type_deleted(tmp_path):
     wh = Warehouse(tmp_path / "warehouse" / "case.duckdb")
     try:
