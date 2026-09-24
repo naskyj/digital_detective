@@ -124,6 +124,7 @@ class OnnxRelevanceModel:
         self.dir = Path(model_dir)
         self._session = None
         self._tokenizer = None
+        self._len_tokenizer = None
         self._relevant_idx: int | None = None
         self._load()
 
@@ -146,6 +147,14 @@ class OnnxRelevanceModel:
             # inspecting tok.truncation directly - no separate
             # enable_truncation() call needed here.
             self._tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
+            # A second, padding-FREE handle on the same tokenizer.json, used
+            # only to read each row's true token length for batch()'s length
+            # bucketing - `self._tokenizer` pads every encoding in a call to
+            # the longest one in it, so lengths read back off it are all
+            # identical and useless for sorting. Separate object rather than
+            # toggling padding on the shared one, which would be a
+            # thread-unsafe global flip between two call sites.
+            self._len_tokenizer = Tokenizer.from_file(str(self.dir / "tokenizer.json"))
             labels = json.loads((self.dir / "labels.json").read_text("utf-8"))
             self._relevant_idx = labels.index("relevant")
             log.info("ONNX relevance model loaded from %s", self.dir)
@@ -179,6 +188,8 @@ class OnnxRelevanceModel:
     # sweet spot among 16/32/64/128 (bigger batches did NOT keep improving
     # ms/row past this point, and cost more peak memory for no return).
     # Re-benchmark if this model or the deployment hardware changes a lot.
+    # Re-measured after length bucketing landed below; 32 still won
+    # (bs=32/64/128 -> 79/85/155 ms/row on 200 real memory_string rows).
     _BATCH_SIZE = 32
 
     def batch(self, items: list[tuple[str, str, str | None]]) -> list[float | None]:
@@ -203,18 +214,57 @@ class OnnxRelevanceModel:
             texts = [
                 f"[{st}] {k} = {v}"[:512] if st else f"{k} = {v}"[:512] for k, v, st in items
             ]
-            out: list[float | None] = []
+            # Group rows of similar length into the same chunk before
+            # running any of them. enable_padding() pads each chunk to its
+            # own LONGEST member, so a chunk mixing a 12-token `key = value`
+            # with a 256-token memory-string carve pays 256 tokens of
+            # transformer for all 32 rows. Real memory_string distribution
+            # on the case this was tuned against: median 28 tokens, max 256
+            # (the tokenizer's own training-time truncation limit) - so in
+            # an unsorted chunk most of the compute was padding.
+            #
+            # Measured on 200 real memory_string rows, same model, same
+            # machine: 185 -> 79 ms/row, a 2.3x throughput win, which on a
+            # 547,693-row pass is 28.2 h -> 12.1 h. Sorting on TOKEN length
+            # rather than character length is worth the extra pass:
+            # character length correlates only 0.90 and lands at 18.5 h.
+            #
+            # The length pass is sub-chunked and keeps only the ints,
+            # because holding 20,000 Encoding objects (classify_warehouse's
+            # batch size) to read one number off each is real memory for
+            # nothing. Re-tokenizing the chunks afterwards costs 0.02
+            # ms/row - 11 seconds across the whole 547k pass, against the
+            # ~16 hours saved.
+            lens: list[int] = []
+            for start in range(0, len(texts), 2048):
+                lens.extend(
+                    len(e.ids) for e in self._len_tokenizer.encode_batch(texts[start : start + 2048])
+                )
+            order = sorted(range(len(texts)), key=lens.__getitem__)
+            # Results are restored to the caller's order below, and padding
+            # is masked out by attention_mask either way, so this is purely
+            # a scheduling change. Not bit-identical, though: which rows
+            # share a chunk decides the padded width, and float matmul is
+            # not associative across widths. Measured against the deployed
+            # model on 200 real rows spanning 4e-06..0.99997, the largest
+            # disagreement with the unsorted path was 2.5e-11 - eleven
+            # orders of magnitude below the 0.05 veto threshold and the 0.5
+            # relevance threshold that actually read these scores.
+            # test_classify_model.py pins the ordering contract itself,
+            # which IS exact.
+            out: list[float | None] = [None] * len(texts)
             # Sub-chunk internally so callers can pass arbitrarily large
             # lists (e.g. a whole classify_warehouse batch) without every
             # caller needing to know/manage the tuned chunk size itself.
-            for start in range(0, len(texts), self._BATCH_SIZE):
-                chunk = texts[start : start + self._BATCH_SIZE]
-                encs = self._tokenizer.encode_batch(chunk)
-                ids = np.array([e.ids for e in encs], dtype="int64")
-                mask = np.array([e.attention_mask for e in encs], dtype="int64")
+            for start in range(0, len(order), self._BATCH_SIZE):
+                idxs = order[start : start + self._BATCH_SIZE]
+                chunk = self._tokenizer.encode_batch([texts[i] for i in idxs])
+                ids = np.array([e.ids for e in chunk], dtype="int64")
+                mask = np.array([e.attention_mask for e in chunk], dtype="int64")
                 logits = self._session.run(None, {"input_ids": ids, "attention_mask": mask})[0]
                 probs = _softmax_rows(logits)
-                out.extend(float(p[self._relevant_idx]) for p in probs)
+                for i, p in zip(idxs, probs, strict=True):
+                    out[i] = float(p[self._relevant_idx])
             return out
         except Exception:
             log.debug("ONNX relevance batch inference failed", exc_info=True)
