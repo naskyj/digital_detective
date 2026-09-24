@@ -118,8 +118,16 @@ def _parse_one_file(ctx: ParseContext, f: Path, rel: str) -> Iterator[Normalized
                     ctx, source_type=SourceType.APP_DATA, source_file=source_file,
                     locator=f"{rel}#line{n}", key=f"{key_base}.line{n}", raw_value=line,
                 )
-    except Exception:
-        log.exception("could not parse app-data file %s", f)
+    except Exception as e:
+        # warning + the message, NOT log.exception. An unparseable file here
+        # is routine, not exceptional: real evidence is full of zero-byte
+        # XML ("no element found: line 1, column 0") and files whose XML
+        # declaration lies about their encoding. Skipping them is the
+        # designed behaviour - but a full traceback per file made a normal
+        # run look like it was crashing repeatedly, which is exactly how it
+        # was reported. The traceback is still available at DEBUG.
+        log.warning("skipping unparseable app-data file %s: %s", f, e)
+        log.debug("app-data parse failure detail", exc_info=True)
 
 
 def parse(ctx: ParseContext) -> Iterator[NormalizedArtifact]:

@@ -17,7 +17,12 @@ import platform
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from dd_core.evidence import iter_profiles_for_entry, looks_like_profile
+from dd_core.evidence import (
+    is_legacy_junction,
+    iter_profiles_for_entry,
+    looks_like_profile,
+    path_identity,
+)
 
 _WINDOWS_ROOTS = ("APPDATA", "LOCALAPPDATA")
 
@@ -124,23 +129,29 @@ def discover_apps(extra_dirs: list[str | Path] | None = None) -> list[ElectronAp
     # would otherwise get marked seen before iter_profiles_for_entry() ever
     # got to return `(entry.name, entry)` for it - silently dropping every
     # direct-match app the moment its containing directory was recorded.
-    seen_entries: set[Path] = set()
-    seen_profiles: set[Path] = set()
+    seen_entries: set[str] = set()
+    seen_profiles: set[str] = set()
     apps: list[ElectronApp] = []
 
     for root in roots:
         for entry in sorted(_safe_iterdir(root)):
-            if not entry.is_dir() or entry in seen_entries:
+            # `%LOCALAPPDATA%\Application Data` is a junction back to
+            # `%LOCALAPPDATA%` - same loop the image path hits, same fix.
+            if not entry.is_dir() or is_legacy_junction(entry):
                 continue
-            seen_entries.add(entry)
+            ekey = path_identity(entry)
+            if ekey in seen_entries:
+                continue
+            seen_entries.add(ekey)
             key = entry.name.lower().replace(" ", "")
             matched_process_name, pids = next(
                 ((k, v) for k, v in running.items() if key in k or k in key), (None, [])
             )
             for name, profile, native_root in iter_profiles_for_entry(entry):
-                if profile in seen_profiles:
+                pkey = path_identity(profile)
+                if pkey in seen_profiles:
                     continue
-                seen_profiles.add(profile)
+                seen_profiles.add(pkey)
                 apps.append(
                     ElectronApp(
                         name=name,

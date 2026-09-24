@@ -91,6 +91,102 @@ def looks_like_profile(d: Path) -> bool:
 _WEBVIEW2_MARKER = "EBWebView"
 
 
+#: Windows keeps these reparse points inside every user profile purely for
+#: pre-Vista compatibility, and each one points back at its own parent -
+#: `AppData\\Local\\Application Data` -> `AppData\\Local`. They contain
+#: nothing that is not already reachable by its real name, so skipping them
+#: costs no evidence at all and is the only deterministic defence: whether
+#: one of these even *reports* as a symlink depends on the filesystem
+#: backend reading the image.
+#:
+#: Measured on a real Windows image before this existed: the
+#: `AppData/Local/*` glob matched `Application Data` as an app entry in its
+#: own right, the WebView2 scan then re-found the same profiles nested
+#: under it at every depth, and one case came out with 28 "apps" (about 6
+#: real ones) and 3,390,209 artifacts - most of them the same file counted
+#: four or five times.
+WINDOWS_LEGACY_JUNCTIONS = frozenset({
+    "application data", "local settings", "cookies", "history",
+    "my documents", "nethood", "printhood", "recent", "sendto",
+    "start menu", "templates", "temporary internet files",
+})
+
+
+def is_legacy_junction(p: Path) -> bool:
+    """Name-based, because that is the part that is always available."""
+    return p.name.lower() in WINDOWS_LEGACY_JUNCTIONS
+
+
+def path_identity(p: Path) -> str:
+    """A key that is the SAME for one directory reached by two different
+    routes - so a profile found both directly and through a junction
+    de-duplicates to one app.
+
+    The existing callers keyed on `str(path).lower()`, which cannot do that:
+    `.../Local/Roblox/...` and `.../Local/Application Data/Roblox/...` are
+    the same directory and different strings. Falls back to the literal
+    string when a filesystem offers no resolution, which is no worse than
+    what it replaces.
+    """
+    try:
+        return str(p.resolve()).lower()
+    except (OSError, ValueError, NotImplementedError):
+        return str(p).lower()
+
+
+def _seed_seen(root: Path) -> set[str]:
+    """`_traversable`'s visited-set, pre-loaded with the walk root."""
+    try:
+        return {str(root.resolve())}
+    except (OSError, ValueError, NotImplementedError):
+        return set()
+
+
+def _traversable(d: Path, seen: set[str]) -> bool:
+    """Whether a directory walk may descend into `d` - the guard the two
+    walkers below share with `_copy_tree_resilient`'s own symlink check.
+
+    Windows keeps legacy reparse points inside a user profile for backwards
+    compatibility, and several of them point at their own parent:
+    `%APPDATA%\\Application Data` -> `%APPDATA%`, and likewise `Local
+    Settings`, `Cookies`, `My Documents`. A walker that doesn't check gets
+    an infinite tree. Found on real evidence: a native-root walk produced
+
+        native/Application Data/Application Data/Application Data/
+               Application Data/Application Data/Temp/xml_file.xml
+
+    - five levels of the same junction, terminated only by `max_depth`.
+    That is not just cosmetic. `plan_native_root_copy` has a hard
+    `max_files` budget, and spending it on the same handful of files copied
+    five times means genuine files further along are silently never
+    collected.
+
+    Two layers, because one isn't enough:
+      - skip symlinks/junctions outright, same as the copier does;
+      - remember resolved identities, so a loop that does NOT present as a
+        symlink (a filesystem backend that models a reparse point as a
+        plain directory, a bind mount) still terminates.
+
+    If a path offers no resolvable identity at all - some virtual
+    filesystems don't - the caller's depth cap remains the backstop.
+    """
+    if is_legacy_junction(d):
+        return False
+    try:
+        if d.is_symlink():
+            return False
+    except OSError:
+        return False
+    try:
+        key = str(d.resolve())
+    except (OSError, ValueError, NotImplementedError):
+        return True
+    if key in seen:
+        return False
+    seen.add(key)
+    return True
+
+
 def find_webview2_profiles(root: Path, *, max_depth: int = 6) -> list[Path]:
     """Chromium profiles embedded via Microsoft Edge WebView2, nested
     somewhere under `root` rather than at `root` itself.
@@ -118,6 +214,10 @@ def find_webview2_profiles(root: Path, *, max_depth: int = 6) -> list[Path]:
     root — not a scan of the whole image.
     """
     found: list[Path] = []
+    # Seeded with the root itself: a junction pointing straight back at the
+    # root resolves to an identity the set must already know, or the loop
+    # gets one free level before being caught.
+    seen: set[str] = _seed_seen(root)
 
     def walk(d: Path, depth: int) -> None:
         if depth > max_depth:
@@ -131,6 +231,8 @@ def find_webview2_profiles(root: Path, *, max_depth: int = 6) -> list[Path]:
                 if not child.is_dir():
                     continue
             except OSError:
+                continue
+            if not _traversable(child, seen):
                 continue
             if child.name == _WEBVIEW2_MARKER:
                 for prof in _safe_iterdir(child):
@@ -336,6 +438,7 @@ def plan_native_root_copy(
     """
     root = native_root if isinstance(native_root, Path) else Path(native_root)
     specs: list[CopySpec] = []
+    seen: set[str] = _seed_seen(root)  # see find_webview2_profiles' note
 
     def walk(d: Path, depth: int) -> None:
         if depth > max_depth or len(specs) >= max_files:
@@ -353,6 +456,8 @@ def plan_native_root_copy(
                 continue
             if is_dir:
                 if child.name in _NATIVE_ROOT_DENYLIST or child.name == _WEBVIEW2_MARKER:
+                    continue
+                if not _traversable(child, seen):
                     continue
                 walk(child, depth + 1)
             elif child.suffix.lower() in MISC_EXTENSIONS:

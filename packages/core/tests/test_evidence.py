@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -268,3 +269,83 @@ def test_plan_native_root_copy_respects_max_files(tmp_path):
 
 def test_plan_native_root_copy_missing_root_returns_empty(tmp_path):
     assert plan_native_root_copy(tmp_path / "does-not-exist") == []
+
+
+# ------------------------------------------------- Windows junction loops
+#
+# Found on a collaborator's real Windows evidence: the native-root walk
+# produced `native/Application Data/Application Data/Application Data/
+# Application Data/Application Data/Temp/xml_file.xml` - five levels of
+# %APPDATA%'s legacy self-referential junction, stopped only by max_depth.
+# `_copy_tree_resilient` had a symlink guard; neither directory WALKER did.
+
+
+def test_native_root_walk_does_not_follow_a_self_referential_junction(tmp_path):
+    if os.name == "nt":
+        pytest.skip("symlinks need elevated privileges on Windows")
+    root = tmp_path / "LocalState"
+    root.mkdir()
+    (root / "real.xml").write_text("<a/>")
+    # %APPDATA%\Application Data -> %APPDATA%, the actual Windows shape.
+    (root / "Application Data").symlink_to(root)
+
+    specs = plan_native_root_copy(root)
+
+    assert [s.dest_rel for s in specs] == ["native/real.xml"]
+    assert not any("Application Data" in s.dest_rel for s in specs)
+
+
+def test_the_file_budget_is_not_spent_on_junction_duplicates(tmp_path):
+    """The damaging half. plan_native_root_copy stops dead at max_files, so
+    a loop that re-copies the same files at five different paths can exhaust
+    the budget and leave genuine files uncollected - silently, with no
+    warning and no skipped-reason anywhere."""
+    if os.name == "nt":
+        pytest.skip("symlinks need elevated privileges on Windows")
+    root = tmp_path / "LocalState"
+    (root / "deep").mkdir(parents=True)
+    for i in range(4):
+        (root / f"loot{i}.xml").write_text("<a/>")
+    (root / "Application Data").symlink_to(root)
+
+    specs = plan_native_root_copy(root, max_files=4)
+
+    # Every real file fits in the budget of 4 - which it cannot if the
+    # junction is walked, since the same files reappear under it.
+    assert sorted(s.dest_rel for s in specs) == [
+        "native/loot0.xml", "native/loot1.xml", "native/loot2.xml", "native/loot3.xml",
+    ]
+
+
+def test_webview2_scan_does_not_follow_a_self_referential_junction(tmp_path):
+    if os.name == "nt":
+        pytest.skip("symlinks need elevated privileges on Windows")
+    app_root = tmp_path / "App"
+    prof = app_root / "EBWebView" / "Default"
+    prof.mkdir(parents=True)
+    (prof / "Preferences").write_text("{}")
+    (prof / "Local State").write_text("{}")
+    (app_root / "Application Data").symlink_to(app_root)
+
+    found = find_webview2_profiles(app_root)
+
+    # Terminates, and reports the one real profile exactly once - not once
+    # per level of the loop.
+    assert found == [prof]
+
+
+def test_walk_terminates_on_a_loop_that_is_not_a_symlink(tmp_path, monkeypatch):
+    """Second layer. A filesystem backend can model a reparse point as a
+    plain directory - is_symlink() returns False and the symlink guard never
+    fires. The resolved-identity set has to catch it."""
+    root = tmp_path / "LocalState"
+    root.mkdir()
+    (root / "real.xml").write_text("<a/>")
+    loop = root / "Application Data"
+    loop.symlink_to(root)
+    # Pretend nothing is a symlink, exactly as such a backend would report.
+    monkeypatch.setattr(Path, "is_symlink", lambda self: False)
+
+    specs = plan_native_root_copy(root)
+
+    assert [s.dest_rel for s in specs] == ["native/real.xml"]

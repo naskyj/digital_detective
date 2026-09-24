@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from dd_core.evidence import iter_profiles_for_entry
+from dd_core.evidence import is_legacy_junction, iter_profiles_for_entry, path_identity
 
 if TYPE_CHECKING:
     from dissect.target import Target
@@ -113,12 +113,16 @@ def discover_apps(target: Target) -> list[ImageApp]:
                     continue
             except OSError:
                 continue
-            key = str(entry).lower()
+            # `AppData/Local/*` matches `Application Data`, a junction back
+            # to `AppData/Local` itself - so this entry IS the loop.
+            if is_legacy_junction(entry):
+                continue
+            key = path_identity(entry)
             if key in seen_entries:
                 continue
             seen_entries.add(key)
             for name, profile, native_root in iter_profiles_for_entry(entry):
-                pkey = str(profile).lower()
+                pkey = path_identity(profile)
                 if pkey in seen_profiles:
                     continue
                 seen_profiles.add(pkey)
@@ -149,12 +153,14 @@ def discover_apps_in_folder(folder: Path) -> list[ImageApp]:
                 continue
         except OSError:
             continue
-        key = str(entry).lower()
+        if is_legacy_junction(entry):
+            continue
+        key = path_identity(entry)
         if key in seen_entries:
             continue
         seen_entries.add(key)
         for name, profile, native_root in iter_profiles_for_entry(entry):
-            pkey = str(profile).lower()
+            pkey = path_identity(profile)
             if pkey in seen_profiles:
                 continue
             seen_profiles.add(pkey)

@@ -10,6 +10,7 @@ AppData paths - this is for a folder of already-extracted, static evidence
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -107,3 +108,59 @@ def test_acquire_from_folder_against_real_multi_app_evidence(tmp_path):
 
     v = verify_case(result.case_dir)
     assert v.ok, v.issues
+
+
+# ------------------------------------------------- Windows legacy junctions
+#
+# Reproduces a real Windows image: `AppData/Local/Application Data` is a
+# junction back to `AppData/Local` itself. The `AppData/Local/*` glob matched
+# it as an app entry in its own right, the WebView2 scan re-found the same
+# profiles nested under it at every depth, and the profile de-dup keyed on
+# str(path) so each depth looked like a different app. Result on the real
+# case: 28 "apps" for ~6 real ones, and 3,390,209 artifacts.
+
+
+def _webview2_profile(app_root: Path) -> Path:
+    """The real shape: a WebView2 profile nested deep inside a native app's
+    own tree - which is what makes a junction multiply apps, because
+    find_webview2_profiles() searches DOWNWARD from each entry and so
+    re-finds the same profile through every route that reaches it."""
+    prof = app_root / "UniversalApp" / "WebView2" / "EBWebView" / "Default"
+    prof.mkdir(parents=True)
+    (prof / "Local State").write_text("{}")
+    (prof / "Local Storage" / "leveldb").mkdir(parents=True)
+    return prof
+
+
+def test_legacy_junction_does_not_multiply_discovered_apps(tmp_path):
+    if os.name == "nt":
+        pytest.skip("symlinks need elevated privileges on Windows")
+    local = tmp_path / "Local"
+    local.mkdir()
+    _webview2_profile(local / "Roblox")
+    (local / "Application Data").symlink_to(local)  # the real Windows shape
+
+    apps = discover_apps_in_folder(local)
+
+    # One profile exists, so one app - not one per route that reaches it.
+    assert len(apps) == 1, [a.name for a in apps]
+    assert apps[0].name.startswith("Roblox"), apps[0].name
+    assert "Application_Data" not in apps[0].name
+
+
+def test_the_same_profile_reached_two_ways_is_one_app(tmp_path):
+    """The de-dup half, independent of the name skip: keying on str(path)
+    cannot tell `Local/Roblox/...` from `Local/<junction>/Roblox/...` -
+    same directory, different strings."""
+    if os.name == "nt":
+        pytest.skip("symlinks need elevated privileges on Windows")
+    local = tmp_path / "Local"
+    local.mkdir()
+    _webview2_profile(local / "Roblox")
+    # A junction whose name is NOT in the legacy list, so only
+    # path_identity() can collapse it.
+    (local / "Mirror").symlink_to(local)
+
+    apps = discover_apps_in_folder(local)
+
+    assert len(apps) == 1, [a.name for a in apps]
