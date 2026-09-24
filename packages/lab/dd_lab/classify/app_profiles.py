@@ -47,6 +47,7 @@ import re
 from typing import TYPE_CHECKING
 
 from dd_core.enums import ArtifactCategory as C
+from dd_core.patterns import CONTENT_FIELD_PAT
 
 if TYPE_CHECKING:
     from dd_lab.classify.rules import RuleHit
@@ -68,7 +69,11 @@ _DISCORD_RULES: tuple[tuple[re.Pattern, C, float], ...] = (
     (re.compile(r"MultiAccountStore|user_id_cache|fingerprint|installation_id_v3|"
                 r"ARISE_PROFILE|ARISE_DEVICE_ID|AudioContextSettingsMigrated:\d+"), C.USER, 0.85),
     (re.compile(r"\b\d{17,20}\b"), C.USER, 0.5),  # Discord snowflake shape
-    (re.compile(r"content|message|message_?id|channel_?id|guild_?id|_?ThreadID|"
+    # CONTENT_FIELD_PAT, not a bare "content": the plain substring matched
+    # `cache.content_type` (an HTTP header, value `image/png`) on 5,891 real
+    # artifacts, and `AdContentSeenStore`/`DismissibleContentFrameworkStore`
+    # (Discord's own config stores) besides. See its docstring.
+    (re.compile(rf"{CONTENT_FIELD_PAT}|message|message_?id|channel_?id|guild_?id|_?ThreadID|"
                 r"in[_ ]?reply[_ ]?to|mentions?|reaction|reactors|pinned|message_?type|"
                 r"embedded_?content", re.I), C.CHAT_CONTENT, 0.6),
     (re.compile(r"DraftStore"), C.DRAFT, 0.85),
@@ -101,8 +106,8 @@ _SLACK_RULES: tuple[tuple[re.Pattern, C, float], ...] = (
     # id in their bootData, "-> identity".
     (re.compile(r"idb\.canvas-[UT]0[A-Z0-9]+|reduxPersistence|objectStore-[UT]0|"
                 r"sundryStorage"), C.USER, 0.7),
-    (re.compile(r"content|message|\btext\b|blocks|channel_?name|channel_?id|thread_?ts|"
-                r"_?ThreadID|message_?status|recipient", re.I), C.CHAT_CONTENT, 0.6),
+    (re.compile(rf"{CONTENT_FIELD_PAT}|message|\btext\b|blocks|channel_?name|channel_?id|"
+                r"thread_?ts|_?ThreadID|message_?status|recipient", re.I), C.CHAT_CONTENT, 0.6),
     (re.compile(r"persist-v1::.*::drafts|unifiedDrafts|withheldDraftIds|destinations"),
      C.DRAFT, 0.85),
     (re.compile(r"persist-v1::.*::customStatus|device-permissions-state"),

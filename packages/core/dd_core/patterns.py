@@ -72,3 +72,49 @@ EMAIL_STRICT_RE = re.compile(
     rf"(?:{_COMMON_TLDS})\b",
     re.I,
 )
+
+#: HTTP entity headers whose names begin with "content". They describe a
+#: fetched resource - its MIME type, its size, its encoding - and are never
+#: the resource itself, but a bare "content" substring match cannot tell
+#: them apart from `message.content`. On a real case `cache.content_type`
+#: (values like `image/png`, `application/json; charset=utf-8`) was 5,891
+#: artifacts classified CHAT_CONTENT, the single largest false grouping in
+#: the category.
+_CONTENT_HEADER_SUFFIXES = (
+    "type|length|encoding|disposition|range|language|location|md5|"
+    "security[_-]?policy"
+)
+
+#: "content" used as a real content-bearing field name. Two guards, and
+#: both are load-bearing on real data:
+#:
+#: - not part of a longer word (`AdContentSeenStore`,
+#:   `DismissibleContentFrameworkStore` - Discord config stores, not
+#:   messages), hence the lookbehind and the `[A-Za-z0-9]` lookahead, which
+#:   also rejects camelCase `contentType`;
+#: - not an HTTP entity header, hence the suffix lookahead - `_` and `-` are
+#:   why `\bcontent\b` alone is not enough: `\b` sees a boundary before the
+#:   `-` in `content-type` and (being a word character) no boundary at all
+#:   inside `content_type`, so it accepts both.
+#:
+#: `embedded_content`/`attachment_content` style names are deliberately
+#: still matched (an underscore before "content" is a separator, not a word
+#: continuation) - they are real content fields.
+CONTENT_FIELD_PAT = (
+    r"(?<![A-Za-z0-9])content"
+    r"(?![A-Za-z0-9])"
+    rf"(?![_-](?:{_CONTENT_HEADER_SUFFIXES})\b)"
+)
+CONTENT_FIELD_RE = re.compile(CONTENT_FIELD_PAT, re.I)
+
+#: The same exclusion for callers matching against a NORMALIZED key tail -
+#: lower-cased with every punctuation character stripped (see
+#: `dd_lab.classify.rules._norm_key_tail`, and its note on why that
+#: substrate deliberately has no word boundaries left to anchor on). A
+#: regex with lookarounds is useless there, so the header names are listed
+#: in their already-normalized form instead.
+HTTP_ENTITY_HEADER_TAILS = (
+    "contenttype", "contentlength", "contentencoding", "contentdisposition",
+    "contentrange", "contentlanguage", "contentlocation", "contentmd5",
+    "contentsecuritypolicy",
+)

@@ -128,3 +128,19 @@ def test_app_profile_hits_matches_on_app_name_substring_not_exact_equality():
     hits = app_profile_hits("Roblox__WebView2_via_UniversalApp_WebView2", "cache.record.commerce",
                              '{"robux": 500}')
     assert any(h.category == "PAYMENT_INFO" for h in hits)
+
+
+def test_app_profile_content_rules_use_the_shared_content_pattern():
+    """Same anti-drift pin as test_investigate's shared-email one: "content"
+    is matched in three places (here, _KEY_KEYWORDS' tail, and the JSON
+    leaf-key gazetteer), and the last time a rule lived in two copies a fix
+    landed in one and silently missed the other. Both app profiles that
+    carry a content rule must build it from dd_core.patterns."""
+    from dd_core.enums import ArtifactCategory
+    from dd_core.patterns import CONTENT_FIELD_PAT
+    from dd_lab.classify.app_profiles import _DISCORD_RULES, _SLACK_RULES
+
+    for name, rules in (("discord", _DISCORD_RULES), ("slack", _SLACK_RULES)):
+        chat = [p for p, cat, _w in rules if cat == ArtifactCategory.CHAT_CONTENT]
+        assert chat, name
+        assert any(CONTENT_FIELD_PAT in p.pattern for p in chat), name

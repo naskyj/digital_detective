@@ -286,18 +286,30 @@ def test_classify_batch_with_no_relevance_voter_configured():
 # scoring them under 0.01 (content_type headers, minified JS bundles).
 
 
+#: A real minified webpack bundle body from the 675k case, trimmed. Rules
+#: saturate on it (the word "content" appears in the module map) and cannot
+#: tell it from a message - only the model can. The OTHER example the
+#: comment above cites, `cache.content_type`, is no longer one: it is now
+#: excluded at the rule level (see dd_core.patterns.CONTENT_FIELD_PAT), so
+#: it can't stand in for "rules saturate" any more.
+_JS_BUNDLE = (
+    '"use strict";(globalThis.rspackChunkwebapp||=[]).push([["prompt-skill-add-popup"],'
+    '{j4Lk(l){l.exports={skillList:1,content:2}}}]);'
+)
+
+
 def test_confident_model_negative_vetoes_a_saturated_rule_hit():
     def fake_relevance(key, value, source_type):
-        return 0.000005  # what the real model actually returned for `image/png`
+        return 0.000005  # what the real model actually returned for bodies like this
 
     clf = Classifier(relevance_voter=fake_relevance)
     # Exactly reproduces a real row from the 675k-artifact case: rules alone
-    # saturate this at relevance 1.0 (the actual bug - content_type headers
-    # sitting at the top of the report as CHAT_CONTENT).
-    args = ("cache.content_type", "image/png")
+    # saturate this (the actual bug - minified JS bundles sitting at the top
+    # of the report as CHAT_CONTENT).
+    args = ("cache.body", _JS_BUNDLE)
     kwargs = {"source_type": "cache", "app": "Slack"}
     rules_only = C.classify(*args, **kwargs)
-    assert rules_only.relevance_score == 1.0 and rules_only.relevant is True
+    assert rules_only.relevance_score > 0.95 and rules_only.relevant is True
 
     # With the model's confident negative, it is no longer relevant.
     r = clf.classify(*args, **kwargs)
@@ -327,7 +339,7 @@ def test_veto_only_fires_when_the_model_is_actually_confident():
         return 0.3
 
     clf = Classifier(relevance_voter=borderline)
-    args, kwargs = ("cache.content_type", "image/png"), {"source_type": "cache", "app": "Slack"}
+    args, kwargs = ("cache.body", _JS_BUNDLE), {"source_type": "cache", "app": "Slack"}
     r = clf.classify(*args, **kwargs)
     baseline = C.classify(*args, **kwargs)
     # noisy-OR of the rule evidence with 0.3 - raised, never vetoed down
@@ -427,3 +439,78 @@ def test_new_kwargs_accept_plain_strings_too():
     # signature must tolerate that, not just the enum.
     r = C.classify("k", "v", app="roblox", source_type="cache", deleted=False)
     assert r.category  # didn't raise, produced a real result
+
+
+# ------------------------------------------------- "content" as a header, not content
+#
+# `cache.content_type` is an HTTP entity header describing a fetched
+# resource (`image/png`, `application/json; charset=utf-8`), and a bare
+# "content" substring matched it from three independent directions: the
+# _KEY_KEYWORDS tail, the Discord/Slack app profiles, and the JSON
+# leaf-key gazetteer. 5,891 artifacts on the real 675k case, the single
+# largest false grouping inside CHAT_CONTENT. The model vetoed them back
+# down to relevance 0 - but only because those rows happened to be cheap
+# enough to score; memory_string rows carry rules-only relevance, so a
+# rule this broad has nothing standing behind it there.
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "cache.content_type",       # the real key, from the real case
+        "cache.content-type",       # `\b` accepts the hyphen form, hence the explicit guard
+        "cache.contentType",        # camelCase
+        "cache.content_length",
+        "cache.content_encoding",
+        "cache.content_disposition",
+    ],
+)
+def test_http_entity_header_keys_are_not_chat_content(key):
+    r = C.classify(key, "image/png", source_type="cache", app="Slack")
+    assert r.category != "CHAT_CONTENT"
+    assert r.relevance_score == 0.0 and r.relevant is False
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("cache.body.message.content", "see you at 5"),
+        ("indexeddb.messages.content", "hey there"),
+        ("cache.body.embedded_content", "shared a photo"),
+        ("cache.body.referenced_message.content", "Account sharing is against ToS."),
+    ],
+)
+def test_real_content_fields_still_classify_as_chat_content(key, value):
+    """The exclusion above must cost no recall on the thing it sits next to:
+    an underscore BEFORE "content" is a separator, not a word continuation,
+    so `embedded_content` stays a content field while `content_encoding`
+    does not."""
+    r = C.classify(key, value, source_type="cache", app="Discord")
+    assert r.category == "CHAT_CONTENT"
+    assert r.relevant is True
+
+
+def test_content_inside_a_longer_word_is_not_an_app_profile_content_hit():
+    """Discord's own config stores - `AdContentSeenStore`,
+    `DismissibleContentFrameworkStore` - hold counters and seen-ids, not
+    messages, and the app profile's bare "content" scored them 0.6 as chat
+    content.
+
+    Asserted against app_profile_hits rather than the whole ensemble on
+    purpose: _KEY_KEYWORDS' own "content" (0.5) matches the NORMALIZED key
+    tail, which has had every punctuation character stripped
+    ("httpsdiscordappcomadcontentseenstore") and so has no word boundary
+    left to exclude on - a documented property of that substrate, not
+    something this fix can reach. On the real case those rows still moved
+    off CHAT_CONTENT once the 0.6 hit was gone, because a competing voter
+    outranked the surviving 0.5; that is luck, not a guarantee, so the
+    narrow claim is the one worth pinning.
+    """
+    from dd_lab.classify.app_profiles import app_profile_hits
+
+    for key in (
+        "https://discordapp.com :: AdContentSeenStore",
+        "https://discordapp.com :: DismissibleContentFrameworkStore",
+    ):
+        hits = app_profile_hits("discord", key, '{"_state": {"numberOfDCsShownToday": 2}}')
+        assert not [h for h in hits if h.category == "CHAT_CONTENT"], key

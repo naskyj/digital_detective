@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass
 
 from dd_core.enums import ArtifactCategory as C
-from dd_core.patterns import EMAIL_RE
+from dd_core.patterns import CONTENT_FIELD_PAT, EMAIL_RE, HTTP_ENTITY_HEADER_TAILS
 from dd_lab.classify.app_profiles import app_profile_hits
 
 # Priority for tie-breaking: earlier = wins a tie. Sensitive categories first.
@@ -244,11 +244,35 @@ def regex_hits(key: str, value: str, app: str | None = None) -> list[RuleHit]:
     return hits
 
 
+def _suppressed(cat: C, sub: str, ktail: str) -> bool:
+    """The one place a _KEY_KEYWORDS entry is too broad for its own tail.
+
+    CHAT_CONTENT's "content" (0.5) fires on the normalized tail of
+    `cache.content_type` - "cachecontenttype" - and that key is an HTTP
+    entity header describing a fetched resource (`image/png`,
+    `application/json; charset=utf-8`), not a message. 5,891 artifacts on a
+    real case, the largest single false grouping in the category. The
+    normalized tail has no punctuation left to anchor a word boundary on
+    (see _norm_key_tail's note above), so the exclusion has to be an
+    explicit list of already-normalized header names rather than a cleverer
+    pattern - the regex form of the same rule, for substrates that DO keep
+    their punctuation, is dd_core.patterns.CONTENT_FIELD_RE.
+    """
+    return (
+        cat is C.CHAT_CONTENT
+        and sub == "content"
+        and any(h in ktail for h in HTTP_ENTITY_HEADER_TAILS)
+    )
+
+
 def keyword_hits(key: str, value: str, app: str | None = None) -> list[RuleHit]:
     hits: list[RuleHit] = []
     ktail = _norm_key_tail(key)
     for cat, kws in _KEY_KEYWORDS.items():
-        best = max((w for sub, w in kws if sub in ktail), default=0.0)
+        best = max(
+            (w for sub, w in kws if sub in ktail and not _suppressed(cat, sub, ktail)),
+            default=0.0,
+        )
         if best:
             hits.append(RuleHit(cat, best, f"key~{ktail}"))
     vsample = value[:2000]
@@ -312,7 +336,11 @@ def flatten_leaf_keys(value: str) -> list[str]:
 # recall benefit. +7pts cache recall / precision held, per the spec's
 # back-test, once this ran alongside the JSON-key-path flattening above.
 _CONTENT_FIELD_PATTERNS: tuple[tuple[re.Pattern, C], ...] = (
-    (re.compile(r"\b(?:content|text|insert)\b", re.I), C.CHAT_CONTENT),
+    # CONTENT_FIELD_PAT rather than `\bcontent\b`: `\b` accepts both
+    # `content-type` (boundary before the hyphen) and `content_type` (no
+    # boundary at all - `_` is a word character), so a JSON body carrying
+    # response headers scored as chat content. See its docstring.
+    (re.compile(rf"{CONTENT_FIELD_PAT}|\b(?:text|insert)\b", re.I), C.CHAT_CONTENT),
     (re.compile(r"\bdraft\b", re.I), C.DRAFT),
     (re.compile(r"\bcustomStatus\b", re.I), C.ACCOUNT_SETTINGS),
     (re.compile(r"\b(?:displayName|username|nickname|email)\b", re.I), C.CONTACT_PII),
