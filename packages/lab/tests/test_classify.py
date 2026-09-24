@@ -471,6 +471,24 @@ def test_http_entity_header_keys_are_not_chat_content(key):
     assert r.relevance_score == 0.0 and r.relevant is False
 
 
+@pytest.mark.parametrize("mime", ["text/css", "text/html;charset=utf-8", "text/plain"])
+def test_text_mime_types_are_not_chat_content(mime):
+    """The Slack profile's `\btext\b` matched the VALUE of a content_type
+    header, not just a `"text":` field name - 115 real artifacts. Same
+    "header, not content" mistake as the key-side one above, one token
+    over."""
+    r = C.classify("cache.content_type", mime, source_type="cache", app="Slack")
+    assert r.category != "CHAT_CONTENT"
+
+
+def test_a_real_slack_text_field_still_classifies_as_chat_content():
+    """The guard above is `(?!/)` precisely so this keeps working: a Slack
+    message's `text` field is followed by a quote, never a slash."""
+    r = C.classify("idb.messages.blocks", '{"type": "rich_text", "text": "see you at 5"}',
+                   source_type="indexeddb", app="Slack")
+    assert r.category == "CHAT_CONTENT"
+
+
 @pytest.mark.parametrize(
     ("key", "value"),
     [

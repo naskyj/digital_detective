@@ -106,7 +106,12 @@ _SLACK_RULES: tuple[tuple[re.Pattern, C, float], ...] = (
     # id in their bootData, "-> identity".
     (re.compile(r"idb\.canvas-[UT]0[A-Z0-9]+|reduxPersistence|objectStore-[UT]0|"
                 r"sundryStorage"), C.USER, 0.7),
-    (re.compile(rf"{CONTENT_FIELD_PAT}|message|\btext\b|blocks|channel_?name|channel_?id|"
+    # `\btext\b(?!/)`: the bare form matched the MIME types `text/css`,
+    # `text/html`, `text/plain` sitting in `cache.content_type` values (115
+    # real artifacts) - the same "header, not content" mistake
+    # CONTENT_FIELD_PAT fixes one token over. A Slack `"text": "..."` field
+    # is followed by a quote, never a slash, so real recall is untouched.
+    (re.compile(rf"{CONTENT_FIELD_PAT}|message|\btext\b(?!/)|blocks|channel_?name|channel_?id|"
                 r"thread_?ts|_?ThreadID|message_?status|recipient", re.I), C.CHAT_CONTENT, 0.6),
     (re.compile(r"persist-v1::.*::drafts|unifiedDrafts|withheldDraftIds|destinations"),
      C.DRAFT, 0.85),
