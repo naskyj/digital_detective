@@ -258,3 +258,36 @@ def test_verify_claim_rejects_unknown_artifact_id(wh):
     v = verify_claim(wh, "does-not-exist")
     assert not v.ok
     assert "not found in warehouse" in v.reason
+
+
+# --------------------------------------------------------------- shared email pattern
+
+def test_correlation_does_not_treat_image_filenames_as_emails():
+    """`mask-84x84@2x.png` is syntactically a valid email. On a real case ALL
+    of the top 100 cross-source "correlated identifiers" were bogus emails of
+    this shape, which made the correlations view useless."""
+    for v in (
+        "mask-84x84@2x.png", "tray-unread@5x.png", "alert@2x.png", "icon@3x.svg",
+        # Carved binary that merely has an email SHAPE. `.pn` is a genuine
+        # ccTLD, so no blocklist rejects `edge@2x.pn` - only requiring a
+        # plausible TLD does. All real examples from one case.
+        "4@p.amp", "9@o.ad", "h@fb.vuw", "n@2.nc", "edge@2x.pn",
+        "ap5@ip0akp4fpp3cop3dpp.alp",
+    ):
+        hits = [h for h in extract_entities("discord", "mem.string", v) if h.entity_type == "email"]
+        assert not hits, f"{v!r} was extracted as an email: {[h.normalized for h in hits]}"
+
+
+def test_classification_and_correlation_share_one_email_pattern():
+    """These two subsystems each had their own copy. Fixing rules.py cleared
+    24,519 of 24,663 bogus classifications on a real case while correlations
+    stayed full of the identical false positives, because entities.py was
+    never touched. Pin them to the same object so that cannot recur."""
+    from dd_core.enums import ArtifactCategory as C
+    from dd_core.patterns import EMAIL_RE, EMAIL_STRICT_RE
+    from dd_lab.classify.rules import _VALUE_PATTERNS
+    from dd_lab.investigate.entities import _EMAIL
+
+    # Both come from the shared module - neither subsystem defines its own.
+    assert _VALUE_PATTERNS[C.USER][0][0] is EMAIL_RE
+    assert _EMAIL is EMAIL_STRICT_RE

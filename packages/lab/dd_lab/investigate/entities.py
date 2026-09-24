@@ -17,6 +17,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from dd_core.patterns import EMAIL_STRICT_RE
+
 # --------------------------------------------------------------------- types
 
 
@@ -29,7 +31,13 @@ class EntityHit:
 
 # --------------------------------------------------------------------- regex
 
-_EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+# Defined in dd_core.patterns, not here - a local copy is exactly how the
+# earlier fix landed in classify/rules.py and silently missed this one,
+# leaving correlations full of `mask-84x84@2x.png` 'identifiers' after
+# classification had already been cleaned up. Correlation uses the
+# STRICT variant: one bogus entity here becomes 50 citations and buries
+# the real findings, so it demands a plausible TLD. See that module.
+_EMAIL = EMAIL_STRICT_RE
 _DISCORD_INVITE = re.compile(
     r"\b(?:discord\.gg|discord(?:app)?\.com/invite)/([A-Za-z0-9-]{2,32})\b", re.I
 )
