@@ -796,21 +796,42 @@ async function caseExplorer(id, w){
   const expandedApps = new Set();  // collapsed by default; persists across renderNav() calls
   const expandedSources = new Set();  // "app/source_type" keys, same idea one level down
   const expandedLabels = new Set();  // evidence-source labels, same idea one level UP (multi-source cases)
-  function toggleExpand(app){
-    if(expandedApps.has(app)) expandedApps.delete(app); else expandedApps.add(app);
+  // Every level also auto-opens while the current selection sits BELOW it,
+  // so the selected node is never hidden inside a collapsed parent. That
+  // auto-open used to be unconditional, which made the chevron look dead:
+  // clicking it removed the node from expandedX, then isOpen recomputed to
+  // true anyway from the "something active below" half. Reported from real
+  // use - collapsing the app you were browsing did nothing, while the app
+  // next to it (nothing selected inside) collapsed fine.
+  //
+  // So an explicit collapse is recorded, and it beats the auto-open. It is
+  // cleared again by select(), so clicking back into a node still opens its
+  // parents.
+  const collapsedApps = new Set();
+  const collapsedSources = new Set();
+  const collapsedLabels = new Set();
+  function isOpenWith(key, expanded, collapsed, activeBelow){
+    return collapsed.has(key) ? false : (expanded.has(key) || activeBelow);
+  }
+  function toggleSet(key, expanded, collapsed, isOpen){
+    if(isOpen){ expanded.delete(key); collapsed.add(key); }
+    else { collapsed.delete(key); expanded.add(key); }
     renderNav();
   }
-  function toggleSourceExpand(k){
-    if(expandedSources.has(k)) expandedSources.delete(k); else expandedSources.add(k);
-    renderNav();
-  }
-  function toggleLabelExpand(l){
-    if(expandedLabels.has(l)) expandedLabels.delete(l); else expandedLabels.add(l);
-    renderNav();
-  }
+  function toggleExpand(app, isOpen){ toggleSet(app, expandedApps, collapsedApps, isOpen); }
+  function toggleSourceExpand(k, isOpen){ toggleSet(k, expandedSources, collapsedSources, isOpen); }
+  function toggleLabelExpand(l, isOpen){ toggleSet(l, expandedLabels, collapsedLabels, isOpen); }
 
   async function select(next){
     state.explorerSelection={...next, caseId:id};
+    // Navigating INTO a node clears any explicit collapse on its parents -
+    // otherwise a node you had collapsed would stay shut when you clicked
+    // back into it, and the auto-open could never take effect again.
+    if(next.app){
+      collapsedApps.delete(next.app);
+      if(next.source_type) collapsedSources.delete(next.app+'/'+next.source_type);
+      collapsedLabels.clear();
+    }
     renderNav();
     content.innerHTML=''; content.append(await paneFor(next));
   }
@@ -830,10 +851,10 @@ async function caseExplorer(id, w){
   function renderAppRow(a, baseIndent){
     const s=state.explorerSelection;
     const appActiveBelow = (s.type==='source' || FILES_PANEL_FN[s.type]) && s.app===a.app;
-    const isOpen = expandedApps.has(a.app) || appActiveBelow;
+    const isOpen = isOpenWith(a.app, expandedApps, collapsedApps, appActiveBelow);
     const row = navRow(a.app, a.total, s.type==='source'&&s.app===a.app&&!s.source_type,
       ()=>select({type:'source', app:a.app, source_type:null}), baseIndent, isOpen?'▾':'▸');
-    row.querySelector('.nav-chevron').onclick = (e)=>{ e.stopPropagation(); toggleExpand(a.app); };
+    row.querySelector('.nav-chevron').onclick = (e)=>{ e.stopPropagation(); toggleExpand(a.app, isOpen); };
     nav.append(row);
     if(!isOpen) return;
     a.sources.forEach(src=>{
@@ -849,10 +870,10 @@ async function caseExplorer(id, w){
       // Artifacts (the parsed content, same as every other source_type).
       const filesActive = s.type===filesType && s.app===a.app;
       const srcKey=a.app+'/'+src.source_type;
-      const srcOpen = expandedSources.has(srcKey) || filesActive || artifactsActive;
+      const srcOpen = isOpenWith(srcKey, expandedSources, collapsedSources, filesActive||artifactsActive);
       const srcRow = navRow(SRC_LABELS[src.source_type]||src.source_type, src.n, false,
-        ()=>toggleSourceExpand(srcKey), baseIndent+1, srcOpen?'▾':'▸');
-      srcRow.querySelector('.nav-chevron').onclick=(e)=>{e.stopPropagation(); toggleSourceExpand(srcKey);};
+        ()=>toggleSourceExpand(srcKey, srcOpen), baseIndent+1, srcOpen?'▾':'▸');
+      srcRow.querySelector('.nav-chevron').onclick=(e)=>{e.stopPropagation(); toggleSourceExpand(srcKey, srcOpen);};
       nav.append(srcRow);
       if(!srcOpen) return;
       nav.append(navRow('Files', null, filesActive, ()=>select({type:filesType, app:a.app}), baseIndent+2));
@@ -895,9 +916,9 @@ async function caseExplorer(id, w){
       const total = apps.reduce((n,a)=>n+a.total, 0);
       const anyActiveBelow = apps.some(a=>
         (s.type==='source' || FILES_PANEL_FN[s.type]) && s.app===a.app);
-      const isOpen = expandedLabels.has(label) || anyActiveBelow;
-      const row = navRow(label, total, false, ()=>toggleLabelExpand(label), 0, isOpen?'▾':'▸');
-      row.querySelector('.nav-chevron').onclick=(e)=>{e.stopPropagation(); toggleLabelExpand(label);};
+      const isOpen = isOpenWith(label, expandedLabels, collapsedLabels, anyActiveBelow);
+      const row = navRow(label, total, false, ()=>toggleLabelExpand(label, isOpen), 0, isOpen?'▾':'▸');
+      row.querySelector('.nav-chevron').onclick=(e)=>{e.stopPropagation(); toggleLabelExpand(label, isOpen);};
       nav.append(row);
       if(isOpen) apps.forEach(a=>renderAppRow(a, 1));
     });
