@@ -80,8 +80,12 @@ def _rows(headers: list[str], rows: list[list], highlight: bool = False) -> str:
 
 
 def build_report(
-    cases_root: str | Path, case_id: str, *, actor: str = "dd-lab"
+    cases_root: str | Path, case_id: str, *, actor: str = "dd-lab", llm_cfg=None
 ) -> Path:
+    """`llm_cfg` is optional throughout. With no model configured the report
+    is complete and self-consistent - the computed narrative is the account.
+    A model, when there is one, adds a readable retelling of those same facts
+    and nothing else (see dd_lab.agent.narrative)."""
     layout = CaseLayout(cases_root, case_id)
     meta = CaseMeta.load_or_none(layout) or CaseMeta(case_id=case_id, name=case_id)
     manifest = Manifest.read(layout.dir)
@@ -115,6 +119,11 @@ def build_report(
         kw_hits = _keyword_hits(wh, meta.keywords)
         correlations = build_correlation_report(wh)
         story = build_case_narrative(wh)
+        written_story = None
+        if llm_cfg is not None:
+            from dd_lab.agent.narrative import write_case_story
+
+            written_story = write_case_story(wh, llm_cfg)
     finally:
         wh.close()
 
@@ -164,6 +173,18 @@ def build_report(
                if cov["expiry"] else "")
             + ".</p>"
         )
+        if written_story is not None and written_story.verified:
+            parts.append(
+                "<h3>Summary</h3>"
+                "<p class='sub'>Written by the configured language model from the computed "
+                "episodes below, and from nothing else. Every artifact it cites was "
+                "re-verified against the warehouse. The episode reconstruction that follows "
+                "is generated deterministically and is the authoritative record.</p>"
+            )
+            for para in written_story.account.split("\n\n"):
+                if para.strip():
+                    parts.append(f"<p>{_esc(para.strip())}</p>")
+            parts.append("<h3>Episodes</h3>")
         for ep in story["episodes"]:
             parts.append(f"<p>{_md_bold(ep['summary'])}</p>")
             if ep["notable"]:

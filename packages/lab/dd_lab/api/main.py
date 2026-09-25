@@ -549,7 +549,12 @@ def regenerate_report(case_id: str) -> dict:
         from dd_lab.report import build_report
 
         progress("regenerating report...")
-        path = build_report(_settings.cases_root, case_id, actor="investigator")
+        # The model-written summary is attempted only when one is configured;
+        # with no key the report is complete without it (see report/builder.py).
+        path = build_report(
+            _settings.cases_root, case_id, actor="investigator",
+            llm_cfg=_settings.agent_config() if _settings.llm_api_key or _settings.use_agent else None,
+        )
         progress(f"report written to {path}")
         return {"ok": True, "report_path": str(path)}
 
