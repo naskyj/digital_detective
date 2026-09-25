@@ -14,7 +14,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from dd_lab.agent.config import AgentConfig
+from dd_lab.agent.config import AgentConfig, env_key_for
 
 
 def _config_dir() -> Path:
@@ -87,7 +87,10 @@ class AppSettings(BaseModel):
         if self.llm_model:
             cfg.model = self.llm_model
         cfg.base_url = self.llm_base_url or cfg.base_url
-        cfg.api_key = self.llm_api_key or cfg.api_key
+        # Settings first, then this provider's OWN environment variable.
+        # Re-resolved here because `provider` was just overridden above, and
+        # from_env() could only see whatever DD_LLM_PROVIDER said.
+        cfg.api_key = self.llm_api_key or cfg.api_key or env_key_for(cfg.provider)
         return cfg
 
     def judge_agent_config(self) -> AgentConfig:
@@ -96,7 +99,11 @@ class AppSettings(BaseModel):
         if self.judge_llm_model:
             cfg.model = self.judge_llm_model
         cfg.base_url = self.judge_llm_base_url or cfg.base_url
-        cfg.api_key = self.judge_llm_api_key or cfg.api_key
+        cfg.api_key = (
+            self.judge_llm_api_key or cfg.api_key
+            or env_key_for(cfg.provider, prefix="DD_JUDGE_LLM")
+            or env_key_for(cfg.provider)
+        )
         return cfg
 
     def save(self) -> None:

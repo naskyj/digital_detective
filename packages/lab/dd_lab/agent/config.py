@@ -27,6 +27,48 @@ _DEFAULT_MODELS = {
 }
 
 
+#: Which environment variable holds a key for which provider. A key is only
+#: ever read from the variable belonging to the provider actually in use.
+#:
+#: The previous fallback was one flat chain - ANTHROPIC_API_KEY, then
+#: OPENAI_API_KEY, then GEMINI_API_KEY, then GOOGLE_API_KEY - tried in order
+#: for every provider. On a machine with an OpenAI key in the environment and
+#: no Anthropic one, an anthropic-provider agent therefore picked up the
+#: OpenAI key and sent it to Anthropic, which answered
+#: "401 authentication_error: API key is invalid". That is indistinguishable
+#: from a genuinely bad Anthropic key, and it cost two days of debugging a
+#: key that was never being used: the real fault was that no Anthropic key
+#: existed at all and the code silently substituted somebody else's.
+#:
+#: `DD_LLM_API_KEY` (and `DD_JUDGE_LLM_API_KEY`) still work for any provider -
+#: those are explicit, so there is nothing to guess.
+_PROVIDER_ENV_KEYS: dict[str, tuple[str, ...]] = {
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "openai": ("OPENAI_API_KEY",),
+    "google": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "ollama": (),  # local, no key
+}
+
+
+def env_key_for(provider: str, prefix: str = "DD_LLM") -> str | None:
+    """The API key in the environment for THIS provider, or None.
+
+    Exists because AppSettings overrides `provider` after `from_env()` has
+    already run, so the key has to be resolvable again once the effective
+    provider is known - otherwise configuring "anthropic" in Settings while
+    ANTHROPIC_API_KEY is exported leaves the key unread.
+    """
+    import os as _os
+
+    if explicit := _os.environ.get(f"{prefix}_API_KEY"):
+        return explicit
+    for name in _PROVIDER_ENV_KEYS.get(provider, ()):
+        if val := _os.environ.get(name):
+            return val
+    return None
+
+
 @dataclass
 class AgentConfig:
     provider: str = "ollama"
@@ -61,7 +103,8 @@ class AgentConfig:
             provider=provider,
             model=get("MODEL") or _DEFAULT_MODELS.get(provider, DEFAULT_OLLAMA_MODEL),
             base_url=get("BASE_URL"),
-            api_key=get("API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
+            # Only this provider's own variable - see _PROVIDER_ENV_KEYS.
+            api_key=get("API_KEY", *_PROVIDER_ENV_KEYS.get(provider, ())),
         )
 
 
