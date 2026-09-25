@@ -12,13 +12,33 @@ from __future__ import annotations
 
 from dd_lab.investigate.correlate import CorrelatedEntity, build_correlation_report
 from dd_lab.investigate.entities import EntityHit, extract_entities
+from dd_lab.investigate.timeline import (
+    Coverage,
+    Episode,
+    TimeKind,
+    TimelineEvent,
+    build_case_narrative,
+    build_episodes,
+    load_events,
+    narrate,
+    time_kind,
+)
 from dd_lab.investigate.verify import ClaimVerification, verify_claim
 
 __all__ = [
-    "CorrelatedEntity",
-    "EntityHit",
     "ClaimVerification",
+    "CorrelatedEntity",
+    "Coverage",
+    "EntityHit",
+    "Episode",
+    "TimeKind",
+    "TimelineEvent",
+    "build_case_narrative",
     "build_correlation_report",
+    "build_episodes",
     "extract_entities",
+    "load_events",
+    "narrate",
+    "time_kind",
     "verify_claim",
 ]
