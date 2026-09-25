@@ -291,3 +291,162 @@ def test_classification_and_correlation_share_one_email_pattern():
     # Both come from the shared module - neither subsystem defines its own.
     assert _VALUE_PATTERNS[C.USER][0][0] is EMAIL_RE
     assert _EMAIL is EMAIL_STRICT_RE
+
+
+# ------------------------------------------------- significance and connections
+#
+# Ranking used to be `-len(e.artifacts)`, and `_related_rows` caps that list -
+# so every entity at or above the cap tied exactly and the sort degenerated to
+# alphabetical by value. On the real case that put Discord's cached
+# server-discovery names (growtopia, leagueoflegends, minecraft) above the
+# genuine invite codes in the evidence.
+
+
+def _ent(app, source_type, key, value, *, n=1, relevant=True, deleted=False, ts_offset=0):
+    return [
+        NormalizedArtifact(
+            # value fingerprint included: artifact_id is the primary key, so
+            # two different values at the same app/source/key would otherwise
+            # overwrite each other and the fixture would silently lose rows.
+            artifact_id=f"{app}:{source_type}:{key}:{abs(hash(value)) % 10**8}:{i}",
+            case_id="c1", app=app, source_type=source_type,
+            source_file=f"{app}/f{i}", source_locator=f"loc{i}",
+            key=key, value=value,
+            record_ts=_NOW + timedelta(minutes=ts_offset + i),
+            extracted_ts=_NOW, deleted=deleted,
+            classification=ClassificationResult(
+                category=C.CHAT_CONTENT, confidence=0.9, classifier_version="test",
+                relevant=relevant, relevance_score=0.9 if relevant else 0.0,
+            ),
+        )
+        for i in range(n)
+    ]
+
+
+def test_ranking_is_not_citation_count(wh):
+    """A widely-cached but uncorroborated value must rank BELOW a rarer one
+    that spans two applications - the exact inversion seen on the real case."""
+    noisy = "https://discord.gg/growtopia"
+    real = "https://discord.gg/RxPTgtyY"
+    arts = (
+        # 30 occurrences, one app, almost none independently relevant
+        _ent("discord", S.CACHE, "cache.body", noisy, n=1)
+        + _ent("discord", S.MEMORY_STRING, "mem.string", noisy, n=29, relevant=False)
+        # 4 occurrences, two apps, all relevant
+        + _ent("discord", S.CACHE, "cache.body", real, n=2)
+        + _ent("Slack", S.INDEXEDDB, "idb.messages.content", real, n=2)
+    )
+    wh.load_artifacts(arts)
+
+    report = build_correlation_report(wh, max_artifacts_per_entity=50)
+    order = [e.value for e in report]
+
+    assert order.index("RxPTgtyY") < order.index("growtopia"), order
+    by_value = {e.value: e for e in report}
+    assert by_value["growtopia"].occurrence_count == 30
+    assert by_value["RxPTgtyY"].occurrence_count == 4
+
+
+def test_occurrence_count_is_the_true_total_not_the_citation_cap(wh):
+    """The saturation bug itself: with a cap of 5, two entities at 20 and 40
+    occurrences both yield 5 citations. If the count comes from len(artifacts)
+    they are indistinguishable."""
+    wh.load_artifacts(
+        _ent("discord", S.CACHE, "cache.body", "https://discord.gg/AAAAAAAA", n=20)
+        + _ent("discord", S.MEMORY_STRING, "mem.string", "https://discord.gg/AAAAAAAA", n=20)
+        + _ent("discord", S.CACHE, "cache.body", "https://discord.gg/BBBBBBBB", n=5)
+        + _ent("discord", S.MEMORY_STRING, "mem.string", "https://discord.gg/BBBBBBBB", n=5)
+    )
+    report = build_correlation_report(wh, max_artifacts_per_entity=5)
+    by_value = {e.value: e for e in report}
+
+    assert len(by_value["AAAAAAAA"].artifacts) == 5   # citations capped
+    assert len(by_value["BBBBBBBB"].artifacts) == 5
+    assert by_value["AAAAAAAA"].occurrence_count == 40  # true totals survive
+    assert by_value["BBBBBBBB"].occurrence_count == 10
+
+
+def test_cross_app_is_distinguished_from_cross_storage(wh):
+    """`min_distinct_sources` is an OR, so "same id in discord/cache and
+    discord/indexeddb" qualified identically to "same id in Discord AND
+    Slack". One is a storage detail; the other links two applications."""
+    wh.load_artifacts(
+        _ent("discord", S.CACHE, "cache.body", "https://discord.gg/STORAGEON", n=1)
+        + _ent("discord", S.INDEXEDDB, "idb.content", "https://discord.gg/STORAGEON", n=1)
+        + _ent("discord", S.CACHE, "cache.body", "https://discord.gg/TWOAPPSXX", n=1)
+        + _ent("Slack", S.CACHE, "cache.body", "https://discord.gg/TWOAPPSXX", n=1)
+    )
+    by_value = {e.value: e for e in build_correlation_report(wh)}
+
+    assert by_value["STORAGEON"].cross_app is False
+    assert by_value["TWOAPPSXX"].cross_app is True
+    assert by_value["TWOAPPSXX"].significance > by_value["STORAGEON"].significance
+    assert any("2 different applications" in r for r in by_value["TWOAPPSXX"].reasons())
+
+
+def test_recovered_deleted_occurrences_are_surfaced_and_raise_significance(wh):
+    """`deleted` has been in the schema throughout and was carried by no
+    citation, timeline or report section - despite being the strongest single
+    flag available: someone tried to remove it and it survived."""
+    wh.load_artifacts(
+        _ent("discord", S.CACHE, "cache.body", "https://discord.gg/DELETEDAA", n=1)
+        + _ent("discord", S.INDEXEDDB, "idb.content", "https://discord.gg/DELETEDAA",
+               n=1, deleted=True)
+        + _ent("discord", S.CACHE, "cache.body", "https://discord.gg/ORDINARYB", n=1)
+        + _ent("discord", S.INDEXEDDB, "idb.content", "https://discord.gg/ORDINARYB", n=1)
+    )
+    by_value = {e.value: e for e in build_correlation_report(wh)}
+
+    assert by_value["DELETEDAA"].deleted_count == 1
+    assert by_value["ORDINARYB"].deleted_count == 0
+    assert by_value["DELETEDAA"].significance > by_value["ORDINARYB"].significance
+    assert any("RECOVERED DELETED" in r for r in by_value["DELETEDAA"].reasons())
+    assert any(c.deleted for c in by_value["DELETEDAA"].artifacts)
+
+
+def test_memory_only_entity_is_flagged(wh):
+    """Live in a process at acquisition but never persisted - a disk-only
+    examination would have missed it entirely."""
+    wh.load_artifacts(
+        _ent("discord", S.MEMORY_STRING, "mem.string", "https://discord.gg/MEMONLYAA", n=1)
+        + _ent("discord", S.MEMORY_PROCESS, "mem.proc", "https://discord.gg/MEMONLYAA", n=1)
+    )
+    e = build_correlation_report(wh)[0]
+
+    assert e.memory_only is True
+    assert any("never written to disk" in r for r in e.reasons())
+
+
+def test_two_entities_in_one_artifact_are_linked(wh):
+    """The "how are things connected" layer, which did not exist:
+    extract_entities returns a list per row, so an artifact yielding both an
+    email and a Discord id had that pairing discarded on the next iteration."""
+    both = "contact kim@example.com or join https://discord.gg/PAIREDXYZ"
+    wh.load_artifacts(
+        _ent("discord", S.CACHE, "cache.body", both, n=1)
+        + _ent("discord", S.MEMORY_STRING, "mem.string", both, n=1)
+    )
+    report = build_correlation_report(wh)
+    by_type = {e.entity_type: e for e in report}
+
+    assert "email" in by_type and "discord_invite" in by_type
+    linked = by_type["email"].co_occurring
+    assert [c.value for c in linked] == ["PAIREDXYZ"]
+    assert linked[0].shared_artifacts == 2
+    assert any("same artifact as" in r for r in by_type["email"].reasons())
+
+
+def test_reasons_are_empty_for_nothing_and_never_invent(wh):
+    """reasons() is the plain-English version of the score. It must describe
+    only what was computed - an entity with one storage type, no deletions and
+    no partners gets no claims made about it."""
+    wh.load_artifacts(
+        _ent("discord", S.CACHE, "cache.body", "https://discord.gg/PLAINAAAA", n=1)
+        + _ent("Slack", S.CACHE, "cache.body", "https://discord.gg/PLAINAAAA", n=1)
+    )
+    e = build_correlation_report(wh)[0]
+    joined = " ".join(e.reasons())
+
+    assert "RECOVERED DELETED" not in joined
+    assert "never written to disk" not in joined
+    assert "same artifact as" not in joined
