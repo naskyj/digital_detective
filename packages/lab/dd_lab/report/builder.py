@@ -9,6 +9,7 @@ chain-of-custody + agent-audit appendices.
 from __future__ import annotations
 
 import html
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from dd_lab.agent.audit import AuditLog
 from dd_lab.agent.findings import FindingsStore
 from dd_lab.case import CaseMeta
 from dd_lab.etl.warehouse import Warehouse
-from dd_lab.investigate import build_correlation_report
+from dd_lab.investigate import build_case_narrative, build_correlation_report
 
 _CSS = """
 :root{--fg:#1a1a1a;--muted:#666;--line:#e2e2e2;--accent:#8b1a1a;--hi:#fff4f4}
@@ -48,6 +49,27 @@ def _esc(v: object) -> str:
     return html.escape(str(v)) if v is not None else ""
 
 
+class _Sections:
+    """Section numbers were hardcoded strings, so a case with no keywords
+    produced a report that jumped from 5 straight to 7. Numbering is now
+    derived from what is actually emitted."""
+
+    def __init__(self) -> None:
+        self.n = 0
+
+    def __call__(self, title: str) -> str:
+        self.n += 1
+        return f"<h2>{self.n}. {_esc(title)}</h2>"
+
+
+def _md_bold(text: str) -> str:
+    """The narrative is generated once, in dd_lab.investigate.timeline, and
+    rendered in several places. It uses `**bold**`; escape first, then turn
+    only that one marker into HTML - never a general markdown pass, which
+    would be an injection surface for evidence-derived text."""
+    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", _esc(text))
+
+
 def _rows(headers: list[str], rows: list[list], highlight: bool = False) -> str:
     head = "".join(f"<th>{_esc(h)}</th>" for h in headers)
     body = ""
@@ -72,10 +94,19 @@ def build_report(
         total = wh.count()
         by_cat = wh.query("SELECT category, artifacts, round(mean_confidence,2) AS conf FROM v_by_category")
         by_src = wh.query("SELECT app, source_type, artifacts FROM v_source_breakdown")
+        # Reads `artifacts`, not `v_timeline`: the view selects neither
+        # source_file nor source_locator, which made the timeline the ONLY
+        # report section whose rows could not be traced back to evidence.
+        # Expiry rows are excluded here for the same reason the narrative
+        # excludes them - a cookie's expires_utc is a future validity
+        # boundary, not something that happened (see investigate/timeline.py).
         timeline = wh.query(
-            "SELECT strftime(record_ts,'%Y-%m-%d %H:%M') AS ts, app, category, "
-            "substr(key,1,50) AS key, substr(value,1,80) AS value "
-            "FROM v_timeline WHERE relevant LIMIT 120"
+            "SELECT strftime(record_ts,'%Y-%m-%d %H:%M') AS ts, app, category, deleted, "
+            "substr(key,1,50) AS key, substr(value,1,80) AS value, "
+            "source_file, source_locator "
+            "FROM artifacts WHERE relevant AND record_ts IS NOT NULL "
+            "AND NOT regexp_matches(key, '\\.(expires?_utc|expiry|expires_at|expiration)$') "
+            "ORDER BY record_ts LIMIT 200"
         )
         high = wh.query(
             "SELECT category, round(confidence,2) AS conf, app, substr(key,1,60) AS key, "
@@ -83,14 +114,16 @@ def build_report(
         )
         kw_hits = _keyword_hits(wh, meta.keywords)
         correlations = build_correlation_report(wh)
+        story = build_case_narrative(wh)
     finally:
         wh.close()
 
     parts: list[str] = [f"<style>{_CSS}</style><div class='wrap'>"]
     parts.append(f"<h1>Forensic Analysis Report</h1><p class='sub'>{_esc(meta.name)} &middot; case <code>{_esc(case_id)}</code></p>")
+    sec = _Sections()
 
     sig = "<span class='pill ok'>verified</span>" if verification.ok else "<span class='pill bad'>FAILED</span>"
-    parts.append("<h2>1. Case &amp; Evidence</h2>")
+    parts.append(sec("Case & Evidence"))
     parts.append("<div class='kv'>")
     parts.append(f"<div>Case name</div><div>{_esc(meta.name)}</div>")
     parts.append(f"<div>Description</div><div>{_esc(meta.description) or '&mdash;'}</div>")
@@ -109,20 +142,55 @@ def build_report(
                      f"Signature valid: {verification.signature_valid}. Issues: "
                      f"{_esc(verification.issues[:10])}</p>")
 
-    parts.append("<h2>2. Artifact Categories</h2>")
+    # Placed second, immediately after provenance: a reader should be able to
+    # learn what the evidence shows before being handed 200 rows of it. The
+    # prose is computed in dd_lab.investigate.timeline - no model involved, so
+    # it is identical on every run and on every machine.
+    parts.append(sec(f"What Happened ({story['episode_count']} episodes)"))
+    cov = story["coverage"]
+    parts.append(
+        "<p class='sub'>Reconstructed from artifacts that carry an event timestamp, grouped "
+        "into episodes of continuous activity. Cookie expiry dates are excluded: they are "
+        "future validity boundaries, not events. This section is generated deterministically "
+        "from the evidence and states its own coverage rather than implying it describes the "
+        "whole case.</p>"
+    )
+    if story["episodes"]:
+        parts.append(
+            f"<p><strong>{cov['events']:,} of {cov['total']:,} relevant artifacts "
+            f"({cov['event_pct']}%)</strong> carry an event timestamp and are described below. "
+            f"{cov['state']:,} have no intrinsic time and are present as state at acquisition"
+            + (f"; {cov['expiry']:,} are cookie expiry dates and are excluded from the sequence"
+               if cov["expiry"] else "")
+            + ".</p>"
+        )
+        for ep in story["episodes"]:
+            parts.append(f"<p>{_md_bold(ep['summary'])}</p>")
+            if ep["notable"]:
+                parts.append(_rows(
+                    ["", "Time", "App", "Category", "Key", "Value", "File", "Locator"],
+                    [["DELETED" if n["deleted"] else "", n["ts"], n["app"], n["category"],
+                      n["key"], n["value"], n["source_file"], n["source_locator"]]
+                     for n in ep["notable"]],
+                    highlight=True,
+                ))
+    else:
+        parts.append(f"<p>{_esc(story['narrative'])}</p>")
+
+    parts.append(sec("Artifact Categories"))
     parts.append(_rows(["Category", "Artifacts", "Mean confidence"],
                        [[c["category"], f"{c['artifacts']:,}", c["conf"]] for c in by_cat]))
     parts.append("<h3>By source</h3>")
     parts.append(_rows(["App", "Source", "Artifacts"],
                        [[c["app"], c["source_type"], f"{c['artifacts']:,}"] for c in by_src]))
 
-    parts.append(f"<h2>3. High-Priority Findings ({len(high)})</h2>")
+    parts.append(sec(f"High-Priority Findings ({len(high)})"))
     parts.append("<p class='sub'>Credentials, payment data, location data and chat content, ranked by sensitivity and confidence.</p>")
     parts.append(_rows(["Category", "Conf", "App", "Key", "Value"],
                        [[h["category"], h["conf"], h["app"], h["key"], h["value"]] for h in high],
                        highlight=True) if high else "<p>None.</p>")
 
-    parts.append(f"<h2>4. Findings ({len(findings)})</h2>")
+    parts.append(sec(f"Findings ({len(findings)})"))
     parts.append(
         "<p class='sub'>Every conclusion the analysis produced, with the citations it rests on. "
         "Each citation was independently re-verified against the warehouse and its value/hash "
@@ -167,7 +235,7 @@ def build_report(
     else:
         parts.append("<p>No findings were written for this case.</p>")
 
-    parts.append(f"<h2>5. Cross-Source Correlations ({len(correlations)})</h2>")
+    parts.append(sec(f"Cross-Source Correlations ({len(correlations)})"))
     parts.append(
         "<p class='sub'>Identifiers (ids, invite links, emails, asset ids) that appear in more "
         "than one application or storage mechanism — a link a single artifact cannot show on its "
@@ -176,17 +244,32 @@ def build_report(
         "only ever found by scanning independently RELEVANT artifacts (see the Relevant column "
         "below), but once found, every occurrence of it anywhere in the case is cited as "
         "corroborating evidence, relevant or not — a plumbing/telemetry match sharing the same "
-        "value is kept, not hidden, just clearly marked apart from a genuinely relevant hit.</p>"
+        "value is kept, not hidden, just clearly marked apart from a genuinely relevant hit. "
+        "Ordered by significance &mdash; spread across applications and storage, independent "
+        "corroboration, and recovered deletions &mdash; never by raw occurrence count, which "
+        "was measured on real evidence not to distinguish a genuine identifier from cached "
+        "boilerplate.</p>"
     )
     if correlations:
         for e in correlations:
+            cross = " &middot; <strong>spans applications</strong>" if e.cross_app else ""
+            deleted = (f" &middot; <strong>{e.deleted_count} in recovered deleted records</strong>"
+                       if e.deleted_count else "")
             parts.append(
-                f"<h3>{_esc(e.entity_type)} &mdash; <code>{_esc(e.value)}</code> "
-                f"({len(e.artifacts)} artifacts across {_esc(', '.join(e.apps))})</h3>"
+                f"<h3>{_esc(e.entity_type)} &mdash; <code>{_esc(e.value)}</code></h3>"
+                f"<p class='sub'>significance {e.significance} &middot; "
+                f"{e.occurrence_count:,} occurrence(s), {e.relevant_count:,} independently "
+                f"relevant &middot; {_esc(', '.join(e.apps))}{cross}{deleted}</p>"
             )
+            # Why it is here, in plain English. A bare rank tells an
+            # investigator nothing about what they might have missed.
+            reasons = e.reasons()
+            if reasons:
+                parts.append("<ul>" + "".join(f"<li>{_esc(r)}</li>" for r in reasons) + "</ul>")
             parts.append(_rows(
-                ["Relevant", "Timestamp", "App", "Source", "File", "Locator", "Key", "Value"],
-                [["✓" if c.relevant else "—", c.record_ts, c.app, c.source_type, c.source_file,
+                ["Relevant", "Deleted", "Timestamp", "App", "Source", "File", "Locator", "Key", "Value"],
+                [["✓" if c.relevant else "—", "DELETED" if c.deleted else "",
+                  c.record_ts, c.app, c.source_type, c.source_file,
                   c.source_locator, c.key, c.value[:160]] for c in e.timeline()],
                 highlight=True,
             ))
@@ -194,15 +277,23 @@ def build_report(
         parts.append("<p>No identifier was found in more than one app or storage mechanism.</p>")
 
     if meta.keywords:
-        parts.append(f"<h2>6. Investigation Keyword Hits ({sum(k['hits'] for k in kw_hits)})</h2>")
+        parts.append(sec(f"Investigation Keyword Hits ({sum(k['hits'] for k in kw_hits)})"))
         parts.append(_rows(["Keyword", "Hits", "Relevant hits", "Example"],
                            [[k["keyword"], k["hits"], k["relevant_hits"], k["example"]]
                             for k in kw_hits]))
 
-    parts.append(f"<h2>7. Evidence Timeline ({len(timeline)} of the earliest non-generic events)</h2>")
-    parts.append(_rows(["Timestamp", "App", "Category", "Key", "Value"],
-                       [[t["ts"], t["app"], t["category"], t["key"], t["value"]] for t in timeline])
-                 if timeline else "<p>No timestamped artifacts.</p>")
+    parts.append(sec(f"Evidence Timeline ({len(timeline)} events, oldest first)"))
+    parts.append(
+        "<p class='sub'>Every row cites the file and in-file locator it came from. Cookie "
+        "expiry dates are excluded. See the What Happened section above for the same events "
+        "grouped into episodes.</p>"
+    )
+    parts.append(_rows(
+        ["", "Timestamp", "App", "Category", "Key", "Value", "File", "Locator"],
+        [["DELETED" if t["deleted"] else "", t["ts"], t["app"], t["category"], t["key"],
+          t["value"], t["source_file"], t["source_locator"]] for t in timeline],
+        highlight=True,
+    ) if timeline else "<p>No timestamped artifacts.</p>")
 
     parts.append("<h2>Appendix A &mdash; Chain of Custody</h2>")
     coc = CustodyLog(layout.dir)
