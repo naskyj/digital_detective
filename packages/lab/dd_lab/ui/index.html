@@ -838,7 +838,14 @@ async function caseExplorer(id, w){
   async function paneFor(s){
     if(FILES_PANEL_FN[s.type]) return FILES_PANEL_FN[s.type](id, s.app);
     if(s.type==='correlations') return correlationsPanel(id);
-    if(s.type==='timeline') return timelinePanel(id);
+    if(s.type==='timeline'){
+      // Narrative first, then the row-level table underneath it - the
+      // question a reader has is "what happened", not "give me 100 rows".
+      const holder=el('div',{});
+      holder.append(await narrativePanel(id));
+      holder.append(timelinePanel(id));
+      return holder;
+    }
     if(s.type==='source') return browser(id, w.by_category.map(c=>c.category).filter(Boolean),
       {app:s.app, source_type:s.source_type});
     return overviewPanel(id, w);
@@ -1073,11 +1080,23 @@ async function correlationsPanel(id){
         el('span',{style:'width:14px;flex-shrink:0;opacity:.7'},isOpen?'▾':'▸'),
         el('span',{class:'pill'},e.entity_type.replace(/_/g,' ')),
         el('span',{class:'mono',style:'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'},e.value),
+        e.cross_app?el('span',{class:'pill bad',title:'the same identifier is present in more than one application'},'spans apps'):'',
+        e.deleted_count?el('span',{class:'pill bad',title:'occurs in recovered deleted records'},e.deleted_count+' deleted'):'',
         el('span',{class:'muted',style:'flex-shrink:0'},e.apps.join(', ')),
-        el('span',{class:'muted',style:'flex-shrink:0'},e.timeline.length+' artifact(s)'));
+        // The TRUE occurrence count, not the capped citation list - those are
+        // different numbers whenever an entity is common.
+        el('span',{class:'muted',style:'flex-shrink:0',title:'significance '+e.significance},
+          (e.occurrence_count!=null?e.occurrence_count:e.timeline.length)+' occurrence(s)'));
       head.onclick=()=>{ if(isOpen) expanded.delete(key); else expanded.add(key); render(); };
       out.append(head);
       if(!isOpen) return;
+      // Why this entity is where it is - the point of the view is to show an
+      // investigator something they would not otherwise have noticed.
+      if(e.reasons && e.reasons.length){
+        const ul=el('ul',{style:'margin:6px 0 8px 18px;color:var(--fg)'});
+        e.reasons.forEach(r=>ul.append(el('li',{style:'margin:2px 0'},r)));
+        out.append(ul);
+      }
       const t=el('table',{style:'table-layout:fixed;width:100%;margin-bottom:12px'},el('thead',{},el('tr',{},
         ...['','Time','App','Source','Key','Value'].map(h=>el('th',{},h)))));
       const tb=el('tbody',{});
@@ -1086,7 +1105,8 @@ async function correlationsPanel(id){
           onclick:()=>showArtifactDetail(id,c.artifact_id)},
           el('td',{title:c.relevance_score!=null?'relevance_score: '+c.relevance_score.toFixed(2):
             'kept as corroborating evidence, not independently relevant'},
-            c.relevant?el('span',{class:'pill ok'},'relevant'):''),
+            c.deleted?el('span',{class:'pill bad',title:'recovered deleted record'},'deleted'):
+            (c.relevant?el('span',{class:'pill ok'},'relevant'):'')),
           el('td',{class:'mono',title:c.record_ts||''},c.record_ts?ago(c.record_ts):''),
           el('td',{},c.app),
           el('td',{},SRC_LABELS[c.source_type]||c.source_type),
@@ -1108,6 +1128,59 @@ async function correlationsPanel(id){
   catch(e){ out.innerHTML=''; out.append(el('div',{class:'hint'},'Could not load: '+e.message)); return wrap; }
   render();
   return wrap;
+}
+
+// The episode reconstruction, above the row-level table. Deterministic and
+// computed server-side (dd_lab/investigate/timeline.py) - the same account
+// the report carries, so the UI and the document never disagree.
+async function narrativePanel(id){
+  const box=el('div',{class:'panel'});
+  box.append(el('h3',{style:'margin:0 0 4px'},'What happened'));
+  const body=el('div',{});
+  box.append(body);
+  body.append(el('div',{class:'hint'},'Reconstructing…'));
+  try{
+    const d=await api(`/api/cases/${id}/narrative`);
+    body.innerHTML='';
+    const cov=d.coverage||{};
+    body.append(el('div',{class:'hint',style:'margin-bottom:8px'},
+      `${(cov.events||0).toLocaleString()} of ${(cov.total||0).toLocaleString()} relevant artifacts `+
+      `(${cov.event_pct||0}%) carry an event timestamp. `+
+      `${(cov.state||0).toLocaleString()} have no intrinsic time and are state at acquisition`+
+      (cov.expiry?`; ${cov.expiry} cookie expiry dates excluded`:'')+'.'));
+    if(!d.episodes || !d.episodes.length){
+      body.append(el('div',{},'No timestamped events to reconstruct a sequence from.'));
+      return box;
+    }
+    d.episodes.forEach(ep=>{
+      const card=el('div',{style:'border-left:3px solid var(--accent2);padding:6px 10px;margin:8px 0'});
+      // ep.summary is the same sentence the report prints; render its
+      // **bold** marker, nothing else - it is generated text over evidence.
+      const html=ep.summary.replace(/&/g,'&amp;').replace(/</g,'&lt;')
+                           .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+      const p=el('div',{}); p.innerHTML=html; card.append(p);
+      if(ep.deleted_count) card.append(el('span',{class:'pill bad'},
+        `${ep.deleted_count} recovered deleted`));
+      if(ep.notable && ep.notable.length){
+        const t=el('table',{style:'table-layout:fixed;width:100%;margin-top:6px'},
+          el('thead',{},el('tr',{},...['Time','App','Category','Key','Value'].map(h=>el('th',{},h)))));
+        const tb=el('tbody',{});
+        ep.notable.forEach(n=>tb.append(el('tr',{style:'cursor:pointer',
+          title:`${n.source_file} :: ${n.source_locator} · click for full detail`,
+          onclick:()=>showArtifactDetail(id,n.artifact_id)},
+          el('td',{class:'mono'},(n.ts||'').toString().slice(11,16)),
+          el('td',{},n.app),
+          el('td',{},el('span',{class:'pill cat'},n.category||'')),
+          el('td',{class:'mono'},n.key),
+          el('td',{class:'wrap'},n.value))));
+        t.append(tb); card.append(t);
+      }
+      body.append(card);
+    });
+  }catch(e){
+    body.innerHTML=''; body.append(el('div',{class:'hint'},'Narrative unavailable: '+e.message));
+  }
+  return box;
 }
 
 function timelinePanel(id){

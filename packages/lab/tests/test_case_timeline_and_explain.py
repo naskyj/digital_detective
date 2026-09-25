@@ -97,3 +97,39 @@ def test_explain_classification_unknown_artifact_id(tmp_path):
     result = explain_classification(deps, "does-not-exist")
     assert result["ok"] is False
     assert "does-not-exist" in result["reason"]
+
+
+# --------------------------------------------------- narrative on the tool
+#
+# case_timeline used to return a flat `events` list and nothing else, with
+# `event_count = len(rows)` - i.e. capped at `limit`, so the model could not
+# learn how many events the case actually had - and no offset, so it could
+# only ever see the OLDEST N. Answering "what happened" meant re-deriving a
+# sequence from raw rows on every conversation, differently each time.
+
+
+def test_case_timeline_returns_the_computed_narrative(tmp_path):
+    out = case_timeline(_deps(tmp_path))
+
+    assert "narrative" in out and out["narrative"]
+    assert out["episode_count"] >= 1
+    assert out["episodes"][0]["apps"] == ["Discord"]
+    assert "summary" in out["episodes"][0]
+    # coverage is the honest bound on what any account of the case can claim
+    assert set(out["coverage"]) == {"total", "events", "expiry", "state", "event_pct"}
+
+
+def test_case_timeline_event_count_is_the_true_total_not_the_page_size(tmp_path):
+    deps = _deps(tmp_path)
+    full = case_timeline(deps, relevant_only=False)
+    paged = case_timeline(deps, relevant_only=False, limit=1)
+
+    assert paged["events_shown"] == 1
+    assert paged["event_count"] == full["event_count"] > 1
+
+
+def test_case_timeline_events_carry_provenance(tmp_path):
+    """Every other tool's rows are citable; these were not."""
+    ev = case_timeline(_deps(tmp_path))["events"][0]
+    assert ev["source_file"] and ev["source_locator"]
+    assert "deleted" in ev

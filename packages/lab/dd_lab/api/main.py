@@ -786,6 +786,29 @@ def case_correlations(case_id: str, min_distinct_sources: int = 2) -> dict:
     return correlate_entities(deps, min_distinct_sources)
 
 
+@app.get("/api/cases/{case_id}/narrative")
+def case_narrative(case_id: str, relevant_only: bool = True) -> dict:
+    """What happened, reconstructed as episodes of continuous activity.
+
+    Deterministic - same evidence, same account, on any machine, with no
+    model and no network. The flat `/timeline` endpoint below is still the
+    row-level view; this is the one that answers the question a reader
+    actually has."""
+    layout = _layout(case_id)
+    if not layout.manifest.is_file():
+        raise HTTPException(404, "case not found")
+    if not layout.warehouse.is_file():
+        raise HTTPException(409, "case not processed yet - run analysis first")
+    from dd_lab.etl.warehouse import Warehouse
+    from dd_lab.investigate import build_case_narrative
+
+    wh = Warehouse(layout.warehouse)
+    try:
+        return {"ok": True, **build_case_narrative(wh, relevant_only=relevant_only)}
+    finally:
+        wh.close()
+
+
 @app.get("/api/cases/{case_id}/timeline")
 def case_timeline(
     case_id: str,

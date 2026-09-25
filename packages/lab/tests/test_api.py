@@ -773,3 +773,65 @@ def test_artifact_browsing_extras_with_real_evidence(tmp_path, monkeypatch):
         params={"app": "app", "path": "/etc/passwd", "table": table},
     )
     assert bad_path.status_code == 404
+
+
+def test_narrative_endpoint_returns_episodes_and_coverage(client):
+    """GET /narrative is the "what happened" view, computed server-side with
+    no model and no network - the flat /timeline endpoint stays the row-level
+    one. Coverage is returned alongside so a caller can never present the
+    account as though it describes the whole case."""
+    from datetime import UTC, datetime, timedelta
+
+    from dd_core.casedir import CaseLayout
+    from dd_core.enums import ArtifactCategory as C
+    from dd_core.enums import SourceType as S
+    from dd_core.manifest import AcquisitionHost, Manifest
+    from dd_core.schema import ClassificationResult, NormalizedArtifact
+    from dd_core.signing import generate_keypair
+    from dd_lab.api import main as main_mod
+    from dd_lab.etl.warehouse import Warehouse
+
+    now = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
+    layout = CaseLayout(main_mod._settings.cases_root, "case_narr")
+    # the endpoint requires a real case, i.e. a signed manifest - a bare
+    # warehouse on disk is not one
+    layout.dir.mkdir(parents=True, exist_ok=True)
+    layout.create_evidence_skeleton()
+    priv, pub = generate_keypair()
+    Manifest(
+        case_id="case_narr", collector_version="t", operator="t",
+        host=AcquisitionHost(hostname="h", os="t", os_version="0", username="u", timezone="UTC"),
+        started_ts=now, completed_ts=now, target_apps=[], entries=[],
+        public_key_pem=pub.decode(),
+    ).write(layout.dir, priv)
+    wh = Warehouse(layout.warehouse)
+    try:
+        wh.load_artifacts([
+            NormalizedArtifact(
+                artifact_id=f"narr-{i}", case_id="case_narr", app=app,
+                source_type=S.CACHE, source_file=f"{app}/Cache/f{i}",
+                source_locator=f"loc{i}", key="cache.url", value=f"https://x/{i}",
+                record_ts=now + timedelta(minutes=m), extracted_ts=now,
+                classification=ClassificationResult(
+                    category=C.CHAT_CONTENT, confidence=0.9, relevant=True,
+                    relevance_score=0.9, classifier_version="test"),
+            )
+            for i, (app, m) in enumerate([("discord", 0), ("Slack", 10), ("discord", 600)])
+        ])
+        wh.build_views()
+    finally:
+        wh.close()
+
+    d = client.get("/api/cases/case_narr/narrative").json()
+
+    assert d["ok"] is True
+    # 10-hour gap splits the third event into its own episode
+    assert d["episode_count"] == 2
+    assert d["episodes"][0]["apps"] == ["discord", "Slack"]   # first appearance order
+    assert "Begins in discord" in d["episodes"][0]["summary"]
+    assert d["coverage"]["events"] == 3
+    assert "What happened" in d["narrative"]
+
+
+def test_narrative_endpoint_404s_for_an_unknown_case(client):
+    assert client.get("/api/cases/nope-not-a-case/narrative").status_code == 404

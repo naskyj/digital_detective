@@ -23,7 +23,7 @@ from dd_lab.case import CaseMeta
 from dd_lab.classify import Classifier
 from dd_lab.etl.warehouse import Warehouse
 from dd_lab.ingest import IntegrityError, ingest_case
-from dd_lab.investigate import build_correlation_report, verify_claim
+from dd_lab.investigate import build_case_narrative, build_correlation_report, verify_claim
 from dd_lab.parsers import discover_apps
 from dd_lab.parsers.base import MEMORY
 
@@ -228,6 +228,23 @@ def correlate_entities(deps: InvestigationDeps, min_distinct_sources: int = 2) -
                 "value": e.value,
                 "apps": e.apps,
                 "source_types": e.source_types,
+                # Ranking signals, so the model reasons about the same
+                # evidence the ordering is built from instead of inferring
+                # importance from position in the list. `reasons` is the
+                # plain-English form; `why it matters` is exactly what the
+                # model is being asked to help an investigator see.
+                "significance": e.significance,
+                "occurrence_count": e.occurrence_count,
+                "relevant_count": e.relevant_count,
+                "deleted_count": e.deleted_count,
+                "cross_app": e.cross_app,
+                "memory_only": e.memory_only,
+                "reasons": e.reasons(),
+                "co_occurring": [
+                    {"entity_type": c.entity_type, "value": c.value,
+                     "shared_artifacts": c.shared_artifacts}
+                    for c in e.co_occurring
+                ],
                 "timeline": [
                     {
                         "artifact_id": c.artifact_id, "app": c.app, "source_type": c.source_type,
@@ -239,6 +256,10 @@ def correlate_entities(deps: InvestigationDeps, min_distinct_sources: int = 2) -
                         # agent/chat can tell a genuinely relevant hit apart from an
                         # incidental one instead of treating every citation as equal.
                         "relevant": c.relevant, "relevance_score": c.relevance_score,
+                        # Someone tried to remove this and it survived - the
+                        # strongest single flag in the schema, and carried by
+                        # no citation until now.
+                        "deleted": c.deleted,
                     }
                     for c in e.timeline()
                 ],
@@ -257,19 +278,53 @@ def case_timeline(deps: InvestigationDeps, *, relevant_only: bool = True, limit:
     just its own occurrences in order. Defaults to relevant_only=True (the
     primary signal this pipeline produces) - pass relevant_only=False only
     if you deliberately need the unfiltered view, e.g. to sanity-check
-    whether something borderline was excluded."""
+    whether something borderline was excluded.
+
+    Returns `narrative` and `episodes` alongside the raw events: the tool has
+    already grouped the events into episodes of continuous activity, named
+    which application each one starts in and when the others join, and
+    computed what fraction of the case carries an event timestamp at all.
+    Build on that rather than re-deriving a sequence from `events` - it is
+    deterministic, so it does not change between conversations, and
+    `coverage` is the honest bound on what any account of this case can
+    claim. Cookie expiry dates are already excluded: they are future
+    validity boundaries, not events."""
     wh = Warehouse(deps.layout.warehouse)
     try:
+        story = build_case_narrative(wh, relevant_only=relevant_only, limit=max(limit, 5000))
         clause = "WHERE record_ts IS NOT NULL" + (" AND relevant" if relevant_only else "")
         rows = wh.query(
             f"SELECT record_ts, app, source_type, category, relevant, relevance_score, "
-            f"key, substr(value,1,300) AS value, artifact_id FROM artifacts {clause} "
+            f"key, substr(value,1,300) AS value, artifact_id, source_file, source_locator, "
+            f"deleted, count(*) OVER () AS _total FROM artifacts {clause} "
+            f"AND NOT regexp_matches(key, '\\.(expires?_utc|expiry|expires_at|expiration)$') "
             f"ORDER BY record_ts LIMIT ?",
             [int(limit)],
         )
     finally:
         wh.close()
-    return {"relevant_only": relevant_only, "event_count": len(rows), "events": rows}
+    total = int(rows[0]["_total"]) if rows else 0
+    for r in rows:
+        r.pop("_total", None)
+    return {
+        "relevant_only": relevant_only,
+        # The narrative and its episode structure come first deliberately:
+        # answering "what happened" from 200 raw rows is work the tool has
+        # already done deterministically, and re-deriving it per conversation
+        # invites a different answer each time.
+        "narrative": story["narrative"],
+        "coverage": story["coverage"],
+        "episode_count": story["episode_count"],
+        "episodes": [
+            {k: v for k, v in ep.items() if k != "notable"} | {"notable": ep["notable"]}
+            for ep in story["episodes"]
+        ],
+        # `event_count` used to be len(rows), i.e. capped at `limit`, so the
+        # model could not learn how many events the case actually has.
+        "event_count": total,
+        "events_shown": len(rows),
+        "events": rows,
+    }
 
 
 def explain_classification(deps: InvestigationDeps, artifact_id: str) -> dict:
@@ -459,11 +514,20 @@ def correlate_and_write_findings(deps: InvestigationDeps, min_distinct_sources: 
     written = []
     for e in entities:
         citations = [{"artifact_id": c.artifact_id, "quote": e.value} for c in e.artifacts]
+        # The claim used to be one sentence restating the correlation table -
+        # "appears in N artifact(s) across app(s) X" - which added nothing a
+        # reader could not see in the table itself, and gave the judge a
+        # statement true by construction to review. It now carries the
+        # computed reasons: what makes this entity worth a second look, or
+        # what argues it is cached boilerplate.
         claim = (
-            f"The {e.entity_type.replace('_', ' ')} '{e.value}' appears in {len(e.artifacts)} "
-            f"artifact(s) across app(s) {', '.join(e.apps)} and source type(s) "
-            f"{', '.join(e.source_types)}."
+            f"The {e.entity_type.replace('_', ' ')} '{e.value}' occurs "
+            f"{e.occurrence_count} time(s) in this case, across app(s) "
+            f"{', '.join(e.apps)} and source type(s) {', '.join(e.source_types)}."
         )
+        reasons = e.reasons()
+        if reasons:
+            claim += " " + " ".join(reasons)
         written.append(write_finding(deps, claim, citations, entity_type=e.entity_type, entity_value=e.value))
     return {"ok": True, "finding_count": len(written), "findings": written}
 
