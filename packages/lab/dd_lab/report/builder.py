@@ -198,6 +198,25 @@ def build_report(
     else:
         parts.append(f"<p>{_esc(story['narrative'])}</p>")
 
+    # Inferred times that fall outside every recorded episode. Reported, never
+    # plotted as activity: an object created in the past being referenced now
+    # is a different fact from something happening then.
+    outside = story.get("referenced_outside_window") or {}
+    if outside.get("count"):
+        parts.append(
+            f"<h3>Referenced outside the recorded activity window "
+            f"({outside['count']:,})</h3>"
+            f"<p class='sub'>Artifacts referencing objects created between "
+            f"{_esc(str(outside['earliest'])[:10])} and {_esc(str(outside['latest'])[:10])}, "
+            f"outside every episode above. These are evidence that older material was present "
+            f"on the device, not evidence of activity at those times.</p>"
+        )
+        parts.append(_rows(
+            ["Object created", "App", "Derived from", "Key", "Value"],
+            [[str(e["ts"])[:19], e["app"], e["time_source"], e["key"], e["value"]]
+             for e in outside["examples"]],
+        ))
+
     parts.append(sec("Artifact Categories"))
     parts.append(_rows(["Category", "Artifacts", "Mean confidence"],
                        [[c["category"], f"{c['artifacts']:,}", c["conf"]] for c in by_cat]))
