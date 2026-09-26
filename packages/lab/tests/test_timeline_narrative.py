@@ -104,7 +104,7 @@ def test_state_artifacts_are_counted_not_silently_dropped(wh):
     out = build_case_narrative(wh)
 
     assert out["coverage"] == {"total": 10, "events": 1, "expiry": 0, "state": 9,
-                               "event_pct": 10.0}
+                               "inferred": 0, "placed": 1, "event_pct": 10.0}
     assert "9 have no intrinsic time" in out["narrative"]
     assert "10.0%" in out["narrative"]
 
@@ -221,3 +221,125 @@ def test_notable_leads_with_the_most_sensitive_category(wh):
     ])
     notable = build_case_narrative(wh)["episodes"][0]["notable"]
     assert notable[0]["category"] == "CREDENTIAL", [n["category"] for n in notable]
+
+
+# ------------------------------------------------- inferred time
+#
+# Only cache and cookies record a time at all. On the real case that left
+# 5,135 relevant artifacts undated, 4,948 of them memory strings - a raw
+# string carved from RAM has no metadata. But 505 of those carried a Discord
+# snowflake, which encodes its creation time exactly, plus 97 an epoch-ms
+# value and 24 an ISO datetime. Decoding those took coverage from 608 placed
+# events to 1,264.
+
+
+def test_snowflake_decodes_to_its_creation_time():
+    from dd_lab.investigate.timeline import derive_time
+
+    cap = datetime(2026, 10, 14)
+    got = derive_time("https://cdn.discordapp.com/x/1548680248164483084/y", not_after=cap)
+
+    assert got is not None
+    dt, src = got
+    assert src == "discord_snowflake"
+    assert (dt.year, dt.month, dt.day) == (2026, 9, 13)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_source"),
+    [
+        ("created 2026-09-13T18:30:00 by x", "iso8601"),
+        ("ts=1789257600000 end", "epoch_ms"),
+        ("https://x/1548680248164483084", "discord_snowflake"),
+    ],
+)
+def test_each_extractor(value, expected_source):
+    from dd_lab.investigate.timeline import derive_time
+
+    got = derive_time(value, not_after=datetime(2026, 10, 14))
+    assert got is not None and got[1] == expected_source
+
+
+def test_implausible_values_are_rejected():
+    """18-digit numbers that are not snowflakes decode to nonsense. Two of
+    the real case's 505 landed in 2027 and 2028."""
+    from dd_lab.investigate.timeline import derive_time
+
+    cap = datetime(2026, 10, 14)
+    assert derive_time("id 1999999999999999999", not_after=cap) is None   # far future
+    assert derive_time("nothing here at all", not_after=cap) is None
+
+
+def test_the_plausibility_bound_comes_from_the_data_not_the_clock(wh):
+    """A forensic result must not depend on when it was run."""
+    wh.load_artifacts([
+        _art("discord", "cache.url", "https://x", minutes=0),
+        # a snowflake from 2028, far past any recorded event here
+        _art("discord", "mem.string", "https://x/1999999999999999999", ts=False,
+             source_type=S.MEMORY_STRING),
+    ])
+    out = build_case_narrative(wh)
+
+    assert out["coverage"]["inferred"] == 0
+
+
+def test_inferred_events_join_the_episode_they_fall_inside(wh):
+    wh.load_artifacts([
+        # the snowflake below decodes to 2026-09-13 13:02:24, so the recorded
+        # events sit either side of it - an inferred time more than one gap
+        # past the last recorded event belongs outside, not in the episode
+        _art("discord", "cache.url", "https://a", minutes=60),
+        _art("discord", "cache.url", "https://b", minutes=70),
+        _art("discord", "mem.string", "https://x/1548680248164483084", ts=False,
+             source_type=S.MEMORY_STRING),
+    ])
+    out = build_case_narrative(wh)
+
+    assert out["episode_count"] == 1
+    assert out["episodes"][0]["inferred_count"] == 1
+    assert out["episodes"][0]["event_count"] == 3
+    assert out["referenced_outside_window"]["count"] == 0
+
+
+def test_inferred_times_outside_every_episode_are_not_shown_as_activity(wh):
+    """The structural trap: episodes built from inferred times alone are not
+    periods of activity, they are clusters of moments when referenced objects
+    happened to be created. An early build produced "Episode 1 - Wed 13 Sep
+    2023, 64 events" three years before the evidence existed."""
+    wh.load_artifacts([
+        _art("discord", "cache.url", "https://a", minutes=0),
+        # 1151417917708181544 decodes to 2023-09-13 - a real, old channel id
+        _art("discord", "mem.string", "https://discordapp.com/x/1151417917708181544",
+             ts=False, source_type=S.MEMORY_STRING),
+    ])
+    out = build_case_narrative(wh)
+
+    assert out["episode_count"] == 1, "the 2023 id must not create an episode"
+    assert out["episodes"][0]["inferred_count"] == 0
+    assert out["referenced_outside_window"]["count"] == 1
+    assert out["referenced_outside_window"]["earliest"].year == 2023
+    assert "NOT shown as activity" in out["narrative"]
+
+
+def test_headline_coverage_stays_the_recorded_fraction(wh):
+    """Inferred times must not quietly inflate the strongest claim."""
+    wh.load_artifacts([
+        _art("discord", "cache.url", "https://a", minutes=60),
+        _art("discord", "mem.string", "https://x/1548680248164483084", ts=False,
+             source_type=S.MEMORY_STRING),
+    ])
+    cov = build_case_narrative(wh)["coverage"]
+
+    assert cov["events"] == 1 and cov["inferred"] == 1
+    assert cov["placed"] == 2
+    assert cov["event_pct"] == 50.0, "event_pct counts recorded times only"
+
+
+def test_inferred_events_are_marked_in_the_prose(wh):
+    wh.load_artifacts([
+        _art("discord", "cache.url", "https://a", minutes=60),  # 13:00, next to the snowflake
+        _art("discord", "mem.string", "https://x/1548680248164483084", ts=False,
+             source_type=S.MEMORY_STRING),
+    ])
+    text = build_case_narrative(wh)["narrative"]
+    assert "positioned by decoding an identifier" in text

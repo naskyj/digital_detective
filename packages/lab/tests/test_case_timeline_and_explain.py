@@ -116,7 +116,8 @@ def test_case_timeline_returns_the_computed_narrative(tmp_path):
     assert out["episodes"][0]["apps"] == ["Discord"]
     assert "summary" in out["episodes"][0]
     # coverage is the honest bound on what any account of the case can claim
-    assert set(out["coverage"]) == {"total", "events", "expiry", "state", "event_pct"}
+    assert set(out["coverage"]) == {
+        "total", "events", "expiry", "state", "inferred", "placed", "event_pct"}
 
 
 def test_case_timeline_event_count_is_the_true_total_not_the_page_size(tmp_path):

@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from dd_lab.etl.warehouse import Warehouse
@@ -84,6 +84,65 @@ class TimeKind(StrEnum):
     EVENT = "event"
     EXPIRY = "expiry"
     STATE = "state"
+    #: Time read out of the artifact's OWN CONTENT rather than recorded by
+    #: the application - see derive_time(). Kept as a separate kind, never
+    #: merged into EVENT, because the two support different claims: an
+    #: EVENT time is what the app itself wrote down, an INFERRED one is what
+    #: an identifier embedded in the data happens to encode.
+    INFERRED = "inferred"
+
+
+#: Discord ids are snowflakes: the top 42 bits are milliseconds since
+#: 2015-01-01. Decoding one gives the exact moment that OBJECT was created -
+#: for a message id that is when the message was sent.
+DISCORD_EPOCH_MS = 1_420_070_400_000
+_SNOWFLAKE_RE = re.compile(r"\b(1[0-9]{17,18})\b")
+_ISO_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)")
+_EPOCH_MS_RE = re.compile(r"\b(\d{13})\b")
+
+#: Nothing Discord-shaped can predate Discord itself, so anything decoding
+#: before this is a number that merely looked like a snowflake.
+_MIN_PLAUSIBLE = datetime(2015, 1, 1)
+
+
+def derive_time(value: str, *, not_after: datetime) -> tuple[datetime, str] | None:
+    """A timestamp recoverable from the artifact's own content, and what it
+    was recovered from - or None.
+
+    Measured on a real case's 4,948 undated relevant memory strings: 505
+    (10.2%) carry a Discord snowflake, 97 an epoch-ms value, 24 an ISO
+    datetime. The rest contain no time at all - they are JS fragments,
+    tokens, URLs and config, so this is a real ceiling and not a parser
+    shortcoming.
+
+    `not_after` is the plausibility bound and is derived from the case's own
+    data by the caller, not from the clock - a forensic result must not
+    depend on when it was run. It exists because 18-digit numbers that are
+    not snowflakes decode to nonsense: on that same case 505 snowflakes
+    yielded two dates in 2027-2028, alongside 55 genuine-but-old 2023 ids.
+    Old ids are real and are kept; impossible ones are not.
+    """
+    if not value:
+        return None
+    if m := _ISO_RE.search(value):
+        try:
+            iso = f"{m.group(1)}T{m.group(2)}"
+            dt = datetime.fromisoformat(iso if len(m.group(2)) > 5 else iso + ":00")
+            if _MIN_PLAUSIBLE <= dt <= not_after:
+                return dt, "iso8601"
+        except ValueError:
+            pass
+    if m := _SNOWFLAKE_RE.search(value):
+        dt = datetime.fromtimestamp(
+            ((int(m.group(1)) >> 22) + DISCORD_EPOCH_MS) / 1000, tz=UTC
+        ).replace(tzinfo=None)
+        if _MIN_PLAUSIBLE <= dt <= not_after:
+            return dt, "discord_snowflake"
+    if m := _EPOCH_MS_RE.search(value):
+        dt = datetime.fromtimestamp(int(m.group(1)) / 1000, tz=UTC).replace(tzinfo=None)
+        if _MIN_PLAUSIBLE <= dt <= not_after:
+            return dt, "epoch_ms"
+    return None
 
 
 def time_kind(key: str, record_ts: datetime | None) -> TimeKind:
@@ -109,6 +168,11 @@ class TimelineEvent:
     deleted: bool
     source_file: str
     source_locator: str
+    #: How this event's time was obtained. EVENT means the application
+    #: recorded it; INFERRED means it was decoded from the artifact's own
+    #: content, and `time_source` says from what.
+    kind: TimeKind = TimeKind.EVENT
+    time_source: str = "recorded"
 
     @classmethod
     def from_row(cls, r: dict) -> TimelineEvent:
@@ -134,9 +198,20 @@ class Coverage:
     events: int = 0
     expiry: int = 0
     state: int = 0
+    #: State artifacts whose time was recovered from their own content.
+    #: Counted apart from `events` throughout - they are a weaker claim.
+    inferred: int = 0
+
+    @property
+    def placed(self) -> int:
+        """Everything the narrative can position in time at all."""
+        return self.events + self.inferred
 
     @property
     def event_pct(self) -> float:
+        """Deliberately the RECORDED fraction, not `placed` - the headline
+        number stays the strongest claim, and inferred times are reported
+        separately rather than quietly inflating it."""
         return round(100.0 * self.events / self.total, 1) if self.total else 0.0
 
     def summary(self) -> str:
@@ -144,7 +219,10 @@ class Coverage:
             return "No artifacts to report on."
         return (
             f"{self.events:,} of {self.total:,} artifacts ({self.event_pct}%) carry an event "
-            f"timestamp and appear below. {self.state:,} have no intrinsic time and are present "
+            f"timestamp and appear below"
+            + (f", a further {self.inferred:,} placed in time by decoding an identifier in "
+               f"their own content (marked as inferred)" if self.inferred else "")
+            + f". {self.state:,} have no intrinsic time and are present "
             f"as state at acquisition, not as events"
             + (f"; {self.expiry:,} are future validity boundaries (cookie expiry) and are "
                f"excluded from the sequence entirely" if self.expiry else "")
@@ -193,6 +271,13 @@ class Episode:
     def deleted_count(self) -> int:
         return sum(1 for e in self.events if e.deleted)
 
+    @property
+    def inferred_count(self) -> int:
+        """Events positioned by decoding their own content rather than by a
+        time the application recorded. Surfaced per episode so a reader can
+        see how much of an episode rests on the weaker claim."""
+        return sum(1 for e in self.events if e.kind is TimeKind.INFERRED)
+
     def app_entry_times(self) -> dict[str, datetime]:
         first: dict[str, datetime] = {}
         for e in self.events:
@@ -214,7 +299,8 @@ class Episode:
 
 
 def load_events(
-    wh: Warehouse, *, relevant_only: bool = True, limit: int = 5000
+    wh: Warehouse, *, relevant_only: bool = True, limit: int = 5000,
+    include_inferred: bool = True,
 ) -> tuple[list[TimelineEvent], Coverage]:
     """Every artifact that is genuinely an EVENT, oldest first, plus the
     coverage figures for everything that is not.
@@ -244,7 +330,69 @@ def load_events(
         total=int(counts["total"]), events=len(events),
         expiry=int(counts["expiry"]), state=int(counts["state"]),
     )
+
+    if include_inferred and events:
+        # The plausibility bound comes from the case's own recorded events,
+        # never from the clock: a forensic result must not depend on when it
+        # was run. A month of slack past the last recorded event is enough to
+        # admit genuine activity the parsers did not date, while rejecting
+        # the 18-digit numbers that merely look like snowflakes (two of the
+        # real case's 505 decoded to 2027 and 2028).
+        not_after = max(e.ts for e in events) + timedelta(days=30)
+        undated = wh.query(
+            f"SELECT artifact_id, app, source_type, category, key, "  # noqa: S608
+            f"substr(value, 1, 400) AS value, relevant, relevance_score, deleted, "
+            f"source_file, source_locator FROM artifacts {where} "
+            f"{'AND' if where else 'WHERE'} record_ts IS NULL LIMIT {int(limit)}"
+        )
+        for r in undated:
+            got = derive_time(r["value"] or "", not_after=not_after)
+            if got is None:
+                continue
+            ts, src = got
+            events.append(TimelineEvent(
+                artifact_id=r["artifact_id"], ts=ts, app=r["app"] or "",
+                source_type=r["source_type"] or "", category=r["category"] or "",
+                key=r["key"] or "", value=r["value"] or "",
+                relevant=bool(r["relevant"]),
+                relevance_score=float(r["relevance_score"] or 0.0),
+                deleted=bool(r["deleted"]), source_file=r["source_file"] or "",
+                source_locator=r["source_locator"] or "",
+                kind=TimeKind.INFERRED, time_source=src,
+            ))
+        cov.inferred = sum(1 for e in events if e.kind is TimeKind.INFERRED)
+        events.sort(key=lambda e: e.ts)
+
     return events, cov
+
+
+def attach_inferred(
+    episodes: list[Episode], inferred: list[TimelineEvent],
+    gap: timedelta = DEFAULT_SESSION_GAP,
+) -> list[TimelineEvent]:
+    """Fold inferred events into the recorded episodes they fall inside, and
+    return the ones that fall outside every episode.
+
+    Episodes are built from RECORDED times only, on purpose. An episode
+    assembled out of inferred times alone is not a period of activity - it is
+    a cluster of moments when objects that were later referenced happened to
+    be created. On the real case that produced an "Episode 1 - Wed 13 Sep
+    2023, 64 events" three years before the evidence, which reads as activity
+    in 2023 and is not. Those are returned separately instead, so nothing is
+    discarded and nothing is overstated: a 2023 message id sitting in memory
+    is a genuine finding, just a different one.
+    """
+    outside: list[TimelineEvent] = []
+    for e in inferred:
+        for ep in episodes:
+            if ep.start - gap <= e.ts <= ep.end + gap:
+                ep.events.append(e)
+                break
+        else:
+            outside.append(e)
+    for ep in episodes:
+        ep.events.sort(key=lambda x: x.ts)
+    return sorted(outside, key=lambda x: x.ts)
 
 
 def build_episodes(
@@ -336,11 +484,18 @@ def narrate_episode(ep: Episode, index: int) -> str:
         bits.append(
             f"{ep.deleted_count} of these are RECOVERED DELETED records."
         )
+    if ep.inferred_count:
+        bits.append(
+            f"{ep.inferred_count} of these {len(ep.events)} events were positioned by "
+            f"decoding an identifier in the artifact itself, not by a time the application "
+            f"recorded."
+        )
     return " ".join(bits)
 
 
 def narrate(
-    episodes: list[Episode], coverage: Coverage, *, max_episodes: int = 12
+    episodes: list[Episode], coverage: Coverage, *, max_episodes: int = 12,
+    outside: list[TimelineEvent] | None = None,
 ) -> str:
     """The case-level narrative: what happened, in order, with the limits
     of the evidence stated up front rather than buried."""
@@ -389,6 +544,23 @@ def narrate(
     if deleted_total:
         out.append(f"{deleted_total} recovered deleted record(s) fall inside these episodes.")
 
+    inferred_total = sum(ep.inferred_count for ep in episodes)
+    if inferred_total:
+        out.append(
+            f"{inferred_total:,} of the events below carry no time the application recorded; "
+            f"they are positioned by decoding an identifier in the artifact itself (a Discord "
+            f"snowflake, an embedded timestamp). That is a weaker claim than a recorded time, "
+            f"and those events are marked as inferred throughout."
+        )
+    if outside:
+        out.append(
+            f"A further {len(outside):,} artifact(s) reference objects created between "
+            f"{outside[0].ts:%d %b %Y} and {outside[-1].ts:%d %b %Y} - outside every period of "
+            f"recorded activity above. These are NOT shown as activity: an object created in "
+            f"the past being referenced now is a different fact from something happening then. "
+            f"They are evidence that older material was present on the device."
+        )
+
     out += ["", f"*Coverage: {coverage.summary()}*", ""]
 
     for i, ep in enumerate(episodes[:max_episodes], start=1):
@@ -404,12 +576,29 @@ def build_case_narrative(
 ) -> dict:
     """One call for callers that just want the story and its structure."""
     events, coverage = load_events(wh, relevant_only=relevant_only, limit=limit)
-    episodes = build_episodes(events, gap)
+    recorded = [e for e in events if e.kind is TimeKind.EVENT]
+    inferred = [e for e in events if e.kind is TimeKind.INFERRED]
+    episodes = build_episodes(recorded, gap)
+    outside = attach_inferred(episodes, inferred, gap)
     return {
-        "narrative": narrate(episodes, coverage, max_episodes=max_episodes),
+        # Inferred times that land outside every recorded episode. Kept and
+        # counted, never plotted as activity - see attach_inferred.
+        "referenced_outside_window": {
+            "count": len(outside),
+            "earliest": outside[0].ts if outside else None,
+            "latest": outside[-1].ts if outside else None,
+            "examples": [
+                {"artifact_id": e.artifact_id, "ts": e.ts, "app": e.app,
+                 "time_source": e.time_source, "key": e.key, "value": e.value[:160]}
+                for e in outside[:10]
+            ],
+        },
+        "narrative": narrate(
+            episodes, coverage, max_episodes=max_episodes, outside=outside),
         "coverage": {
             "total": coverage.total, "events": coverage.events,
             "expiry": coverage.expiry, "state": coverage.state,
+            "inferred": coverage.inferred, "placed": coverage.placed,
             "event_pct": coverage.event_pct,
         },
         "episode_count": len(episodes),
@@ -425,12 +614,14 @@ def build_case_narrative(
                 "apps": ep.apps,
                 "categories": ep.categories,
                 "deleted_count": ep.deleted_count,
+                "inferred_count": ep.inferred_count,
                 "summary": narrate_episode(ep, i),
                 "notable": [
                     {
                         "artifact_id": e.artifact_id, "ts": e.ts, "app": e.app,
                         "category": e.category, "key": e.key, "value": e.value[:200],
                         "relevance_score": e.relevance_score, "deleted": e.deleted,
+                        "time_kind": str(e.kind), "time_source": e.time_source,
                         "source_file": e.source_file, "source_locator": e.source_locator,
                     }
                     for e in ep.notable()
