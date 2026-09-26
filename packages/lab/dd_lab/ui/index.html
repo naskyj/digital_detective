@@ -833,7 +833,16 @@ async function caseExplorer(id, w){
       collapsedLabels.clear();
     }
     renderNav();
-    content.innerHTML=''; content.append(await paneFor(next));
+    // Show something IMMEDIATELY. paneFor() is async and several panels
+    // await a slow endpoint before returning anything, so clearing here and
+    // appending only after the await left the content area blank for as
+    // long as the request took - on a real case the correlations endpoint
+    // takes ~58s, which reads as "correlations show nothing".
+    content.innerHTML='';
+    const _pending=el('div',{class:'panel'},el('div',{class:'hint'},'Loading…'));
+    content.append(_pending);
+    const _pane=await paneFor(next);
+    content.innerHTML=''; content.append(_pane);
   }
   async function paneFor(s){
     if(FILES_PANEL_FN[s.type]) return FILES_PANEL_FN[s.type](id, s.app);

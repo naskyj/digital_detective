@@ -523,6 +523,34 @@ def reclassify_case(
     return {"job_id": job_id}
 
 
+@app.post("/api/cases/{case_id}/findings/supersede-stale")
+def case_supersede_stale_findings(case_id: str, dry_run: bool = True) -> dict:
+    """Mark findings whose entity the current extractor no longer recognises.
+
+    Defaults to dry_run: this changes stored case records, so the caller sees
+    exactly what would be marked before anything is. Nothing is ever deleted -
+    a superseded finding keeps its text, citations and timestamps and simply
+    stops being presented as live (see FindingsStore.supersede_stale)."""
+    layout = _layout(case_id)
+    if not layout.manifest.is_file():
+        raise HTTPException(404, "case not found")
+    from dd_lab.agent.findings import FindingsStore
+
+    store = FindingsStore(layout.findings_log)
+    stale = store.supersede_stale(dry_run=dry_run)
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "superseded": len(stale),
+        "remaining": len([f for f in store.list() if str(f.status) != "superseded"]),
+        "examples": [
+            {"entity_type": f.entity_type, "entity_value": f.entity_value,
+             "created_ts": str(f.created_ts), "created_by": f.created_by}
+            for f in stale[:20]
+        ],
+    }
+
+
 @app.post("/api/cases/{case_id}/regenerate-report")
 def regenerate_report(case_id: str) -> dict:
     """Rebuild the report from whatever's currently in the warehouse and
@@ -784,6 +812,12 @@ def _enrich_artifact_rows(wh, rows: list[dict]) -> None:
         del r["source_locator"]
 
 
+#: One entry: the last correlation report computed. Deliberately not a
+#: growing cache - this is a single-investigator desktop app working one
+#: case at a time, and the thing being cached is tens of MB of citations.
+_CORRELATION_CACHE: dict = {}
+
+
 @app.get("/api/cases/{case_id}/correlations")
 def case_correlations(case_id: str, min_distinct_sources: int = 2) -> dict:
     """Interactive counterpart to the static report's §5 Cross-Source
@@ -794,7 +828,22 @@ def case_correlations(case_id: str, min_distinct_sources: int = 2) -> dict:
     deps = InvestigationDeps(cases_root=Path(_settings.cases_root), case_id=case_id)
     if not deps.layout.warehouse.is_file():
         raise HTTPException(409, "case not processed yet")
-    return correlate_entities(deps, min_distinct_sources)
+
+    # Cached on the warehouse's own identity. build_correlation_report runs
+    # one un-indexed ILIKE full scan per candidate entity, which measured 58
+    # SECONDS on the real 675k-artifact case - paid again on every single
+    # page load, because nothing was memoised. The result is a pure function
+    # of the warehouse contents, so keying on (size, mtime) is exact: any
+    # re-classify or re-ingest rewrites the file and invalidates this by
+    # construction, and a stale answer is not reachable.
+    st = deps.layout.warehouse.stat()
+    key = (case_id, min_distinct_sources, st.st_size, st.st_mtime_ns)
+    if _CORRELATION_CACHE.get("key") == key:
+        return _CORRELATION_CACHE["value"]
+    value = correlate_entities(deps, min_distinct_sources)
+    _CORRELATION_CACHE.clear()
+    _CORRELATION_CACHE.update(key=key, value=value)
+    return value
 
 
 @app.get("/api/cases/{case_id}/narrative")

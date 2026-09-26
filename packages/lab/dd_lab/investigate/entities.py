@@ -119,3 +119,20 @@ def extract_entities(app: str, key: str, value: str) -> list[EntityHit]:
             hits.append(EntityHit("roblox_user_id", stripped, stripped))
 
     return hits
+
+
+#: Every entity type `extract_entities` can produce. Used by
+#: FindingsStore.supersede_stale to tell "the extractor no longer recognises
+#: this value" apart from "this type was never the extractor's to produce" -
+#: an LLM-authored finding about a session_token must not be superseded just
+#: because no pattern here emits that type.
+KNOWN_ENTITY_TYPES = frozenset({
+    "discord_invite",
+    "discord_user_id",
+    "email",
+    "roblox_asset_id",
+    "roblox_user_id",
+    "slack_team_id",
+    "slack_token",
+    "slack_user_id",
+})

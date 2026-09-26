@@ -835,3 +835,69 @@ def test_narrative_endpoint_returns_episodes_and_coverage(client):
 
 def test_narrative_endpoint_404s_for_an_unknown_case(client):
     assert client.get("/api/cases/nope-not-a-case/narrative").status_code == 404
+
+
+def test_correlations_are_cached_per_warehouse_state(client, monkeypatch):
+    """build_correlation_report runs one un-indexed ILIKE full scan per
+    candidate entity - 58 seconds on the real case - and was paid again on
+    every page load. The result is a pure function of the warehouse, so it is
+    memoised on (size, mtime) and any re-classify invalidates it by
+    construction."""
+    from datetime import UTC, datetime
+
+    from dd_core.casedir import CaseLayout
+    from dd_core.enums import ArtifactCategory as C
+    from dd_core.enums import SourceType as S
+    from dd_core.schema import ClassificationResult, NormalizedArtifact
+    from dd_lab.api import main as main_mod
+    from dd_lab.etl.warehouse import Warehouse
+
+    layout = CaseLayout(main_mod._settings.cases_root, "case_api_1")
+    wh = Warehouse(layout.warehouse)
+    try:
+        wh.load_artifacts([
+            NormalizedArtifact(
+                artifact_id=f"corr-{i}", case_id="case_api_1", app=app,
+                source_type=st, source_file=f"{app}/f{i}", source_locator=f"l{i}",
+                key="cache.body", value="join https://discord.gg/CACHEDXYZ",
+                extracted_ts=datetime.now(UTC),
+                classification=ClassificationResult(
+                    category=C.CHAT_CONTENT, confidence=0.9, relevant=True,
+                    relevance_score=0.9, classifier_version="test"),
+            )
+            for i, (app, st) in enumerate([("discord", S.CACHE), ("Slack", S.INDEXEDDB)])
+        ])
+        wh.build_views()
+    finally:
+        wh.close()
+
+    main_mod._CORRELATION_CACHE.clear()
+    first = client.get("/api/cases/case_api_1/correlations").json()
+    assert first["entity_count"] >= 1
+
+    calls = []
+    real = main_mod.correlate_entities
+    monkeypatch.setattr(main_mod, "correlate_entities",
+                        lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+
+    second = client.get("/api/cases/case_api_1/correlations").json()
+    assert second == first
+    assert calls == [], "a second identical request must not recompute"
+
+    # a warehouse change must invalidate it
+    wh = Warehouse(layout.warehouse)
+    try:
+        wh.load_artifacts([NormalizedArtifact(
+            artifact_id="corr-new", case_id="case_api_1", app="discord",
+            source_type=S.MEMORY_STRING, source_file="m", source_locator="l",
+            key="mem.string", value="join https://discord.gg/CACHEDXYZ",
+            extracted_ts=datetime.now(UTC),
+            classification=ClassificationResult(
+                category=C.CHAT_CONTENT, confidence=0.9, relevant=True,
+                relevance_score=0.9, classifier_version="test"))])
+        wh.build_views()
+    finally:
+        wh.close()
+
+    client.get("/api/cases/case_api_1/correlations")
+    assert calls == [1], "a changed warehouse must recompute"

@@ -98,3 +98,103 @@ def test_list_findings_reports_everything_written(tmp_path):
     verified_only = list_findings(deps, status="verified")
     assert verified_only["count"] == 1
     assert verified_only["findings"][0]["claim"] == "good"
+
+
+# ------------------------------------------------- superseded findings
+#
+# findings.json is append-only. An email pattern once matched retina-image
+# filenames, and agent runs on 2026-09-17/19 wrote 199 findings asserting
+# things like "the email 'wechat@3x.png' appears in N artifacts". The pattern
+# was fixed on 09-23 - but every report generated afterwards still carried
+# all 199, because nothing re-checks a finding's PREMISE. write_finding only
+# verifies that each cited artifact exists and contains the quoted text, and
+# that remained true throughout.
+
+
+def test_supersede_stale_marks_an_entity_the_extractor_no_longer_recognises(tmp_path):
+    from dd_lab.agent.findings import Finding, FindingsStore, FindingStatus
+
+    store = FindingsStore(tmp_path / "findings.json")
+    bogus = store.add(Finding(
+        finding_id="f1", case_id="c", claim="The email 'wechat@3x.png' appears in 4 artifacts.",
+        entity_type="email", entity_value="wechat@3x.png",
+        citations=[], status=FindingStatus.VERIFIED, created_by="agent"))
+    real = store.add(Finding(
+        finding_id="f2", case_id="c", claim="The email 'appro@openssl.org' appears in 3 artifacts.",
+        entity_type="email", entity_value="appro@openssl.org",
+        citations=[], status=FindingStatus.VERIFIED, created_by="agent"))
+
+    stale = store.supersede_stale()
+
+    assert [f.finding_id for f in stale] == ["f1"]
+    assert store.get(bogus.finding_id).status is FindingStatus.SUPERSEDED
+    assert store.get(real.finding_id).status is FindingStatus.VERIFIED
+
+
+def test_supersede_stale_respects_context_gated_entity_types(tmp_path):
+    """A Slack team id shape is too generic to trust outside Slack's own
+    evidence, so its extractor is app-gated. Checking it with no app context
+    answers the wrong question - an early version would have superseded the
+    real case's top-ranked correlation, T0C1J4SDLG2."""
+    from dd_lab.agent.findings import Finding, FindingsStore, FindingStatus
+
+    store = FindingsStore(tmp_path / "findings.json")
+    store.add(Finding(
+        finding_id="f1", case_id="c", claim="Slack workspace T0C1J4SDLG2.",
+        entity_type="slack_team_id", entity_value="T0C1J4SDLG2",
+        citations=[], status=FindingStatus.VERIFIED, created_by="agent"))
+
+    assert store.supersede_stale() == []
+    assert store.get("f1").status is FindingStatus.VERIFIED
+
+
+def test_types_outside_the_extractors_vocabulary_are_left_alone(tmp_path):
+    """An LLM-authored finding about a session_token must not be superseded
+    merely because no pattern emits that type - absence means nothing there."""
+    from dd_lab.agent.findings import Finding, FindingsStore, FindingStatus
+
+    store = FindingsStore(tmp_path / "findings.json")
+    store.add(Finding(
+        finding_id="f1", case_id="c", claim="A CSRF token was present.",
+        entity_type="session_token", entity_value="x-csrf-token (www.roblox.com)",
+        citations=[], status=FindingStatus.VERIFIED, created_by="agent"))
+
+    assert store.supersede_stale() == []
+    assert store.get("f1").status is FindingStatus.VERIFIED
+
+
+def test_dry_run_changes_nothing(tmp_path):
+    from dd_lab.agent.findings import Finding, FindingsStore, FindingStatus
+
+    store = FindingsStore(tmp_path / "findings.json")
+    store.add(Finding(
+        finding_id="f1", case_id="c", claim="x", entity_type="email",
+        entity_value="wechat@3x.png", citations=[],
+        status=FindingStatus.VERIFIED, created_by="agent"))
+
+    assert len(store.supersede_stale(dry_run=True)) == 1
+    assert store.get("f1").status is FindingStatus.VERIFIED
+
+    assert len(store.supersede_stale()) == 1
+    assert store.get("f1").status is FindingStatus.SUPERSEDED
+    # idempotent - an already-superseded finding is not re-reported
+    assert store.supersede_stale() == []
+
+
+def test_nothing_is_ever_deleted(tmp_path):
+    """A conclusion that was drawn and later invalidated is part of the case
+    history; a report that quietly loses it is worse than one showing it
+    marked."""
+    from dd_lab.agent.findings import Finding, FindingsStore
+
+    store = FindingsStore(tmp_path / "findings.json")
+    store.add(Finding(
+        finding_id="f1", case_id="c", claim="the original claim text",
+        entity_type="email", entity_value="wechat@3x.png", citations=[],
+        created_by="agent"))
+    store.supersede_stale()
+
+    kept = store.get("f1")
+    assert kept is not None
+    assert kept.claim == "the original claim text"
+    assert len(store.list()) == 1

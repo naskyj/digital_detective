@@ -35,6 +35,19 @@ class FindingStatus(StrEnum):
     JUDGE_REJECTED = "judge_rejected"
     HUMAN_APPROVED = "human_approved"
     HUMAN_REJECTED = "human_rejected"
+    #: The finding's CITATIONS still verify, but its PREMISE no longer holds:
+    #: the entity it is about is not one the current extractor recognises.
+    #: Findings are an append-only record and are never deleted - a wrong
+    #: conclusion that was drawn is itself part of the case history - so a
+    #: superseded one keeps its text, its citations and its timestamps and is
+    #: simply no longer presented as a live finding.
+    #:
+    #: Why this exists: an email pattern once matched retina-image filenames,
+    #: and agent runs on 2026-09-17 and 09-19 wrote 199 findings asserting
+    #: things like "the email 'wechat@3x.png' appears in N artifacts". The
+    #: pattern was fixed on 09-23, but findings.json is append-only, so every
+    #: report generated afterwards still carried all 199.
+    SUPERSEDED = "superseded"
 
 
 # statuses under which a finding may appear in a report if the case wants a
@@ -121,6 +134,54 @@ class FindingsStore:
         }[verdict.verdict]
         self._save()
         return f
+
+    def supersede_stale(self, *, dry_run: bool = False) -> list[Finding]:
+        """Mark findings whose entity the current extractor no longer
+        recognises, and return them.
+
+        Checks the PREMISE, which nothing else does: `write_finding` verifies
+        that each cited artifact exists and contains the quoted text, and both
+        remain true here - the artifact really does contain `wechat@3x.png`.
+        What stopped being true is that the string is an email address. So the
+        test is whether re-running the entity extractor over the finding's own
+        entity_value still yields that entity type.
+
+        Only entity types the extractor actually produces are checked. An
+        LLM-authored finding about a `verification_flow` or a `session_token`
+        is outside the extractor's vocabulary and is left alone - absence of a
+        match there means nothing.
+
+        Never deletes. A conclusion that was drawn and later invalidated is
+        part of the case history and a report that quietly loses it is worse
+        than one that shows it marked.
+        """
+        from dd_lab.investigate.entities import KNOWN_ENTITY_TYPES, extract_entities
+
+        stale: list[Finding] = []
+        for f in self._findings.values():
+            if f.status is FindingStatus.SUPERSEDED:
+                continue
+            if not f.entity_type or not f.entity_value:
+                continue
+            if f.entity_type not in KNOWN_ENTITY_TYPES:
+                continue
+            # Context matters: several extractors are gated on the app name
+            # (a Slack team id shape is too generic to trust outside Slack's
+            # own evidence). Asking with an empty app answers the wrong
+            # question - it says "is this an entity with no context", not
+            # "could this value ever be this entity type". Caught by a dry
+            # run that would have superseded the case's top-ranked
+            # correlation, slack_team_id T0C1J4SDLG2.
+            app_hint = f.entity_type.split("_", 1)[0]
+            hits = extract_entities(app_hint, "", f.entity_value)
+            if not any(h.entity_type == f.entity_type for h in hits):
+                stale.append(f)
+        if not dry_run:
+            for f in stale:
+                f.status = FindingStatus.SUPERSEDED
+            if stale:
+                self._save()
+        return stale
 
     def set_human_review(self, finding_id: str, review: HumanReview) -> Finding:
         f = self._findings[finding_id]

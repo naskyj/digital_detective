@@ -230,6 +230,15 @@ def build_report(
                        [[h["category"], h["conf"], h["app"], h["key"], h["value"]] for h in high],
                        highlight=True) if high else "<p>None.</p>")
 
+    # Superseded findings are shown apart, not mixed in and not hidden. Their
+    # citations still verify - the artifact really does contain the text - but
+    # the premise does not: the entity they are about is no longer one the
+    # extractor recognises. On the real case 202 of 207 were "the email
+    # 'wechat@3x.png' appears in N artifacts", written before the email
+    # pattern was fixed and carried by every report since.
+    superseded = [f for f in findings if str(f.status) == "superseded"]
+    findings = [f for f in findings if str(f.status) != "superseded"]
+
     parts.append(sec(f"Findings ({len(findings)})"))
     parts.append(
         "<p class='sub'>Every conclusion the analysis produced, with the citations it rests on. "
@@ -274,6 +283,23 @@ def build_report(
                 )
     else:
         parts.append("<p>No findings were written for this case.</p>")
+
+    if superseded:
+        parts.append(
+            f"<h3>Superseded findings ({len(superseded)})</h3>"
+            "<p class='sub'>Written by an earlier analysis run and no longer supported. Their "
+            "citations still verify &mdash; the cited artifact really does contain the quoted "
+            "text &mdash; but the premise does not: the entity each one is about is not one the "
+            "current extractor recognises. They are retained rather than deleted, because a "
+            "conclusion that was drawn and later invalidated is part of the case history.</p>"
+        )
+        parts.append(_rows(
+            ["Written", "By", "Entity", "Value", "Claim"],
+            [[str(f.created_ts)[:19], f.created_by, f.entity_type or "",
+              str(f.entity_value or "")[:60], f.claim[:120]] for f in superseded[:50]],
+        ))
+        if len(superseded) > 50:
+            parts.append(f"<p class='sub'>({len(superseded) - 50} further not listed.)</p>")
 
     parts.append(sec(f"Cross-Source Correlations ({len(correlations)})"))
     parts.append(
