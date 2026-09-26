@@ -542,7 +542,12 @@ def case_supersede_stale_findings(case_id: str, dry_run: bool = True) -> dict:
         "ok": True,
         "dry_run": dry_run,
         "superseded": len(stale),
-        "remaining": len([f for f in store.list() if str(f.status) != "superseded"]),
+        # In a dry run nothing has been marked, so counting current statuses
+        # would report the pre-run number and read as "would supersede 202,
+        # leaving 207". Subtract instead, so the figure means the same thing
+        # in both modes: what will be live afterwards.
+        "remaining": len([f for f in store.list() if str(f.status) != "superseded"])
+        - (len(stale) if dry_run else 0),
         "examples": [
             {"entity_type": f.entity_type, "entity_value": f.entity_value,
              "created_ts": str(f.created_ts), "created_by": f.created_by}
