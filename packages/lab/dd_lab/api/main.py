@@ -549,11 +549,17 @@ def regenerate_report(case_id: str) -> dict:
         from dd_lab.report import build_report
 
         progress("regenerating report...")
-        # The model-written summary is attempted only when one is configured;
-        # with no key the report is complete without it (see report/builder.py).
+        # The model-written summary is attempted only when a model is
+        # actually reachable; with none the report is complete without it
+        # (see report/builder.py). Gated on the RESOLVED config, not on
+        # settings.llm_api_key - the key legitimately comes from the
+        # environment instead, in which case that field is empty and the
+        # summary was silently skipped even with a working model.
+        _cfg = _settings.agent_config()
+        _usable = bool(_cfg.api_key) or _cfg.provider == "ollama"  # ollama is local, needs no key
         path = build_report(
             _settings.cases_root, case_id, actor="investigator",
-            llm_cfg=_settings.agent_config() if _settings.llm_api_key or _settings.use_agent else None,
+            llm_cfg=_cfg if _usable else None,
         )
         progress(f"report written to {path}")
         return {"ok": True, "report_path": str(path)}
