@@ -70,7 +70,27 @@ _CONTENT_EXCEPTIONS = re.compile(
     # "/profile" is just a bare substring match with no app context. Same
     # spirit as the /avatars/\d{17,20} exception two lines up - a real
     # profile/game/community reference for a case's own user, not plumbing.
-    r"roblox\.com/(?:users|games|communities)/\d+",
+    r"roblox\.com/(?:users|games|communities)/\d+|"
+    # Measured against gold labels (scripts/ablation.py): this gazetteer was
+    # suppressing 91 of 272 held-out TRUE positives, capping achievable recall
+    # at 0.665 whatever the classifier did. Three causes, all of them a bare
+    # plumbing substring firing inside a blob that also carried real identity:
+    #
+    #  78  `/icons/`      cdn.discordapp.com/icons/<guild_id>/<hash>.webp - the
+    #                     path carries a GUILD IDENTIFIER, so it is evidence of
+    #                     server membership, exactly as /avatars/<user_id>
+    #                     above is evidence of a user. Same carve-out, same
+    #                     reason.
+    #  11  `lastFetched`  Slack's localConfig_v2, which holds the workspace
+    #                     record AND an xoxc- session token. A credential is
+    #                     never plumbing - the regex voter scores xox tokens
+    #                     0.95 and this was overriding it to not-relevant.
+    #   2  `collectibles` Discord RPC AUTHENTICATE payloads. Left unaddressed:
+    #                     two rows is not enough to justify a rule, and adding
+    #                     one would be fitting to the evaluation fold.
+    r"/icons/\d{17,20}|"
+    r"\bxox[abcprs]-|"
+    r"localConfig_v2",
     re.I,
 )
 
