@@ -726,7 +726,21 @@ def test_artifact_browsing_extras_with_real_evidence(tmp_path, monkeypatch):
     import io
 
     csv_rows = list(csv.reader(io.StringIO(csv_resp.text)))
-    assert csv_rows[0][0] == "app"
+    header = csv_rows[0]
+    # Assert the columns that make this an export of the CLASSIFICATION, not
+    # a brittle check on which one happens to come first. relevant and
+    # relevance_score are the pipeline's primary output and were once absent
+    # here entirely, which made the CSV unusable for checking or re-scoring
+    # the classification it was exporting; the per-voter columns are what
+    # distinguish an artifact all five voters agreed on from one carried by a
+    # single regex.
+    for col in ("artifact_id", "app", "source_type", "category", "confidence",
+                "relevant", "relevance_score", "relevance_model_score",
+                "regex_vote", "keyword_vote", "ner_vote", "model_vote", "entropy_vote",
+                "evidence_spans", "classifier_version",
+                "key", "value", "record_ts", "deleted",
+                "source_file", "source_locator_raw"):
+        assert col in header, f"{col} missing from the classification export"
     # capped at 200k rows even though this real case's cache has far more -
     # a safety cap, not a bug, so compare against min() rather than the raw total.
     # Parsed with csv.reader (not a naive newline split): a cached response
@@ -901,3 +915,53 @@ def test_correlations_are_cached_per_warehouse_state(client, monkeypatch):
 
     client.get("/api/cases/case_api_1/correlations")
     assert calls == [1], "a changed warehouse must recompute"
+
+
+def test_report_download_is_an_attachment_and_byte_identical(client):
+    """The report is self-contained, so the downloaded copy still hashes to
+    the seal recorded in the custody chain. That property is what makes it
+    exportable evidence rather than a rendering of evidence: a recipient can
+    verify the copy they received is the copy that was generated."""
+    import hashlib
+
+    from dd_core.casedir import CaseLayout
+    from dd_lab.api import main as main_mod
+
+    layout = CaseLayout(main_mod._settings.cases_root, "case_api_1")
+    layout.reports.mkdir(parents=True, exist_ok=True)
+    original = b"<html><body>sealed report body</body></html>"
+    (layout.reports / "forensic_report_20260101_000000.html").write_bytes(original)
+
+    inline = client.get("/api/cases/case_api_1/report")
+    assert inline.status_code == 200
+    assert "content-disposition" not in inline.headers
+
+    dl = client.get("/api/cases/case_api_1/report", params={"download": "true"})
+    assert dl.status_code == 200
+    assert dl.headers["content-disposition"] == (
+        'attachment; filename="forensic_report_20260101_000000.html"'
+    )
+    assert hashlib.sha256(dl.content).hexdigest() == hashlib.sha256(original).hexdigest()
+
+
+def test_report_listing_reports_seal_status_per_file(client):
+    """A reader choosing which report to export needs to see which ones still
+    match what was sealed - an unsealed or modified one must not look the
+    same as an intact one."""
+    from dd_core.casedir import CaseLayout
+    from dd_lab.api import main as main_mod
+
+    layout = CaseLayout(main_mod._settings.cases_root, "case_api_1")
+    layout.reports.mkdir(parents=True, exist_ok=True)
+    (layout.reports / "forensic_report_20260101_000000.html").write_bytes(b"<html>x</html>")
+
+    d = client.get("/api/cases/case_api_1/reports").json()
+
+    assert d["ok"] is True
+    names = [r["name"] for r in d["reports"]]
+    assert "forensic_report_20260101_000000.html" in names
+    row = next(r for r in d["reports"] if r["name"] == "forensic_report_20260101_000000.html")
+    # never sealed, so it must report as unverified rather than silently ok
+    assert row["seal_ok"] is False
+    assert "seal" in row["seal_detail"].lower()
+    assert row["size_bytes"] > 0 and row["generated_ts"]

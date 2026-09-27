@@ -42,6 +42,31 @@ th{background:#f0f0f0;font-weight:600}
 code{background:#f0f0f0;padding:1px 4px;border-radius:3px;font-size:12px;word-break:break-all}
 .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
 footer{margin-top:50px;color:var(--muted);font-size:12px;border-top:1px solid var(--line);padding-top:12px}
+
+/* Print / PDF. The report is a single self-contained file, so "export to
+   PDF" is the browser's own print-to-PDF - no renderer dependency, nothing
+   to install, and the output is paginated by the same engine that displayed
+   it. These rules make that output usable rather than incidental. */
+@media print{
+  body{background:#fff;font-size:10.5pt}
+  .wrap{max-width:none;padding:0}
+  /* Keep a section's heading with its content, and never split a finding,
+     a citation table row or a key/value block across a page boundary. */
+  h2,h3{break-after:avoid-page;page-break-after:avoid}
+  h2{break-before:page;page-break-before:always}
+  h2:first-of-type{break-before:auto;page-break-before:auto}
+  table{break-inside:auto;font-size:9pt}
+  tr,.kv{break-inside:avoid;page-break-inside:avoid}
+  /* Repeat column headers on every page a long table spans - without this a
+     citation table running to page three has unlabelled columns. */
+  thead{display:table-header-group}
+  th{background:#f0f0f0 !important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .pill,.hi{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  /* A URL or locator that wraps is readable; one that overflows is lost. */
+  td,code{word-break:break-word;overflow-wrap:anywhere}
+  footer{break-before:avoid-page}
+}
+@page{margin:16mm 14mm 18mm}
 """
 
 

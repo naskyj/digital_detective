@@ -7,6 +7,7 @@ reporting, with a small static single-page UI. Runs on localhost only.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -1067,10 +1068,21 @@ def case_artifacts_export(
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     from dd_lab.etl.warehouse import Warehouse
 
-    fields = ["app", "source_type", "category", "confidence", "key", "value",
-              "record_ts", "source_file", "artifact_id", "deleted",
+    # The full classification result, not just the category. `relevant` and
+    # `relevance_score` are the pipeline's PRIMARY output - reporting,
+    # correlation and timeline construction all key off them - and were
+    # absent from this export entirely, so a CSV could not be used to check
+    # or re-score the classification it was exporting. The per-voter columns
+    # make a decision auditable offline: they are what distinguishes an
+    # artifact all five voters agreed on from one carried by a single regex.
+    fields = ["artifact_id", "app", "source_type", "category", "confidence",
+              "relevant", "relevance_score", "relevance_model_score",
+              "regex_vote", "keyword_vote", "ner_vote", "model_vote", "entropy_vote",
+              "evidence_spans", "classifier_version",
+              "key", "value", "record_ts", "deleted",
+              "source_file", "source_locator_raw",
               "url", "cache_offset", "filename", "latest"]
-    _derived = ("url", "cache_offset", "filename", "latest")
+    _derived = ("url", "cache_offset", "filename", "latest", "source_locator_raw")
     query_cols = [f for f in fields if f not in _derived] + ["source_locator"]
     wh = Warehouse(deps.layout.warehouse)
     try:
@@ -1080,6 +1092,11 @@ def case_artifacts_export(
             f"LIMIT 200000",
             list(params),
         )
+        # Keep the raw locator as its own column before _enrich_artifact_rows
+        # consumes and drops it: it is the in-file offset a reader needs to go
+        # back to the original bytes, and for memory rows it carries the PID.
+        for r in rows:
+            r["source_locator_raw"] = r.get("source_locator")
         _enrich_artifact_rows(wh, rows)
     finally:
         wh.close()
@@ -1303,13 +1320,50 @@ def case_add_finding(case_id: str, body: AddFindingIn) -> dict:
 
 
 @app.get("/api/cases/{case_id}/report", response_class=HTMLResponse)
-def case_report(case_id: str, name: str | None = None) -> HTMLResponse:
+def case_report(case_id: str, name: str | None = None, download: bool = False) -> HTMLResponse:
+    """The generated report. `download=true` serves the same bytes as an
+    attachment rather than inline.
+
+    The file is self-contained - CSS inline, no external references - so the
+    downloaded copy renders identically anywhere, and its SHA-256 still
+    matches the seal recorded in the case's custody chain. That is the
+    property that makes it exportable evidence rather than a screenshot: a
+    recipient can verify the copy they received is the copy that was
+    generated. Print-to-PDF is the browser's own, so no rendering dependency
+    is introduced; the report carries a print stylesheet for it."""
     layout = _layout(case_id)
     reports = sorted(layout.reports.glob("*.html")) if layout.reports.is_dir() else []
     if not reports:
         raise HTTPException(404, "no report generated yet")
     target = next((r for r in reports if r.name == name), reports[-1])
-    return HTMLResponse(target.read_text("utf-8"))
+    headers = (
+        {"Content-Disposition": f'attachment; filename="{target.name}"'} if download else None
+    )
+    return HTMLResponse(target.read_text("utf-8"), headers=headers)
+
+
+@app.get("/api/cases/{case_id}/reports")
+def case_report_list(case_id: str) -> dict:
+    """Every report generated for this case, newest first, each with the
+    custody-seal verification result for that specific file - so a reader
+    choosing which to export can see which ones still match what was
+    sealed."""
+    from dd_lab.report.builder import verify_report
+
+    layout = _layout(case_id)
+    if not layout.manifest.is_file():
+        raise HTTPException(404, "case not found")
+    out = []
+    for r in sorted(layout.reports.glob("*.html"), reverse=True) if layout.reports.is_dir() else []:
+        ok, detail = verify_report(layout, r)
+        out.append({
+            "name": r.name,
+            "size_bytes": r.stat().st_size,
+            "generated_ts": datetime.fromtimestamp(r.stat().st_mtime, UTC).isoformat(),
+            "seal_ok": ok,
+            "seal_detail": detail,
+        })
+    return {"ok": True, "reports": out}
 
 
 @app.get("/api/cases/{case_id}/audit")

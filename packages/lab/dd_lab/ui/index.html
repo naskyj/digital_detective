@@ -20,10 +20,10 @@
   .card .n{font-size:26px;font-weight:700}.card .l{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
   .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  button{background:var(--accent2);color:#fff;border:0;border-radius:7px;padding:8px 14px;font-size:13px;cursor:pointer;font-weight:500;transition:filter .1s}
+  button,a.btn{background:var(--accent2);color:#fff;border:0;border-radius:7px;padding:8px 14px;font-size:13px;cursor:pointer;font-weight:500;transition:filter .1s;display:inline-block;text-decoration:none;line-height:normal}
   button:hover:not(:disabled){filter:brightness(1.08)}
   button.primary{padding:10px 20px;font-size:14px;box-shadow:0 1px 3px rgba(0,0,0,.12)}
-  button.sec{background:#e8e8ea;color:#27272a}
+  button.sec,a.btn.sec{background:#e8e8ea;color:#27272a}
   button.ghost{background:transparent;color:var(--accent2);padding:8px 8px}
   button.danger{background:var(--bad)}
   button:disabled{opacity:.45;cursor:not-allowed}
@@ -714,6 +714,17 @@ async function vCase(m){
   } else {
     actions.append(el('div',{class:'row'},
       d.reports.length?el('button',{class:'primary',onclick:()=>go('report',id)},'📄  Open report'):'',
+      // Export: the report is a single self-contained file whose SHA-256 still
+      // matches its custody seal, so the downloaded copy is verifiable evidence
+      // rather than a rendering of it. PDF goes through the browser's own print
+      // (the report ships a print stylesheet), which avoids a renderer
+      // dependency and keeps the pagination engine the same one that displayed it.
+      d.reports.length?el('a',{class:'btn sec',href:`/api/cases/${id}/report?download=true`,
+        download:'', title:'Download the sealed HTML report - verifiable against its custody seal'},
+        '⤓  Download report'):'',
+      el('a',{class:'btn sec',href:`/api/cases/${id}/artifacts/export.csv`,download:'',
+        title:'Every artifact with its full classification: relevance, score, category and each voter'},
+        '⤓  Export classification CSV'),
       el('button',{class:'sec',onclick:()=>go('chat',id)},'💬  Chat'),
       el('button',{class:'sec',onclick:e=>startRun(e.target)},'↻  Re-run analysis'),
       el('button',{class:'sec',title:'Re-classify artifacts already in the warehouse, in place - no re-parse '+
