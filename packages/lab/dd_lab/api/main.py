@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -1043,10 +1043,15 @@ def case_artifacts_export(
     relevant: bool | None = None,
     sort: str | None = None,
     q: str | None = None,
-) -> Response:
-    """A full CSV export of the currently filtered artifact view - unlike
-    /artifacts (capped for on-screen paging), this exports every matching
-    row up to a hard safety cap, with the untruncated value."""
+    limit: int | None = None,
+    offset: int = 0,
+) -> StreamingResponse:
+    """A complete CSV export of the currently filtered artifact view, with
+    untruncated values and the full classification result for every row.
+
+    Streamed, and uncapped by default: pass `limit`/`offset` only to split a
+    very large export into parts deliberately. An export that silently stops
+    part-way is worse than one that fails, because the file looks complete."""
     deps = InvestigationDeps(cases_root=Path(_settings.cases_root), case_id=case_id)
     if not deps.layout.warehouse.is_file():
         raise HTTPException(409, "case not processed yet")
@@ -1084,32 +1089,66 @@ def case_artifacts_export(
               "url", "cache_offset", "filename", "latest"]
     _derived = ("url", "cache_offset", "filename", "latest", "source_locator_raw")
     query_cols = [f for f in fields if f not in _derived] + ["source_locator"]
-    wh = Warehouse(deps.layout.warehouse)
-    try:
-        rows = wh.query(
-            f"SELECT {', '.join(query_cols)} FROM artifacts {clause} "
-            f"ORDER BY {_artifact_order_by(sort)} "
-            f"LIMIT 200000",
-            list(params),
-        )
-        # Keep the raw locator as its own column before _enrich_artifact_rows
-        # consumes and drops it: it is the in-file offset a reader needs to go
-        # back to the original bytes, and for memory rows it carries the PID.
-        for r in rows:
-            r["source_locator_raw"] = r.get("source_locator")
-        _enrich_artifact_rows(wh, rows)
-    finally:
-        wh.close()
     import csv
     import io
 
-    buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=fields)
-    writer.writeheader()
-    writer.writerows(rows)
-    return Response(
-        content=buf.getvalue(), media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{case_id}_artifacts.csv"'},
+    # Streamed in batches rather than assembled in memory and capped.
+    #
+    # This previously ended `LIMIT 200000` and built the whole file as one
+    # string. On a 675,234-artifact case that silently produced a file
+    # containing exactly 200,000 rows with nothing in it saying so - a export
+    # that looks complete and is not, which for evidence is worse than an
+    # error. Streaming removes both problems: there is no cap, and the
+    # response never holds more than one batch.
+    #
+    # `limit`/`offset` remain available for deliberate splitting into parts;
+    # they now default to "everything" instead of silently truncating.
+    batch = 20_000
+    order_by = _artifact_order_by(sort)
+
+    def _rows():
+        wh = Warehouse(deps.layout.warehouse)
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        yield buf.getvalue()
+        buf.seek(0), buf.truncate(0)
+        try:
+            taken = 0
+            while True:
+                want = batch if limit is None else min(batch, limit - taken)
+                if want <= 0:
+                    break
+                page = wh.query(
+                    f"SELECT {', '.join(query_cols)} FROM artifacts {clause} "  # noqa: S608
+                    f"ORDER BY {order_by} LIMIT {int(want)} OFFSET {int(offset + taken)}",
+                    list(params),
+                )
+                if not page:
+                    break
+                # The raw locator is kept as its own column before
+                # _enrich_artifact_rows consumes and drops it: it is the
+                # in-file offset a reader needs to reach the original bytes,
+                # and for memory rows it carries the PID.
+                for r in page:
+                    r["source_locator_raw"] = r.get("source_locator")
+                _enrich_artifact_rows(wh, page)
+                writer.writerows(page)
+                yield buf.getvalue()
+                buf.seek(0), buf.truncate(0)
+                taken += len(page)
+                if len(page) < want:
+                    break
+        finally:
+            wh.close()
+
+    suffix = f"_{offset}" if offset else ""
+    return StreamingResponse(
+        _rows(), media_type="text/csv",
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="{case_id}_artifacts{suffix}.csv"',
+        },
     )
 
 

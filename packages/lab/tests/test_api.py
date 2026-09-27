@@ -965,3 +965,56 @@ def test_report_listing_reports_seal_status_per_file(client):
     assert row["seal_ok"] is False
     assert "seal" in row["seal_detail"].lower()
     assert row["size_bytes"] > 0 and row["generated_ts"]
+
+
+def test_csv_export_is_not_silently_truncated(client):
+    """The export previously ended `LIMIT 200000` and built the file in
+    memory. On a 675k-artifact case that produced a file containing exactly
+    200,000 rows with nothing in it saying so — an export that looks complete
+    and is not, which for evidence is worse than an outright failure.
+
+    Verified here with a batch-crossing row count (the stream emits 20,000 at
+    a time) so a regression to any single-page implementation fails."""
+    import csv
+    import io
+    from datetime import UTC, datetime
+
+    from dd_core.casedir import CaseLayout
+    from dd_core.enums import ArtifactCategory as C
+    from dd_core.enums import SourceType as S
+    from dd_core.schema import ClassificationResult, NormalizedArtifact
+    from dd_lab.api import main as main_mod
+    from dd_lab.etl.warehouse import Warehouse
+
+    n = 20_000 + 137  # deliberately not a multiple of the stream batch size
+    layout = CaseLayout(main_mod._settings.cases_root, "case_csv_big")
+    wh = Warehouse(layout.warehouse)
+    try:
+        now = datetime.now(UTC)
+        wh.load_artifacts([
+            NormalizedArtifact(
+                artifact_id=f"big-{i:07d}", case_id="case_csv_big", app="discord",
+                source_type=S.MEMORY_STRING, source_file="m", source_locator=f"s{i}",
+                key="mem.string", value=f"row {i}", extracted_ts=now,
+                classification=ClassificationResult(
+                    category=C.GENERAL, confidence=0.5, relevant=True,
+                    relevance_score=0.9, classifier_version="test"),
+            )
+            for i in range(n)
+        ])
+        wh.build_views()
+    finally:
+        wh.close()
+
+    body = b"".join(client.get(
+        "/api/cases/case_csv_big/artifacts/export.csv").iter_bytes())
+    rows = list(csv.reader(io.StringIO(body.decode("utf-8"))))
+
+    assert len(rows) - 1 == n, f"exported {len(rows) - 1} of {n} rows"
+    assert rows[0] == list(csv.reader(io.StringIO(body.decode("utf-8")[:4000])))[0]
+
+    # explicit splitting still available for deliberately partitioned exports
+    part = list(csv.reader(io.StringIO(b"".join(client.get(
+        "/api/cases/case_csv_big/artifacts/export.csv",
+        params={"limit": 5000, "offset": 20000}).iter_bytes()).decode("utf-8"))))
+    assert len(part) - 1 == n - 20_000
