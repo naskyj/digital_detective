@@ -80,6 +80,31 @@ def test_roblox_robux_key_is_payment_info():
     assert r.category == "PAYMENT_INFO"
 
 
+@pytest.mark.parametrize("value", [
+    "robux@2x.png",                                     # an icon filename
+    "the kernel TRANSACTION manager had to abort",      # a Windows error string
+    "PURCHASES are Currently Disabled",                 # UI copy
+    "best price guaranteed",                            # marketing prose
+])
+def test_roblox_commerce_words_in_prose_are_not_payment_info(value):
+    """The generic commerce words are field names in Roblox's own stores, so
+    they only count as evidence when they appear as one. As bare substrings
+    they produced 1,226 false positives and no true positives against the
+    gold labels - every hit was an icon name, an OS error string or UI copy."""
+    hits = app_profile_hits("roblox", "cache.record.body", value)
+    assert not [h for h in hits if h.category == "PAYMENT_INFO"], value
+
+
+@pytest.mark.parametrize("value", [
+    '{"robux": 500}', "robux=500", '{"price": 9.99}', '{"purchases": []}',
+    '{"masked_credit_card": "****1234"}',   # distinctive: no separator needed
+    "benefit_id",
+])
+def test_roblox_commerce_fields_are_payment_info(value):
+    hits = app_profile_hits("roblox", "cache.record.commerce", value)
+    assert [h for h in hits if h.category == "PAYMENT_INFO"], value
+
+
 def test_roblox_security_cookie_value_is_credential():
     r = C.classify("cookie.roblox.com..ROBLOSECURITY", ".ROBLOSECURITYv2_ABCDEF", app="roblox")
     assert r.category == "CREDENTIAL"

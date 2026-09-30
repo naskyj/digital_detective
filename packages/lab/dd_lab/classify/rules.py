@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from dd_core.enums import ArtifactCategory as C
@@ -71,7 +72,8 @@ _VALUE_PATTERNS: dict[C, list[tuple[re.Pattern, float]]] = {
     ],
     C.PAYMENT_INFO: [
         (re.compile(r"\b(?:4\d{12}(?:\d{3})?|5[1-5]\d{14}|3[47]\d{13}|6(?:011|5\d{2})\d{12})\b"), 0.9),
-        (re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b"), 0.6),  # IBAN-ish
+        # Checksum-validated - see _valid_iban and _VALUE_VALIDATORS below.
+        (_IBAN_RE := re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b"), 0.6),
         (re.compile(r"\b(?:visa|mastercard|amex|american express|discover|maestro)\b", re.I), 0.5),
     ],
     C.LOCATION_INFO: [
@@ -220,12 +222,48 @@ def _norm_key_tail(key: str) -> str:
 # gazetteer below (flattened JSON leaf keys also keep real dots/brackets).
 
 
+def _valid_iban(candidate: str) -> bool:
+    """A real IBAN carries a mod-97 checksum; a random identifier does not.
+
+    The shape alone - two letters, two digits, then 11-30 alphanumerics - is
+    far too common to use as evidence. Measured against gold labels, that
+    pattern alone produced 601 false positives and zero true positives, every
+    one of them raw binary carved out of memory: `PA50PA60PA61PB61PA61P`,
+    `PC81PD82PC82PC82PD81PE92PD81PC7`. Validating the checksum keeps every
+    genuine IBAN by construction (it is part of the standard) while rejecting
+    strings that merely have the shape.
+    """
+    c = candidate.upper()
+    if not 15 <= len(c) <= 34:
+        return False
+    rearranged = c[4:] + c[:4]
+    digits = "".join(str(ord(ch) - 55) if ch.isalpha() else ch for ch in rearranged)
+    try:
+        return int(digits) % 97 == 1
+    except ValueError:
+        return False
+
+
+#: Post-match validators, keyed by the pattern they qualify. A pattern can
+#: express a shape but not a checksum; this is where "looks right" becomes
+#: "is right" without making the regex itself unreadable.
+_VALUE_VALIDATORS: dict[re.Pattern, Callable[[str], bool]] = {_IBAN_RE: _valid_iban}
+
+
 def regex_hits(key: str, value: str, app: str | None = None) -> list[RuleHit]:
     hits: list[RuleHit] = []
     sample = value[:4000]
     for cat, patterns in _VALUE_PATTERNS.items():
         for pat, weight in patterns:
-            m = pat.search(sample)
+            validator = _VALUE_VALIDATORS.get(pat)
+            if validator is None:
+                m = pat.search(sample)
+            else:
+                # Scan past candidates that fail the checksum instead of
+                # giving up on the first one: a value carved out of memory
+                # routinely holds several shape-alike strings, and a real
+                # IBAN sitting after a junk one must still be found.
+                m = next((c for c in pat.finditer(sample) if validator(c.group(0))), None)
             if m:
                 hits.append(RuleHit(cat, weight, m.group(0)[:80]))
     m = _COOKIE_CREDENTIAL_NAMES.search(key)

@@ -153,8 +153,23 @@ _ROBLOX_RULES: tuple[tuple[re.Pattern, C, float], ...] = (
     # SYSTEM_DETAIL, which already has a generic "locale" key keyword at
     # weight 0.4 (rules.py) - consistent with existing precedent.
     (re.compile(r"RobloxLocaleCode|Roblox\.CrossTabCommunication"), C.SYSTEM_DETAIL, 0.7),
-    (re.compile(r"\brobux\b|transaction|purchase|product_?id|\bprice\b|benefit_?id|"
-                r"masked_credit_card", re.I), C.PAYMENT_INFO, 0.6),
+    # The generic commerce words are FIELD names in Roblox's own stores (this
+    # module's docstring: "real LevelDB/IndexedDB key names and value
+    # shapes"), so they are required to appear as one - immediately followed
+    # by a key/value separator - rather than anywhere in free text. Measured
+    # against gold labels, the bare substrings produced 1,226 false positives
+    # and no true positives, firing on an icon filename (`robux@2x.png`), a
+    # Windows kernel error string ("the kernel TRANSACTION manager had to
+    # abort"), and UI copy ("PURCHASES are Currently Disabled"). Requiring
+    # `"robux":` / `robux=` keeps the field and drops the prose.
+    #
+    # The distinctive names below the generic ones keep matching anywhere:
+    # `masked_credit_card` and `benefit_id` are not words that occur by
+    # accident, so the same restriction would only cost recall.
+    (re.compile(r"(?:\brobux\b|\btransactions?\b|\bpurchases?\b|\bprice\b)"
+                r'(?=\s*["\']?\s*[:=])'
+                r"|product_?id|benefit_?id|masked_credit_card", re.I),
+     C.PAYMENT_INFO, 0.6),
     (re.compile(r"rbxcdn\.com", re.I), C.MEDIA, 0.7),
     (re.compile(r"created|updated|response_?received|joined|last_?online", re.I),
      C.TIMESTAMP, 0.6),

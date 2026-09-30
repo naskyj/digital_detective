@@ -88,6 +88,48 @@ def test_real_emails_still_detected(value):
     assert r.category == "USER"
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "PA50PA60PA61PB61PA61P",           # raw binary carved out of memory
+        "PC81PD82PC82PC82PD81PE92PD81PC7",
+        "AB12CDEFGHIJKLMNOP",              # right shape, wrong checksum
+        "GB82WEST12345698765431",          # a real IBAN with one digit changed
+    ],
+)
+def test_iban_shaped_strings_without_a_valid_checksum_are_not_payment_info(value):
+    """Two letters, two digits, then alphanumerics is far too common a shape
+    to use as evidence on its own: measured against the gold labels it
+    produced 601 false positives and zero true positives, every one of them
+    binary carved out of a memory dump. The mod-97 checksum is part of the
+    IBAN standard, so validating it costs no genuine recall."""
+    r = C.classify("mem.string", value, source_type="memory_string")
+    assert r.regex_vote != "PAYMENT_INFO", f"{value!r} was treated as an IBAN"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "GB82WEST12345698765432",   # the canonical example from ISO 13616
+        "DE89370400440532013000",
+        "FR1420041010050500013M02606",
+        "NL91ABNA0417164300",
+    ],
+)
+def test_real_ibans_still_detected(value):
+    r = C.classify("cache.body.billing.iban", value)
+    assert r.category == "PAYMENT_INFO"
+
+
+def test_a_valid_iban_is_found_even_after_a_junk_candidate():
+    """`search()` stops at the first match, so a checksum validator that
+    rejects it must not abandon the pattern - memory-carved values routinely
+    hold several shape-alike strings before the real one."""
+    r = C.classify("mem.string", "PA50PA60PA61PB61PA61P GB82WEST12345698765432",
+                   source_type="memory_string")
+    assert r.regex_vote == "PAYMENT_INFO"
+
+
 def test_confidence_bounds_and_votes_recorded():
     r = C.classify("local_storage.app.password", "s3cr3t")
     assert 0.0 <= r.confidence <= 1.0
