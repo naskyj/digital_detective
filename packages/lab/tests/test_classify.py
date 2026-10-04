@@ -171,6 +171,22 @@ def test_coordinate_shaped_pairs_that_are_not_coordinates(value):
     assert r.regex_vote != "LOCATION_INFO", f"{value!r} was treated as a coordinate"
 
 
+def test_adjacent_elements_of_a_numeric_array_are_not_a_coordinate():
+    """WebRTC latency telemetry carries a `history` array of round-trip times
+    in milliseconds. The pattern pairs up neighbouring elements, and in a list
+    this long some pair eventually lands inside both lat/lon bounds by
+    coincidence - `22.2252,46.1548` here. Neither the bound nor the precision
+    rejects it, because each number is individually plausible; what is wrong
+    is that the two are not one value. This shape accounted for 50 of the 56
+    LOCATION_INFO false positives that survived the first two constraints."""
+    stun = ('"stun-binding","version":1,"intervalMs":300000,'
+            '"samples":[{"pop":"ams2","ip":"128.116.21.73","rttMs":123.3808,'
+            '"history":[124.4651,150.388,125.3496,124.2506,127.246,'
+            '22.2252,46.1548,131.2033]}]')
+    r = C.classify("mem.string", stun, source_type="memory_string")
+    assert r.regex_vote != "LOCATION_INFO"
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -179,9 +195,13 @@ def test_coordinate_shaped_pairs_that_are_not_coordinates(value):
         "40.7128,-74.0060",           # New York
         "-90.0000,180.0000",          # the bounds themselves
         "0.5000,0.5000",              # in the unit interval, ordinary precision
+        '{"lat_lng":"51.5074,-0.1278"}',          # quoted, as a JSON value
+        "the meeting point was 51.5074, -0.1278.",  # in prose
     ],
 )
 def test_real_coordinates_still_detected(value):
+    """The list-context constraint must not reject a coordinate that merely
+    has punctuation around it."""
     r = C.classify("cache.body.location", value)
     assert r.category == "LOCATION_INFO", value
 

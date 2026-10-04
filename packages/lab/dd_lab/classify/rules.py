@@ -236,7 +236,7 @@ def _norm_key_tail(key: str) -> str:
 # gazetteer below (flattened JSON leaf keys also keep real dots/brackets).
 
 
-def _valid_iban(candidate: str) -> bool:
+def _valid_iban(m: re.Match, sample: str) -> bool:  # noqa: ARG001
     """A real IBAN carries a mod-97 checksum; a random identifier does not.
 
     The shape alone - two letters, two digits, then 11-30 alphanumerics - is
@@ -247,7 +247,7 @@ def _valid_iban(candidate: str) -> bool:
     genuine IBAN by construction (it is part of the standard) while rejecting
     strings that merely have the shape.
     """
-    c = candidate.upper()
+    c = m.group(0).upper()
     if not 15 <= len(c) <= 34:
         return False
     rearranged = c[4:] + c[:4]
@@ -258,7 +258,7 @@ def _valid_iban(candidate: str) -> bool:
         return False
 
 
-def _valid_coordinate(candidate: str) -> bool:
+def _valid_coordinate(m: re.Match, sample: str) -> bool:
     """A latitude/longitude pair is bounded; a pair of floats is not.
 
     The shape - two signed decimals with 4+ places, comma-separated - matched
@@ -275,10 +275,16 @@ def _valid_coordinate(candidate: str) -> bool:
       decimal places is ~10 nanometres of latitude, which no positioning
       source produces, and both components landing inside [0, 1] is the
       signature of a normalised pair rather than a place.
+    - **Adjacent elements of a numeric array.** WebRTC latency telemetry
+      carries `"history":[124.4651,150.388,125.3496,124.2506,127.246,...]` -
+      round-trip times in milliseconds. The pattern pairs up neighbouring
+      elements, and in a long enough list some pair eventually lands inside
+      both bounds by coincidence (`22.2252,46.1548`). Neither the bound nor
+      the precision rejects those, because each number is individually
+      plausible; what is wrong is that the two are not a unit. A coordinate
+      pair is one value, so a match that continues into another comma-
+      separated number on either side is a slice of a list, not a position.
     """
-    m = _COORD_RE.search(candidate)
-    if not m:
-        return False
     try:
         lat, lon = float(m.group(1)), float(m.group(2))
     except ValueError:
@@ -289,13 +295,23 @@ def _valid_coordinate(candidate: str) -> bool:
     # normalised pair, not a position. Either condition alone is plausible
     # for a real coordinate near 0°N 0°E, so both are required.
     places = max(len(g.partition(".")[2]) for g in (m.group(1), m.group(2)))
-    return not (abs(lat) <= 1.0 and abs(lon) <= 1.0 and places >= 9)
+    if abs(lat) <= 1.0 and abs(lon) <= 1.0 and places >= 9:
+        return False
+    # Mid-list: another numeric element abuts the match on either side.
+    return not (_LIST_BEFORE.search(sample[:m.start()])
+                or _LIST_AFTER.match(sample[m.end():]))
 
 
-#: Post-match validators, keyed by the pattern they qualify. A pattern can
-#: express a shape but not a checksum or a bound; this is where "looks right"
-#: becomes "is right" without making the regex itself unreadable.
-_VALUE_VALIDATORS: dict[re.Pattern, Callable[[str], bool]] = {
+#: A numeric array element immediately before / after a coordinate match.
+_LIST_BEFORE = re.compile(r"\d\s*,\s*$")
+_LIST_AFTER = re.compile(r"\s*,\s*[-+]?\d")
+
+
+#: Post-match validators, keyed by the pattern they qualify. Each receives the
+#: match and the sample it was found in: a pattern can express a shape, but
+#: not a checksum, a bound, or whether the shape is a unit or a slice of a
+#: longer structure - and the last of those needs the surrounding text.
+_VALUE_VALIDATORS: dict[re.Pattern, Callable[[re.Match, str], bool]] = {
     _IBAN_RE: _valid_iban,
     _COORD_RE: _valid_coordinate,
 }
@@ -314,7 +330,8 @@ def regex_hits(key: str, value: str, app: str | None = None) -> list[RuleHit]:
                 # giving up on the first one: a value carved out of memory
                 # routinely holds several shape-alike strings, and a real
                 # IBAN sitting after a junk one must still be found.
-                m = next((c for c in pat.finditer(sample) if validator(c.group(0))), None)
+                m = next((c for c in pat.finditer(sample)
+                          if validator(c, sample)), None)
             if m:
                 hits.append(RuleHit(cat, weight, m.group(0)[:80]))
     m = _COOKIE_CREDENTIAL_NAMES.search(key)
