@@ -74,10 +74,24 @@ _VALUE_PATTERNS: dict[C, list[tuple[re.Pattern, float]]] = {
         (re.compile(r"\b(?:4\d{12}(?:\d{3})?|5[1-5]\d{14}|3[47]\d{13}|6(?:011|5\d{2})\d{12})\b"), 0.9),
         # Checksum-validated - see _valid_iban and _VALUE_VALIDATORS below.
         (_IBAN_RE := re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b"), 0.6),
-        (re.compile(r"\b(?:visa|mastercard|amex|american express|discover|maestro)\b", re.I), 0.5),
+        # Card brands split by how ambiguous the word is in ordinary English.
+        # `discover`, `visa` and `maestro` are everyday words, and matched as
+        # bare substrings they produced 57 false positives and no true
+        # positives - 54 of them the verb in strings like "Could not discover
+        # topology info for SWIP!". They now need a payment field around them,
+        # which a genuine card record always has; the unambiguous brands below
+        # keep matching anywhere.
+        (re.compile(r"\b(?:mastercard|amex|american express)\b", re.I), 0.5),
+        (re.compile(r"(?:card|payment|billing|brand|issuer|scheme|network)\w*"
+                    r"""["']?\s*[:=]\s*["']?(?:visa|discover|maestro)\b"""
+                    r"""|\b(?:visa|discover|maestro)["']?\s*[:=]"""
+                    r"|\b(?:visa|discover|maestro)\b(?=[^\n]{0,40}"
+                    r"\b(?:card|cardholder|last4|expiry|exp_month|cvv)\b)", re.I), 0.5),
     ],
     C.LOCATION_INFO: [
-        (re.compile(r"[-+]?\d{1,3}\.\d{4,}\s*,\s*[-+]?\d{1,3}\.\d{4,}"), 0.85),
+        # Range-validated - see _valid_coordinate and _VALUE_VALIDATORS below.
+        (_COORD_RE := re.compile(
+            r"([-+]?\d{1,3}\.\d{4,})\s*,\s*([-+]?\d{1,3}\.\d{4,})"), 0.85),
     ],
     C.NETWORK_DETAIL: [
         (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), 0.55),
@@ -244,10 +258,47 @@ def _valid_iban(candidate: str) -> bool:
         return False
 
 
+def _valid_coordinate(candidate: str) -> bool:
+    """A latitude/longitude pair is bounded; a pair of floats is not.
+
+    The shape - two signed decimals with 4+ places, comma-separated - matched
+    601 artifacts in the annotated corpus with no true positive among them,
+    in two distinct shapes that the bound and the precision separate:
+
+    - A telemetry triple, `125.3496,124.2506` beside an IP and a millisecond
+      timestamp. 125.3496 is not a latitude: the range is [-90, 90]. Checking
+      the bound rejects these outright, and costs nothing, because a real
+      coordinate satisfies it by definition.
+    - Normalised interface floats, `0.92549020052, 0.0941176489` - colour or
+      layout components in the unit interval. These are inside the bounds, so
+      the bound alone does not help; what separates them is precision. Eleven
+      decimal places is ~10 nanometres of latitude, which no positioning
+      source produces, and both components landing inside [0, 1] is the
+      signature of a normalised pair rather than a place.
+    """
+    m = _COORD_RE.search(candidate)
+    if not m:
+        return False
+    try:
+        lat, lon = float(m.group(1)), float(m.group(2))
+    except ValueError:
+        return False
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return False
+    # Both inside the unit interval AND carrying absurd precision: a
+    # normalised pair, not a position. Either condition alone is plausible
+    # for a real coordinate near 0°N 0°E, so both are required.
+    places = max(len(g.partition(".")[2]) for g in (m.group(1), m.group(2)))
+    return not (abs(lat) <= 1.0 and abs(lon) <= 1.0 and places >= 9)
+
+
 #: Post-match validators, keyed by the pattern they qualify. A pattern can
-#: express a shape but not a checksum; this is where "looks right" becomes
-#: "is right" without making the regex itself unreadable.
-_VALUE_VALIDATORS: dict[re.Pattern, Callable[[str], bool]] = {_IBAN_RE: _valid_iban}
+#: express a shape but not a checksum or a bound; this is where "looks right"
+#: becomes "is right" without making the regex itself unreadable.
+_VALUE_VALIDATORS: dict[re.Pattern, Callable[[str], bool]] = {
+    _IBAN_RE: _valid_iban,
+    _COORD_RE: _valid_coordinate,
+}
 
 
 def regex_hits(key: str, value: str, app: str | None = None) -> list[RuleHit]:

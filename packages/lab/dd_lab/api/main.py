@@ -621,7 +621,8 @@ def case_relevance(case_id: str) -> dict:
             examples[str(r["relevant"])] = wh.query(
                 "SELECT app, source_type, category, key, substr(value,1,200) AS value, "
                 "relevance_score, relevance_model_score, regex_vote, keyword_vote, ner_vote "
-                "FROM artifacts WHERE relevant = ? ORDER BY relevance_score DESC NULLS LAST LIMIT 5",
+                "FROM artifacts WHERE relevant = ? ORDER BY relevance_score DESC NULLS LAST, "
+                "relevance_model_score DESC NULLS LAST LIMIT 5",
                 [r["relevant"]],
             )
     finally:
@@ -749,9 +750,20 @@ def case_artifacts(
 # of the `sort` query param - ORDER BY can't be parametrized with `?` the
 # way WHERE values can, so an unvalidated column name here would be a real
 # SQL-injection surface.
+#
+# Both relevance orderings tie-break on relevance_model_score. The composed
+# score saturates (see the v_high_priority view in etl/warehouse.py): 2,559
+# artifacts in the annotated corpus share the score 1.0, of which only 48% are
+# relevant, so without a tie-break the examiner reads a 2,559-row block in
+# arbitrary order. The model probability orders that block almost perfectly
+# and costs nothing - it changes no relevance decision, only the order within
+# a tie.
 _ARTIFACT_SORTS = {
-    "": "relevant DESC, confidence DESC NULLS LAST, key, artifact_id",
-    "relevance": "relevance_score DESC NULLS LAST, key, artifact_id",
+    "": "relevant DESC, relevance_score DESC NULLS LAST, "
+        "relevance_model_score DESC NULLS LAST, confidence DESC NULLS LAST, "
+        "key, artifact_id",
+    "relevance": "relevance_score DESC NULLS LAST, "
+                 "relevance_model_score DESC NULLS LAST, key, artifact_id",
     "confidence": "confidence DESC NULLS LAST, key, artifact_id",
     "time": "record_ts DESC NULLS LAST, key, artifact_id",
 }

@@ -121,6 +121,71 @@ def test_real_ibans_still_detected(value):
     assert r.category == "PAYMENT_INFO"
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Could not discover topology info for SWIP!",   # 54 of the 57 FPs
+        "discover new servers",
+        "we could not discover any devices",
+        "apply for a visa before travelling",
+    ],
+)
+def test_card_brand_words_in_prose_are_not_payment_info(value):
+    """`discover`, `visa` and `maestro` are ordinary English. Matched as bare
+    substrings the brand list produced 57 false positives and zero true
+    positives across the annotated corpus."""
+    r = C.classify("mem.string", value, source_type="memory_string")
+    assert r.regex_vote != "PAYMENT_INFO", f"{value!r} was treated as a card brand"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '{"brand":"visa","last4":"4242"}',
+        '{"card_network": "discover"}',
+        '"payment_scheme":"maestro"',
+        "visa = 4111111111111111",
+        "mastercard",                       # unambiguous: matches anywhere
+        "paid by American Express",
+    ],
+)
+def test_card_brands_in_a_payment_context_are_still_payment_info(value):
+    r = C.classify("cache.body.billing", value)
+    assert r.category == "PAYMENT_INFO", value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "125.3496,124.2506",          # 58 FPs: a telemetry triple, not a place
+        "0.92549020052, 0.0941176489",  # normalised colour/layout components
+        "0.345098039216,0.396078431373",
+        "199.9999,20.0001",           # latitude out of range
+    ],
+)
+def test_coordinate_shaped_pairs_that_are_not_coordinates(value):
+    """All 111 LOCATION_INFO predictions on the annotated corpus were false,
+    in these two shapes: a value out of latitude range, and a normalised pair
+    in the unit interval carrying ~11 decimal places."""
+    r = C.classify("mem.string", value, source_type="memory_string")
+    assert r.regex_vote != "LOCATION_INFO", f"{value!r} was treated as a coordinate"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "51.5074,-0.1278",            # London
+        "-33.8688, 151.2093",         # Sydney
+        "40.7128,-74.0060",           # New York
+        "-90.0000,180.0000",          # the bounds themselves
+        "0.5000,0.5000",              # in the unit interval, ordinary precision
+    ],
+)
+def test_real_coordinates_still_detected(value):
+    r = C.classify("cache.body.location", value)
+    assert r.category == "LOCATION_INFO", value
+
+
 def test_a_valid_iban_is_found_even_after_a_junk_candidate():
     """`search()` stops at the first match, so a checksum validator that
     rejects it must not abandon the pattern - memory-carved values routinely

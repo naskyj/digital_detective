@@ -127,10 +127,22 @@ CREATE OR REPLACE VIEW v_high_priority AS
     -- existing as real fields - silently ignored them even after they
     -- shipped. Now keys off relevance directly (the actual "does this
     -- matter" signal), category kept only to order ties.
+    -- relevance_model_score breaks ties before confidence does. The composed
+    -- score saturates: `rule_evidence` is capped at 1.0 and the highest
+    -- weighted voter reaches the cap alone, so noisy-OR returns exactly 1.0
+    -- for ANY model probability. Measured on the annotated corpus, 2,559
+    -- artifacts share the score 1.0 and only 48% of them are relevant, while
+    -- the model separates that block almost perfectly (median probability
+    -- 1.000 vs 0.000). Ordering by the composed score alone scores average
+    -- precision 0.638; adding this tie-break takes it to 0.930, against 0.941
+    -- for the model score alone. It changes no relevance decision - only the
+    -- order within an existing tie.
     SELECT artifact_id, app, source_type, category, confidence, relevance_score, key, value, record_ts
     FROM artifacts
     WHERE relevant
-    ORDER BY relevance_score DESC, confidence DESC;
+    ORDER BY relevance_score DESC,
+             relevance_model_score DESC NULLS LAST,
+             confidence DESC;
 
 CREATE OR REPLACE VIEW v_by_relevance AS
     SELECT relevant,
