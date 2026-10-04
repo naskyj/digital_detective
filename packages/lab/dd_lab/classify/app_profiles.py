@@ -52,8 +52,23 @@ from dd_core.patterns import CONTENT_FIELD_PAT
 if TYPE_CHECKING:
     from dd_lab.classify.rules import RuleHit
 
-# Each rule is (compiled pattern, category, weight), searched against the
-# combined key+value haystack (see module docstring). Weight tiers,
+#: Rules are normally searched against the combined key+value haystack. A rule
+#: tagged KEY_ONLY is searched against the key alone.
+#:
+#: The distinction exists because a field NAME and the same word occurring
+#: inside a JSON document are different evidence, and the combined haystack
+#: cannot tell them apart. Measured against the gold labels, Discord's
+#: `\btoken\b` rule produced 1,108 false positives and 13 true positives - and
+#: every one of the 13 had `token` in the artifact's own key
+#: (`https://discordapp.com :: token`, whose value is a real Discord session
+#: token), while the false positives had the word inside a JSON value, 941 of
+#: them as the literal `"token": null`. Scoping the rule to the key keeps all
+#: the detection and drops the prose.
+KEY_ONLY = "key"
+
+# Each rule is (compiled pattern, category, weight) or
+# (compiled pattern, category, weight, KEY_ONLY), searched against the
+# combined key+value haystack unless scoped (see above). Weight tiers,
 # consistent with rules.py's own hand-picked-per-pattern style: a
 # distinctive, app-specific LevelDB store name (DraftStore,
 # MultiAccountStore, ...) or a highly distinctive value literal
@@ -63,7 +78,7 @@ if TYPE_CHECKING:
 # *shape* (a bare digit-run, a Slack id prefix) is weaker still, since the
 # shape alone is common -> 0.5.
 
-_DISCORD_RULES: tuple[tuple[re.Pattern, C, float], ...] = (
+_DISCORD_RULES: tuple[tuple, ...] = (
     (re.compile(r"user_?id|sender_?id|author_?id|discriminator|global_?name|username|"
                 r"display_?name|\bavatar\b|\bbot\b", re.I), C.USER, 0.6),
     (re.compile(r"MultiAccountStore|user_id_cache|fingerprint|installation_id_v3|"
@@ -78,7 +93,12 @@ _DISCORD_RULES: tuple[tuple[re.Pattern, C, float], ...] = (
                 r"embedded_?content", re.I), C.CHAT_CONTENT, 0.6),
     (re.compile(r"DraftStore"), C.DRAFT, 0.85),
     (re.compile(r"ThemeStore|UserSettingsProtoStore-Cache"), C.ACCOUNT_SETTINGS, 0.85),
-    (re.compile(r"\btoken\b|\btokens\b|ARISEENGINE_AUTHTOKEN", re.I), C.CREDENTIAL, 0.85),
+    # KEY_ONLY: see the note on KEY_ONLY above - as a key+value rule this
+    # produced 1,108 false positives against 13 true positives, because
+    # `token` occurs constantly inside JSON values (941 of them the literal
+    # `"token": null`, plus .NET PublicKeyToken assembly identities and LLM
+    # token counters). All 13 true positives have it in the key.
+    (re.compile(r"\btoken\b|\btokens\b|ARISEENGINE_AUTHTOKEN", re.I), C.CREDENTIAL, 0.85, KEY_ONLY),
     (re.compile(r"SelectedGuildStore|SelectedChannelStore|RecentVoiceChannelStore|"
                 r"QuickSwitcherStore|viewedThreadIds|ChannelSectionStore2|channelHistory|"
                 r"voiceChannelHistory|lastConnectedTime"), C.NAVIGATION_ACTIVITY, 0.85),
@@ -97,7 +117,7 @@ _DISCORD_RULES: tuple[tuple[re.Pattern, C, float], ...] = (
      C.TIMESTAMP, 0.6),
 )
 
-_SLACK_RULES: tuple[tuple[re.Pattern, C, float], ...] = (
+_SLACK_RULES: tuple[tuple, ...] = (
     (re.compile(r"member_?id|user_?id|team_?id|workspace_?id|user_?name|display_?name|"
                 r"real_?name|full_?name|email", re.I), C.USER, 0.6),
     (re.compile(r"localConfig_v2"), C.USER, 0.7),  # holds name/url/user_id
@@ -127,7 +147,7 @@ _SLACK_RULES: tuple[tuple[re.Pattern, C, float], ...] = (
     (re.compile(r"message_?date|created|last_?read|updated|date_?joined", re.I), C.TIMESTAMP, 0.6),
 )
 
-_ROBLOX_RULES: tuple[tuple[re.Pattern, C, float], ...] = (
+_ROBLOX_RULES: tuple[tuple, ...] = (
     (re.compile(r"user_?id|userId|username|display_?name|displayName|\bname\b", re.I),
      C.USER, 0.6),
     (re.compile(r"data\.userById\.id|verifiedEmail"), C.USER, 0.7),
@@ -175,7 +195,7 @@ _ROBLOX_RULES: tuple[tuple[re.Pattern, C, float], ...] = (
      C.TIMESTAMP, 0.6),
 )
 
-_PROFILES: tuple[tuple[str, tuple[tuple[re.Pattern, C, float], ...]], ...] = (
+_PROFILES: tuple[tuple[str, tuple[tuple, ...]], ...] = (
     ("discord", _DISCORD_RULES),
     ("slack", _SLACK_RULES),
     ("roblox", _ROBLOX_RULES),
@@ -200,8 +220,10 @@ def app_profile_hits(app: str, key: str, value: str) -> list["RuleHit"]:
         return []
     haystack = f"{key} {value}"
     hits: list[RuleHit] = []
-    for pat, cat, weight in rules:
-        m = pat.search(haystack)
+    for rule in rules:
+        pat, cat, weight = rule[0], rule[1], rule[2]
+        scope = rule[3] if len(rule) > 3 else None
+        m = pat.search(key if scope == KEY_ONLY else haystack)
         if m:
             hits.append(RuleHit(cat, weight, m.group(0)[:80]))
     return hits

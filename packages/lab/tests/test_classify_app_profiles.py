@@ -81,6 +81,41 @@ def test_roblox_robux_key_is_payment_info():
 
 
 @pytest.mark.parametrize("value", [
+    '"exePath": "robloxplayerbeta.exe", "token": null}}',  # 941 of the 1,108
+    "Token=b03f5f7f11d50a3a",                              # .NET PublicKeyToken
+    "The target appstats is already being tracked for token usage;bailing out",
+    '{"tokens": 1420, "model": "gpt-4"}',                   # a token counter
+    "x-csrf-token",
+])
+def test_discord_token_inside_a_value_is_not_a_credential(value):
+    """`token` is a field NAME in Discord's stores, but the word occurs
+    constantly inside JSON values. Matched against the combined key+value
+    haystack the rule produced 1,108 false positives and 13 true positives,
+    941 of the false positives being the literal `"token": null` — a field
+    that is present and empty. The rule is scoped to the key (KEY_ONLY)."""
+    hits = app_profile_hits("discord", "mem.string", value)
+    assert not [h for h in hits if h.category == "CREDENTIAL"], value
+
+
+@pytest.mark.parametrize("key", [
+    "https://discordapp.com :: token",   # where all 13 true positives live
+    "local_storage.tokens",
+    "ARISEENGINE_AUTHTOKEN",
+])
+def test_discord_token_in_the_key_is_still_a_credential(key):
+    """The scope change must cost no detection: every true positive the rule
+    caught had `token` in the artifact's own key."""
+    r = C.classify(key, "dQw4w9WgXcQ:djEw/+Gtg0eR0DsZiAEi+D91+q4la8Zun", app="discord")
+    assert r.category == "CREDENTIAL", key
+
+
+def test_a_key_only_rule_does_not_match_the_same_text_in_the_value():
+    """The mechanism itself, independent of which rule uses it."""
+    assert [h for h in app_profile_hits("discord", "x :: token", "") if h.category == "CREDENTIAL"]
+    assert not [h for h in app_profile_hits("discord", "mem.string", "token") if h.category == "CREDENTIAL"]
+
+
+@pytest.mark.parametrize("value", [
     "robux@2x.png",                                     # an icon filename
     "the kernel TRANSACTION manager had to abort",      # a Windows error string
     "PURCHASES are Currently Disabled",                 # UI copy
@@ -166,6 +201,6 @@ def test_app_profile_content_rules_use_the_shared_content_pattern():
     from dd_lab.classify.app_profiles import _DISCORD_RULES, _SLACK_RULES
 
     for name, rules in (("discord", _DISCORD_RULES), ("slack", _SLACK_RULES)):
-        chat = [p for p, cat, _w in rules if cat == ArtifactCategory.CHAT_CONTENT]
+        chat = [r[0] for r in rules if r[1] == ArtifactCategory.CHAT_CONTENT]
         assert chat, name
         assert any(CONTENT_FIELD_PAT in p.pattern for p in chat), name
