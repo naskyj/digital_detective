@@ -11,6 +11,7 @@ import logging
 import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
@@ -215,6 +216,15 @@ _MIGRATIONS = (
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS relevant BOOLEAN",
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS relevance_score DOUBLE",
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS relevance_model_score DOUBLE",
+    # Examiner review of the artifacts the classifier did NOT flag. An
+    # approval overwrites `relevant`, so the classifier's own decision is
+    # preserved in `relevant_auto` first: the system discards nothing (R3),
+    # and every accuracy measurement must still be able to score the
+    # classifier rather than the classifier-plus-examiner.
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS relevant_auto BOOLEAN",
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS review_decision VARCHAR",
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS reviewed_by VARCHAR",
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS reviewed_ts TIMESTAMP",
 )
 
 
@@ -424,7 +434,15 @@ class Warehouse:
             self.con.execute(
                 "UPDATE artifacts a SET "
                 "category = c.category, confidence = c.confidence, "
-                "relevant = c.relevant, relevance_score = c.relevance_score, "
+                # `relevant_auto` always takes the classifier's new decision,
+                # but `relevant` keeps an examiner's review if one exists:
+                # re-classifying must not silently revoke a human judgement
+                # about evidence. Without this, every /reclassify would undo
+                # the whole review queue with no trace.
+                "relevant_auto = c.relevant, "
+                "relevant = CASE WHEN a.review_decision IS NOT NULL "
+                "THEN a.relevant ELSE c.relevant END, "
+                "relevance_score = c.relevance_score, "
                 "regex_vote = c.regex_vote, "
                 "ner_vote = c.ner_vote, keyword_vote = c.keyword_vote, model_vote = c.model_vote, "
                 "entropy_vote = c.entropy_vote, relevance_model_score = c.relevance_model_score, "
@@ -435,6 +453,104 @@ class Warehouse:
             total += self.con.execute("SELECT count(*) FROM _cls").fetchone()[0]
         self.con.execute("DROP TABLE IF EXISTS _cls")
         return total
+
+    # ------------------------------------------------------------- review
+    #
+    # The classifier's recall is 0.958 on the annotated corpus, so roughly one
+    # relevant artifact in 24 is never surfaced. Those misses are not sitting
+    # in an uncertain middle where a threshold could find them: the composed
+    # score is near-bimodal and 45 of the 54 are at exactly 0.0, among 551,809
+    # others. Reviewing "everything below the threshold" is 553,727 artifacts
+    # - the original problem restated.
+    #
+    # The model probability does rank them, though, for the same reason it
+    # ranks the flagged block (see the v_high_priority view). Ordering the
+    # UNFLAGGED artifacts by it and reviewing a fixed budget off the top
+    # recovers, measured on the annotated corpus:
+    #
+    #     50 reviewed  ->  21 of 54 misses (39%), 42% of what is read
+    #    100 reviewed  ->  22 of 54 misses (41%)
+    #  1,000 reviewed  ->  31 of 54 misses (57%)
+    #
+    # so fifty artifacts - minutes of work - takes recall from 0.958 to 0.974.
+    # The budget is the examiner's to choose; the ordering is what makes any
+    # budget worth spending.
+
+    REVIEW_DECISIONS = ("approved", "rejected")
+
+    def review_queue(self, limit: int = 50, offset: int = 0,
+                     include_reviewed: bool = False) -> list[dict]:
+        """Artifacts the classifier did NOT flag, best candidates first.
+
+        Ordered by the model's own probability rather than the composed
+        relevance score, which is 0.0 for almost all of this population and
+        therefore cannot order it at all.
+        """
+        where = "WHERE (relevant IS NOT TRUE)"
+        if not include_reviewed:
+            where += " AND review_decision IS NULL"
+        return self.query(
+            "SELECT artifact_id, app, source_type, category, confidence, "
+            "relevant, relevance_score, relevance_model_score, "
+            "regex_vote, keyword_vote, ner_vote, entropy_vote, evidence_spans, "
+            "key, substr(value, 1, 500) AS value, record_ts, deleted, "
+            "source_file, source_locator, review_decision, reviewed_by, reviewed_ts "
+            f"FROM artifacts {where} "
+            "ORDER BY relevance_model_score DESC NULLS LAST, artifact_id "
+            "LIMIT ? OFFSET ?",
+            [int(limit), int(offset)],
+        )
+
+    def review_counts(self) -> dict:
+        """Queue depth and review progress, for the UI header."""
+        row = self.query(
+            "SELECT "
+            "  count(*) FILTER (WHERE relevant IS NOT TRUE "
+            "                     AND review_decision IS NULL) AS pending, "
+            "  count(*) FILTER (WHERE review_decision = 'approved') AS approved, "
+            "  count(*) FILTER (WHERE review_decision = 'rejected') AS rejected, "
+            "  count(*) FILTER (WHERE relevant) AS relevant "
+            "FROM artifacts"
+        )
+        return row[0] if row else {"pending": 0, "approved": 0, "rejected": 0,
+                                   "relevant": 0}
+
+    def record_review(self, artifact_id: str, decision: str,
+                      reviewed_by: str = "") -> dict:
+        """Record an examiner's decision on one unflagged artifact.
+
+        An approval flips `relevant`, so the artifact reaches the report,
+        correlation and timeline like any other relevant artifact. The
+        classifier's own decision is copied to `relevant_auto` first and never
+        overwritten afterwards, so the override is always visible as an
+        override and the classifier remains independently scoreable (R3).
+
+        Returns the updated row. Raises KeyError for an unknown artifact and
+        ValueError for an unknown decision.
+        """
+        if decision not in self.REVIEW_DECISIONS:
+            raise ValueError(
+                f"decision must be one of {self.REVIEW_DECISIONS}, got {decision!r}")
+        existing = self.query(
+            "SELECT relevant, relevant_auto, review_decision FROM artifacts "
+            "WHERE artifact_id = ?", [artifact_id])
+        if not existing:
+            raise KeyError(artifact_id)
+        self.con.execute(
+            "UPDATE artifacts SET "
+            # COALESCE so re-reviewing never overwrites the ORIGINAL automatic
+            # decision with a previous override.
+            "  relevant_auto = COALESCE(relevant_auto, relevant), "
+            "  relevant = ?, review_decision = ?, reviewed_by = ?, reviewed_ts = ? "
+            "WHERE artifact_id = ?",
+            [decision == "approved", decision, reviewed_by,
+             datetime.now(UTC), artifact_id],
+        )
+        return self.query(
+            "SELECT artifact_id, app, source_type, category, key, "
+            "relevant, relevant_auto, relevance_score, relevance_model_score, "
+            "review_decision, reviewed_by, reviewed_ts, source_file, source_locator "
+            "FROM artifacts WHERE artifact_id = ?", [artifact_id])[0]
 
     def close(self) -> None:
         self.con.close()

@@ -80,5 +80,10 @@ class CustodyEvent(StrEnum):
     ANALYSIS_START = "analysis_start"
     ANALYSIS_STEP = "analysis_step"
     ANALYSIS_COMPLETE = "analysis_complete"
+    # An examiner accepting or rejecting an artifact the classifier did not
+    # flag. Distinct from ANALYSIS_STEP because it is a human judgement that
+    # overrides an automated one, which is exactly the kind of decision the
+    # custody log exists to make attributable and non-repudiable.
+    REVIEW_DECISION = "review_decision"
     REPORT_GENERATED = "report_generated"
     NOTE = "note"

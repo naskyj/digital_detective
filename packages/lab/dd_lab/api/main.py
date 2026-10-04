@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from dd_core.casedir import CaseLayout
 from dd_core.custody import CustodyLog
+from dd_core.enums import CustodyEvent
 from dd_core.manifest import Manifest
 from dd_lab.agent.audit import AuditLog
 from dd_lab.agent.runner import run_agent, run_pipeline
@@ -101,6 +102,13 @@ class AddFindingIn(BaseModel):
     citations: list[dict]
     entity_type: str | None = None
     entity_value: str | None = None
+
+
+class ReviewIn(BaseModel):
+    artifact_id: str
+    decision: str  # "approved" | "rejected" - validated in Warehouse.record_review
+    reviewed_by: str = ""
+    note: str = ""
 
 
 # --------------------------------------------------------------------- settings
@@ -1368,6 +1376,92 @@ def case_add_finding(case_id: str, body: AddFindingIn) -> dict:
         deps, body.claim, body.citations, body.entity_type, body.entity_value,
         created_by="investigator",
     )
+
+
+@app.get("/api/cases/{case_id}/review-queue")
+def case_review_queue(case_id: str, limit: int = Query(50, ge=1, le=500),
+                      offset: int = Query(0, ge=0),
+                      include_reviewed: bool = False) -> dict:
+    """The artifacts the classifier did NOT flag, best candidates first.
+
+    Measured on the annotated corpus, the classifier misses roughly one
+    relevant artifact in 24 (recall 0.958). Those misses cannot be found with
+    a lower threshold: the composed score is near-bimodal, and 45 of the 54
+    sit at exactly 0.0 among 551,809 others — "everything below 0.5" is
+    553,727 artifacts, which is the problem the tool exists to solve, restated.
+
+    The model's own probability does rank them. Reviewing the top 50 of this
+    queue recovers 21 of the 54 misses, with 42% of what the examiner reads
+    being a genuine miss; the top 1,000 recovers 31. A fixed budget off the
+    top of this ordering is therefore worth spending, and a threshold sweep
+    is not. The budget is the examiner's to choose.
+    """
+    from dd_lab.etl.warehouse import Warehouse
+
+    layout = _layout(case_id)
+    if not layout.warehouse.is_file():
+        raise HTTPException(404, "case not found")
+    wh = Warehouse(layout.warehouse)
+    try:
+        rows = wh.review_queue(limit=limit, offset=offset,
+                               include_reviewed=include_reviewed)
+        _enrich_artifact_rows(wh, rows)
+        return {"rows": rows, "limit": limit, "offset": offset,
+                "counts": wh.review_counts()}
+    finally:
+        wh.close()
+
+
+@app.post("/api/cases/{case_id}/review")
+def case_record_review(case_id: str, body: ReviewIn) -> dict:
+    """Record an examiner's accept/reject on one artifact from the queue.
+
+    An approval flips `relevant`, so the artifact flows into the report,
+    correlation and timeline exactly like any other relevant artifact — which
+    is the point: the examiner is correcting a miss, not annotating one.
+
+    Three properties make that safe to do to evidence. The classifier's own
+    decision is preserved in `relevant_auto` and never overwritten, so the
+    override is always visible as an override and the classifier stays
+    independently scoreable (R3). A later re-classification will not revoke
+    the decision (see apply_classifications). And each decision appends to the
+    hash-chained custody log, so who decided what, and when, is attributable
+    and non-repudiable (R2).
+    """
+    from dd_lab.etl.warehouse import Warehouse
+
+    layout = _layout(case_id)
+    if not layout.warehouse.is_file():
+        raise HTTPException(404, "case not found")
+    wh = Warehouse(layout.warehouse)
+    try:
+        row = wh.record_review(body.artifact_id, body.decision, body.reviewed_by)
+    except KeyError:
+        raise HTTPException(404, f"artifact {body.artifact_id} not in this case") from None
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    finally:
+        wh.close()
+
+    CustodyLog(layout.dir).append(
+        CustodyEvent.REVIEW_DECISION,
+        actor=body.reviewed_by or "investigator",
+        detail=(f"{body.decision} artifact {body.artifact_id} "
+                f"({row.get('app')}/{row.get('source_type')}: {row.get('key')})"),
+        data={
+            "artifact_id": body.artifact_id,
+            "decision": body.decision,
+            # The automated decision this overrides, and the scores behind it,
+            # so the log entry stands on its own without the warehouse.
+            "relevant_auto": row.get("relevant_auto"),
+            "relevance_score": row.get("relevance_score"),
+            "relevance_model_score": row.get("relevance_model_score"),
+            "source_file": row.get("source_file"),
+            "source_locator": row.get("source_locator"),
+            "note": body.note,
+        },
+    )
+    return {"ok": True, "artifact": row}
 
 
 @app.get("/api/cases/{case_id}/report", response_class=HTMLResponse)

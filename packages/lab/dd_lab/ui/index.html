@@ -155,10 +155,10 @@ async function pollActiveJobs(){
 }
 setInterval(pollActiveJobs, 3000);
 
-const _loadingMsg = {case:'Opening case…', report:'Loading report…', audit:'Loading audit trail…', cases:'Loading cases…', import:'Loading…', settings:'Loading settings…', dashboard:'Loading…', cacheentry:'Opening cache entry…', processdetail:'Opening process…', chat:'Opening chat…'};
+const _loadingMsg = {case:'Opening case…', report:'Loading report…', audit:'Loading audit trail…', cases:'Loading cases…', import:'Loading…', settings:'Loading settings…', dashboard:'Loading…', cacheentry:'Opening cache entry…', processdetail:'Opening process…', chat:'Opening chat…', review:'Loading review queue…'};
 async function render(){
   const m=$('#main'); m.innerHTML=''; m.append(loadingView(_loadingMsg[state.view]));
-  try{ await ({dashboard:vDashboard,import:vImport,cases:vCases,case:vCase,report:vReport,audit:vAudit,settings:vSettings,cacheentry:vCacheEntry,processdetail:vProcessDetail,chat:vChat}[state.view]||vDashboard)(m); }
+  try{ await ({dashboard:vDashboard,import:vImport,cases:vCases,case:vCase,report:vReport,audit:vAudit,settings:vSettings,cacheentry:vCacheEntry,processdetail:vProcessDetail,chat:vChat,review:vReview}[state.view]||vDashboard)(m); }
   catch(e){ m.innerHTML=''; m.append(el('div',{class:'panel'},'Error: '+e.message)); }
 }
 
@@ -726,6 +726,10 @@ async function vCase(m){
         title:'Every artifact with its full classification: relevance, score, category and each voter'},
         '⤓  Export classification CSV'),
       el('button',{class:'sec',onclick:()=>go('chat',id)},'💬  Chat'),
+      el('button',{class:'sec',title:'Review the artifacts the classifier did NOT flag, '+
+        'ordered by the relevance model so the likeliest misses come first - approving one '+
+        'marks it relevant and it joins the report',
+        onclick:()=>go('review',id)},'🔎  Review queue'),
       el('button',{class:'sec',onclick:e=>startRun(e.target)},'↻  Re-run analysis'),
       el('button',{class:'sec',title:'Re-classify artifacts already in the warehouse, in place - no re-parse '+
         '(cheaper than Re-run analysis; use after changing the relevance/category model directory)',
@@ -1895,6 +1899,136 @@ async function vAudit(m){
     el('h2',{},'Analysis audit'),
     el('div',{class:'panel scroll'}, tbl(d.audit,['seq','ts','kind','name','detail'])));
 }
+// Examiner review of what the classifier did NOT flag.
+//
+// The classifier's recall is 0.958 on the annotated corpus, so roughly one
+// relevant artifact in 24 never reaches the report. Those misses are not in
+// an uncertain middle a lower threshold could reach - the composed score is
+// near-bimodal and most of them sit at exactly 0.0 among half a million
+// others. What DOES order them is the relevance model's own probability, so
+// this queue is that ordering, and the examiner spends a fixed budget off the
+// top of it rather than attempting a population of 553k.
+//
+// Measured on the annotated corpus: the top 50 contains 21 of the 54 misses,
+// so 42% of what gets read here is a genuine miss - and approving those took
+// recall from 0.958 to 0.974.
+async function vReview(m){
+  const id=state.arg;
+  const PAGE=50;
+  let offset=0, showReviewed=false;
+  m.innerHTML='';
+  m.append(el('div',{class:'row',style:'margin-bottom:10px'},
+    el('button',{class:'sec',onclick:()=>go('case',id)},'←  Back to case')));
+  m.append(el('h1',{},'Review queue'), el('div',{class:'muted mono',style:'margin-bottom:6px'},id));
+  m.append(el('div',{class:'hint',style:'margin-bottom:10px'},
+    'Artifacts the classifier did not flag, most likely first. Approving one marks it '+
+    'relevant, so it flows into the report, correlation and timeline like any other '+
+    'relevant artifact; the original automatic decision is kept alongside it and every '+
+    'decision is written to the chain of custody. Work down from the top and stop when '+
+    'the hit rate drops - the ordering is what makes a short pass worthwhile.'));
+
+  const counts=el('div',{class:'panel',style:'display:flex;gap:26px;flex-wrap:wrap'});
+  const list=el('div',{});
+  const pager=el('div',{class:'row',style:'margin-top:10px'});
+  m.append(counts,list,pager);
+
+  function stat(label,value,tone){
+    return el('div',{},
+      el('div',{style:'font-size:20px;font-weight:600;'+(tone?`color:${tone}`:'')},String(value)),
+      el('div',{class:'muted',style:'font-size:12px'},label));
+  }
+
+  async function decide(aid,decision,row){
+    const prev=row.innerHTML;
+    row.querySelectorAll('button').forEach(b=>b.disabled=true);
+    try{
+      await api('/cases/'+encodeURIComponent(id)+'/review',{method:'POST',
+        body:JSON.stringify({artifact_id:aid,decision,reviewed_by:'investigator'})});
+      row.style.opacity='0.45';
+      row.querySelector('.verdict').textContent =
+        decision==='approved' ? '✓ marked relevant' : '✗ rejected';
+      row.querySelector('.verdict').style.color =
+        decision==='approved' ? 'var(--ok)' : 'var(--muted)';
+      await refreshCounts();
+    }catch(e){
+      row.innerHTML=prev;
+      alert('Could not record the decision: '+e.message);
+    }
+  }
+
+  async function refreshCounts(){
+    const d=await api(`/cases/${encodeURIComponent(id)}/review-queue?limit=1`);
+    counts.innerHTML='';
+    counts.append(
+      stat('still to review',d.counts.pending.toLocaleString()),
+      stat('approved',d.counts.approved.toLocaleString(),'var(--ok)'),
+      stat('rejected',d.counts.rejected.toLocaleString()),
+      stat('relevant in case',d.counts.relevant.toLocaleString(),'var(--accent2)'));
+  }
+
+  async function load(){
+    list.innerHTML=''; list.append(loadingView('Loading queue…'));
+    let d;
+    try{ d=await api(`/cases/${encodeURIComponent(id)}/review-queue`+
+      `?limit=${PAGE}&offset=${offset}&include_reviewed=${showReviewed}`); }
+    catch(e){ list.innerHTML=''; list.append(el('div',{class:'panel'},'Error: '+e.message)); return; }
+
+    list.innerHTML='';
+    if(!d.rows.length){
+      list.append(el('div',{class:'panel muted'}, offset
+        ? 'Nothing further in the queue at this offset.'
+        : 'Nothing left to review — every unflagged artifact has had a decision.'));
+    }
+    for(const r of d.rows){
+      const score = r.relevance_model_score;
+      // The model probability is the whole basis of the ordering, so it is
+      // shown as the primary number rather than buried in the detail row.
+      const pct = score==null ? '—' : (score*100).toFixed(score>0.01?1:4)+'%';
+      const row=el('div',{class:'panel',style:'margin-bottom:8px'});
+      row.append(
+        el('div',{class:'row',style:'justify-content:space-between;align-items:flex-start;gap:14px'},
+          el('div',{style:'flex:1;min-width:0'},
+            el('div',{class:'row',style:'gap:8px;align-items:center'},
+              el('span',{style:'font-weight:600'},pct),
+              el('span',{class:'muted',style:'font-size:12px'},'model confidence'),
+              r.deleted?el('span',{class:'pill',title:'Recovered from a deleted or superseded record'},'deleted'):'',
+              el('span',{class:'pill'},r.app||'—'),
+              el('span',{class:'pill'},r.source_type||'—'),
+              r.category?el('span',{class:'pill'},r.category):'' ),
+            el('div',{class:'mono',style:'font-size:12px;margin-top:6px;word-break:break-all;color:var(--muted)'},r.key||''),
+            el('div',{style:'font-size:13px;margin-top:4px;white-space:pre-wrap;word-break:break-word;'+
+              'max-height:7.5em;overflow:auto'}, r.value||''),
+            el('div',{class:'hint',style:'margin-top:6px'},
+              `${r.source_file||''}${r.source_locator?' @ '+r.source_locator:''}`)),
+          el('div',{class:'row',style:'gap:6px;flex-shrink:0'},
+            r.review_decision
+              ? el('span',{class:'verdict muted',style:'font-size:12px'},r.review_decision)
+              : el('span',{class:'verdict',style:'font-size:12px'},''),
+            r.review_decision?'':el('button',{class:'primary',
+              onclick:()=>decide(r.artifact_id,'approved',row)},'✓  Relevant'),
+            r.review_decision?'':el('button',{class:'sec',
+              onclick:()=>decide(r.artifact_id,'rejected',row)},'✗  Not relevant'))));
+      list.append(row);
+    }
+
+    pager.innerHTML='';
+    pager.append(
+      el('button',{class:'sec',disabled:offset===0,
+        onclick:()=>{offset=Math.max(0,offset-PAGE);load();}},'← Previous '+PAGE),
+      el('button',{class:'sec',disabled:d.rows.length<PAGE,
+        onclick:()=>{offset+=PAGE;load();}},'Next '+PAGE+' →'),
+      el('label',{style:'display:flex;align-items:center;gap:6px;font-size:12.5px;margin-left:10px'},
+        el('input',{type:'checkbox',checked:showReviewed,
+          onchange:e=>{showReviewed=e.target.checked;offset=0;load();}}),
+        'show already-reviewed'),
+      el('span',{class:'hint',style:'margin-left:auto'},
+        offset?`showing from #${(offset+1).toLocaleString()}`:''));
+  }
+
+  await refreshCounts();
+  await load();
+}
+
 async function vChat(m){
   // Phase 6 of the agent-improvement plan (magical-dazzling-dragon.md), the
   // last phase - its own page (same reasoning as Report/Audit: this used to
