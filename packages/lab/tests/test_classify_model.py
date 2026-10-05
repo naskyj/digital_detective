@@ -21,10 +21,13 @@ from __future__ import annotations
 import math
 import re
 
-import numpy as np
 import pytest
 
-from dd_lab.classify.model import OnnxRelevanceModel
+# Ships with the `classify` extra (onnxruntime). Skip rather than error at
+# collection when it is absent - CI runs without that extra.
+np = pytest.importorskip("numpy")
+
+from dd_lab.classify.model import OnnxRelevanceModel  # noqa: E402
 
 
 class _Enc:

@@ -16,6 +16,10 @@ from pathlib import Path
 
 import pytest
 
+# localstorage imports ccl_chromium_reader, which ships with the `chromium`
+# extra. Skip rather than error at collection when it is absent.
+pytest.importorskip("ccl_chromium_reader")
+
 from dd_core.enums import SourceType
 from dd_lab.parsers import localstorage
 from dd_lab.parsers.base import ParseContext, emit_parsed_value, emit_value, make_artifact

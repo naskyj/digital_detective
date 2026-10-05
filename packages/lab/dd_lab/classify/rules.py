@@ -69,6 +69,19 @@ _VALUE_PATTERNS: dict[C, list[tuple[re.Pattern, float]]] = {
         # artifact (see parsers/prefs.py), so this matches inside `value`,
         # never `key`.
         (re.compile(r"os_crypt.*?encrypted_key", re.I), 0.85),
+        # A POPULATED password field, not the word. As a bare word-boundary
+        # keyword this matched 59 artifacts against the gold labels and none
+        # was a password: UI copy ("Windows Web Password Credential"), an
+        # image filename (`password-hero@2x.png`, 26 of the 59 - the same
+        # shape as the `wechat@3x.png` failure the email pattern already had
+        # to be corrected for), help-article URLs and API names. A real
+        # password is a field VALUE; the key-name gazetteer already carries
+        # `password` at 0.9 for the case where the artifact IS the password,
+        # so this only has to cover a password field inside a larger JSON
+        # blob that the parsers keep whole (see the os_crypt note above).
+        # The trailing lookahead rejects an empty or null field.
+        (re.compile(r"""["']?\bpassw(?:or)?d\b["']?\s*[:=]\s*["']?(?!null\b)[^\s"',}\]]""",
+                    re.I), 0.35),
     ],
     C.PAYMENT_INFO: [
         (re.compile(r"\b(?:4\d{12}(?:\d{3})?|5[1-5]\d{14}|3[47]\d{13}|6(?:011|5\d{2})\d{12})\b"), 0.9),
@@ -189,8 +202,10 @@ _KEY_KEYWORDS: dict[C, tuple[tuple[str, float], ...]] = {
 # (not a real word, but illustrates the class of risk classifier_backend_
 # spec.md flags: a keyword voter must not fire on part of an unrelated
 # word - "card" inside "cardboard", "meet" inside "meeting").
+# `password` is deliberately absent here and expressed as a field pattern in
+# _VALUE_PATTERNS instead - see the note there.
 _VALUE_KEYWORDS: dict[C, tuple[tuple[str, float], ...]] = {
-    C.CREDENTIAL: (("password", 0.35), ("unauthorized", 0.2), ("invalid token", 0.3)),
+    C.CREDENTIAL: (("unauthorized", 0.2), ("invalid token", 0.3)),
     C.CHAT_CONTENT: (),
 }
 _VALUE_KEYWORD_PATTERNS: dict[C, tuple[tuple[re.Pattern, float], ...]] = {

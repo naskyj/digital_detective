@@ -6,6 +6,8 @@ whole" design is untouched) - it's purely internal to the classifier."""
 
 from __future__ import annotations
 
+import pytest
+
 from dd_core.enums import SourceType
 from dd_lab.classify.ensemble import Classifier
 from dd_lab.classify.rules import flatten_leaf_keys
@@ -100,9 +102,47 @@ def test_generic_excluded_field_names_dont_fire():
 # --------------------------------------------------------------------- word-boundary hardening
 
 
-def test_value_keyword_password_still_fires_as_a_real_word():
+def test_the_word_password_in_prose_is_not_a_credential():
+    """This test previously asserted the opposite — that "your password was
+    reset successfully" is a CREDENTIAL — on the reasoning that the word
+    appears as a real word rather than inside a longer token.
+
+    Measured against the gold labels, that reading produced 59 false
+    positives and no true positives. The matches were UI copy ("Windows Web
+    Password Credential", "Resend Password Reset Email"), an image filename
+    (`password-hero@2x.png`, 26 of the 59), help-article URLs and API names —
+    text *about* passwords, never a password. A real password is a field
+    value, so the rule now requires a populated field; the key-name gazetteer
+    still carries `password` at 0.9 for the case where the artifact itself is
+    the password."""
     r = C.classify("cache.record.note", "your password was reset successfully")
-    assert r.category == "CREDENTIAL"
+    assert r.category != "CREDENTIAL"
+
+
+@pytest.mark.parametrize("value", [
+    '{"username":"a","password":"hunter2"}',
+    "password=s3cret",
+    '"passwd": "abc123"',
+    "password: letmein",
+])
+def test_a_populated_password_field_is_still_a_credential(value):
+    """The constraint must not cost the case it exists for: a password field
+    inside a larger JSON blob the parsers keep whole (Local State,
+    Preferences — see the os_crypt note in rules.py)."""
+    from dd_lab.classify.rules import C as Cat
+    from dd_lab.classify.rules import regex_hits
+
+    assert [h for h in regex_hits("mem.string", value) if h.category == Cat.CREDENTIAL], value
+
+
+@pytest.mark.parametrize("value", ['{"password": ""}', '{"password": null}', '"passwd":'])
+def test_an_empty_password_field_is_not_a_credential(value):
+    """A field that is present and empty is not evidence of a password — the
+    same reasoning the empty-value gate applies to a whole artifact."""
+    from dd_lab.classify.rules import C as Cat
+    from dd_lab.classify.rules import regex_hits
+
+    assert not [h for h in regex_hits("mem.string", value) if h.category == Cat.CREDENTIAL], value
 
 
 def test_value_keyword_does_not_fire_inside_an_unrelated_longer_word():
