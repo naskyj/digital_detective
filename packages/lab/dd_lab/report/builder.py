@@ -23,6 +23,7 @@ from dd_lab.agent.findings import FindingsStore
 from dd_lab.case import CaseMeta
 from dd_lab.etl.warehouse import Warehouse
 from dd_lab.investigate import build_case_narrative, build_correlation_report
+from dd_lab.report.accuracy import statement_for
 
 _CSS = """
 :root{--fg:#1a1a1a;--muted:#666;--line:#e2e2e2;--accent:#8b1a1a;--hi:#fff4f4}
@@ -31,6 +32,14 @@ _CSS = """
 h1{font-size:24px;margin:0 0 4px}h2{font-size:17px;margin:34px 0 10px;border-bottom:2px solid var(--accent);padding-bottom:4px}
 h3{font-size:14px;margin:20px 0 6px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
 .sub{color:var(--muted);margin:0 0 24px}
+/* Standing caveat blocks - the error-rate disclosure and anything else
+   the reader must not skim past. Deliberately not styled as a warning:
+   it is a statement of known limits, not an alert. */
+.note{border:1px solid var(--line);border-left:3px solid #999;background:#fafafa;
+      padding:10px 14px;margin:14px 0;font-size:13px}
+.note b{display:block;margin-bottom:6px}
+.note p{margin:0 0 6px}
+.note p:last-child{margin-bottom:0}
 table{border-collapse:collapse;width:100%;margin:8px 0;font-size:13px}
 th,td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:top}
 th{background:#f0f0f0;font-weight:600}
@@ -141,6 +150,23 @@ def build_report(
             "SELECT category, round(confidence,2) AS conf, app, substr(key,1,60) AS key, "
             "substr(value,1,120) AS value FROM v_high_priority LIMIT 100"
         )
+        # Both sections above are capped, so the report has to say what they
+        # are capped FROM. Labelling a 100-row sample "High-Priority Findings
+        # (100)" when 2,876 artifacts are flagged reads as a complete list -
+        # silent truncation presented as completeness, which is precisely the
+        # failure mode docs/CLAIMS_AUDIT.md #3 commits this system to avoiding.
+        # Which classifier produced these artifacts, so the accuracy
+         # statement below can refuse to speak for a different one.
+        cls_ver = wh.query(
+            "SELECT classifier_version FROM artifacts "
+            "WHERE classifier_version IS NOT NULL LIMIT 1")
+        classifier_version = cls_ver[0]["classifier_version"] if cls_ver else ""
+        totals = wh.query(
+            "SELECT count(*) FILTER (WHERE relevant) AS relevant, "
+            "       count(*) FILTER (WHERE relevant AND record_ts IS NOT NULL "
+            "         AND NOT regexp_matches(key, "
+            "           '\\.(expires?_utc|expiry|expires_at|expiration)$')) AS timed "
+            "FROM artifacts")[0]
         kw_hits = _keyword_hits(wh, meta.keywords)
         correlations = build_correlation_report(wh)
         story = build_case_narrative(wh)
@@ -170,6 +196,20 @@ def build_report(
     parts.append(f"<div>Applications</div><div>{_esc(', '.join(a.name for a in manifest.target_apps))}</div>")
     parts.append(f"<div>Total artifacts</div><div>{total:,}</div>")
     parts.append("</div>")
+
+    # Disclosed error rate (docs/CLAIMS_AUDIT.md #10). A ranked list with no
+    # statement of what it misses invites the reader to treat it as complete.
+    _acc = statement_for(classifier_version)
+    if _acc is not None:
+        parts.append("<div class='note'><b>How much this classifier misses</b>"
+                     + "".join(f"<p>{_esc(line)}</p>" for line in _acc.sentences())
+                     + "</div>")
+    elif classifier_version:
+        parts.append(
+            "<div class='note'><b>How much this classifier misses</b><p>No measured "
+            f"error rate is on record for classifier version {_esc(classifier_version)}. "
+            "Treat the ranked sections below as a prioritised sample of the evidence, "
+            "not as a complete list.</p></div>")
 
     if not verification.ok:
         parts.append("<p class='pill bad'>Evidence integrity could not be confirmed. "
@@ -249,8 +289,17 @@ def build_report(
     parts.append(_rows(["App", "Source", "Artifacts"],
                        [[c["app"], c["source_type"], f"{c['artifacts']:,}"] for c in by_src]))
 
-    parts.append(sec(f"High-Priority Findings ({len(high)})"))
-    parts.append("<p class='sub'>Credentials, payment data, location data and chat content, ranked by sensitivity and confidence.</p>")
+    _hi_total = totals["relevant"] or 0
+    _hi_label = (f"High-Priority Findings ({len(high)} of {_hi_total:,})"
+                 if len(high) < _hi_total else f"High-Priority Findings ({len(high)})")
+    parts.append(sec(_hi_label))
+    parts.append(
+        "<p class='sub'>Credentials, payment data, location data and chat content, ranked by "
+        "sensitivity and confidence."
+        + (f" <b>This is the top {len(high)} of {_hi_total:,} artifacts flagged relevant</b> \u2014 "
+           "the remainder are not shown here. Use the artifact browser or the CSV export for "
+           "the complete set." if len(high) < _hi_total else "")
+        + "</p>")
     parts.append(_rows(["Category", "Conf", "App", "Key", "Value"],
                        [[h["category"], h["conf"], h["app"], h["key"], h["value"]] for h in high],
                        highlight=True) if high else "<p>None.</p>")
@@ -377,7 +426,10 @@ def build_report(
     parts.append(
         "<p class='sub'>Every row cites the file and in-file locator it came from. Cookie "
         "expiry dates are excluded. See the What Happened section above for the same events "
-        "grouped into episodes.</p>"
+        "grouped into episodes."
+        + (f" <b>Showing the first {len(timeline)} of {totals['timed']:,} timestamped relevant "
+           "artifacts</b>, in time order." if len(timeline) < (totals["timed"] or 0) else "")
+        + "</p>"
     )
     parts.append(_rows(
         ["", "Timestamp", "App", "Category", "Key", "Value", "File", "Locator"],
