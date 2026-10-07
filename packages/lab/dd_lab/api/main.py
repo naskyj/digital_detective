@@ -1381,7 +1381,8 @@ def case_add_finding(case_id: str, body: AddFindingIn) -> dict:
 @app.get("/api/cases/{case_id}/review-queue")
 def case_review_queue(case_id: str, limit: int = Query(50, ge=1, le=500),
                       offset: int = Query(0, ge=0),
-                      include_reviewed: bool = False) -> dict:
+                      include_reviewed: bool = False,
+                      lane: str = "likely_misses") -> dict:
     """The artifacts the classifier did NOT flag, best candidates first.
 
     Measured on the annotated corpus, the classifier misses roughly one
@@ -1395,6 +1396,15 @@ def case_review_queue(case_id: str, limit: int = Query(50, ge=1, le=500),
     being a genuine miss; the top 1,000 recovers 31. A fixed budget off the
     top of this ordering is therefore worth spending, and a threshold sweep
     is not. The budget is the examiner's to choose.
+
+    `lane="suppressed_sensitive"` is the second, smaller queue: artifacts in a
+    credential/payment/location category that the model veto suppressed. Those
+    categories used to be exempt from the veto entirely, which put 903 false
+    positives in the report to keep 18 real findings. They are now vetoed like
+    anything else and land here instead, so the report stops asserting them
+    while a human can still reach them. Ordered by category sensitivity, not
+    model score — by construction every row in this lane scores below the veto
+    threshold, so that score carries no information within it.
     """
     from dd_lab.etl.warehouse import Warehouse
 
@@ -1403,10 +1413,13 @@ def case_review_queue(case_id: str, limit: int = Query(50, ge=1, le=500),
         raise HTTPException(404, "case not found")
     wh = Warehouse(layout.warehouse)
     try:
-        rows = wh.review_queue(limit=limit, offset=offset,
-                               include_reviewed=include_reviewed)
+        try:
+            rows = wh.review_queue(limit=limit, offset=offset,
+                                   include_reviewed=include_reviewed, lane=lane)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
         _enrich_artifact_rows(wh, rows)
-        return {"rows": rows, "limit": limit, "offset": offset,
+        return {"rows": rows, "limit": limit, "offset": offset, "lane": lane,
                 "counts": wh.review_counts()}
     finally:
         wh.close()

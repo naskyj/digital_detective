@@ -444,19 +444,50 @@ def test_confident_model_negative_vetoes_a_saturated_rule_hit():
     assert r.relevant is False
 
 
-def test_veto_does_not_touch_the_most_sensitive_categories():
-    """The model has 0.86 recall - it misses ~14% of genuinely relevant
-    artifacts - so it must never get the final word on the categories where
-    a false negative is a serious forensic error. These are exactly the top
-    3 of rules.py's CATEGORY_PRIORITY."""
+def test_the_veto_now_applies_to_the_sensitive_categories_too():
+    """This test previously asserted the opposite — that a confident model
+    negative must never suppress a credential.
+
+    That exemption was measured. It rescued 921 artifacts from the veto, of
+    which 18 were genuinely relevant and 903 were not: about 50 false
+    positives retained per real finding kept, and it cost 0.19 of deployment
+    precision. The policy it served — never silently discard sensitive
+    evidence on a model's say-so — is now implemented by routing those
+    artifacts to a dedicated examiner review lane instead of asserting them in
+    the report (see `Warehouse.review_queue(lane="suppressed_sensitive")` and
+    test_review_queue.py). Nothing is discarded; the decision moves to a
+    human, which is where an uncertain judgement about sensitive evidence
+    belongs."""
     def fake_relevance(key, value, source_type):
         return 0.000005
 
     clf = Classifier(relevance_voter=fake_relevance)
     r = clf.classify("local_storage.app.password", "hunter2")
-    assert r.category == "CREDENTIAL"
-    assert r.relevant is True, "a confident model negative must not suppress a credential"
-    assert r.relevance_score >= 0.5
+    assert r.category == "CREDENTIAL", "the category is unchanged — only relevance is vetoed"
+    assert r.relevant is False
+    assert r.relevance_score < 0.5
+    # The signal that puts it in the review lane survives: category and the
+    # model's own score are both still recorded.
+    assert r.relevance_model_score is not None and r.relevance_model_score < 0.05
+
+
+def test_the_veto_exemption_seam_still_restores_the_historical_behaviour():
+    """scripts/ablation.py reproduces the measurement that justified removing
+    the exemption, so the seam has to keep working — a measurement that can no
+    longer be reproduced is not a measurement."""
+    from dd_lab.classify import ensemble as ens
+
+    def fake_relevance(key, value, source_type):
+        return 0.000005
+
+    saved = ens._VETO_EXEMPT_CATEGORIES
+    try:
+        ens._VETO_EXEMPT_CATEGORIES = ens.SENSITIVE_CATEGORIES
+        r = Classifier(relevance_voter=fake_relevance).classify(
+            "local_storage.app.password", "hunter2")
+        assert r.relevant is True, "the seam no longer restores immunity"
+    finally:
+        ens._VETO_EXEMPT_CATEGORIES = saved
 
 
 def test_veto_only_fires_when_the_model_is_actually_confident():

@@ -478,26 +478,63 @@ class Warehouse:
 
     REVIEW_DECISIONS = ("approved", "rejected")
 
+    REVIEW_LANES = ("likely_misses", "suppressed_sensitive")
+
+    #: Mirrors ensemble.SENSITIVE_CATEGORIES and _MODEL_VETO_THRESHOLD. Kept
+    #: as literals here rather than imported because etl/ does not depend on
+    #: classify/ — test_review_queue.py pins the two against each other, the
+    #: same anti-drift convention this codebase already uses for the shared
+    #: email pattern.
+    _SENSITIVE = ("CREDENTIAL", "PAYMENT_INFO", "LOCATION_INFO")
+    _VETO_THRESHOLD = 0.05
+
     def review_queue(self, limit: int = 50, offset: int = 0,
-                     include_reviewed: bool = False) -> list[dict]:
+                     include_reviewed: bool = False,
+                     lane: str = "likely_misses") -> list[dict]:
         """Artifacts the classifier did NOT flag, best candidates first.
 
-        Ordered by the model's own probability rather than the composed
-        relevance score, which is 0.0 for almost all of this population and
-        therefore cannot order it at all.
+        Two lanes, because the unflagged population contains two different
+        kinds of thing and one ordering cannot serve both.
+
+        `likely_misses` — everything unflagged, ordered by the model's own
+        probability. The composed score is 0.0 for almost all of this
+        population and cannot order it; the model can, and a fixed budget off
+        the top of that ordering recovers most of what the classifier missed
+        (paper §7.8).
+
+        `suppressed_sensitive` — artifacts in a sensitive category that the
+        model veto suppressed. These used to be exempt from the veto
+        altogether, which put 903 false positives in the report to keep 18
+        real findings; they are now vetoed like anything else and surfaced
+        here instead, so the automated output stops asserting them while a
+        human can still reach them (see ensemble.SENSITIVE_CATEGORIES).
+        Ordered by category sensitivity rather than model score, which is
+        uniformly near-zero across this lane by construction and therefore
+        carries no information in it.
         """
+        if lane not in self.REVIEW_LANES:
+            raise ValueError(f"lane must be one of {self.REVIEW_LANES}, got {lane!r}")
         where = "WHERE (relevant IS NOT TRUE)"
         if not include_reviewed:
             where += " AND review_decision IS NULL"
+        if lane == "suppressed_sensitive":
+            cats = ", ".join(f"'{c}'" for c in self._SENSITIVE)
+            where += (f" AND (category IN ({cats}) OR regex_vote IN ({cats}))"
+                      f" AND relevance_model_score < {self._VETO_THRESHOLD}")
+            # Most sensitive first, then the strongest rule evidence within a
+            # category - the examiner works down by how much a miss would cost.
+            order = ("CASE category WHEN 'CREDENTIAL' THEN 0 WHEN 'PAYMENT_INFO' THEN 1 "
+                     "WHEN 'LOCATION_INFO' THEN 2 ELSE 3 END, "
+                     "confidence DESC NULLS LAST, artifact_id")
+        else:
+            order = "relevance_model_score DESC NULLS LAST, artifact_id"
         return self.query(
             "SELECT artifact_id, app, source_type, category, confidence, "
             "relevant, relevance_score, relevance_model_score, "
             "regex_vote, keyword_vote, ner_vote, entropy_vote, evidence_spans, "
             "key, substr(value, 1, 500) AS value, record_ts, deleted, "
             "source_file, source_locator, review_decision, reviewed_by, reviewed_ts "
-            f"FROM artifacts {where} "
-            "ORDER BY relevance_model_score DESC NULLS LAST, artifact_id "
-            "LIMIT ? OFFSET ?",
+            f"FROM artifacts {where} ORDER BY {order} LIMIT ? OFFSET ?",
             [int(limit), int(offset)],
         )
 
@@ -507,6 +544,11 @@ class Warehouse:
             "SELECT "
             "  count(*) FILTER (WHERE relevant IS NOT TRUE "
             "                     AND review_decision IS NULL) AS pending, "
+            "  count(*) FILTER (WHERE relevant IS NOT TRUE "
+            "                     AND review_decision IS NULL "
+            "                     AND (category IN ('CREDENTIAL','PAYMENT_INFO','LOCATION_INFO') "
+            "                          OR regex_vote IN ('CREDENTIAL','PAYMENT_INFO','LOCATION_INFO')) "
+            "                     AND relevance_model_score < 0.05) AS suppressed_sensitive, "
             "  count(*) FILTER (WHERE review_decision = 'approved') AS approved, "
             "  count(*) FILTER (WHERE review_decision = 'rejected') AS rejected, "
             "  count(*) FILTER (WHERE relevant) AS relevant "

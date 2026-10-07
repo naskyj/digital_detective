@@ -250,3 +250,102 @@ def test_api_rejects_an_unknown_artifact_and_a_bad_decision(client):
 def test_api_unknown_case_is_404(client):
     c, _ = client
     assert c.get("/api/cases/nope/review-queue").status_code == 404
+
+
+# --------------------------------------------- the suppressed-sensitive lane
+
+
+def _sensitive(aid: str, category: C, model_score: float):
+    """A sensitive-category artifact the model is confident about rejecting —
+    the population that used to be exempt from the veto."""
+    return NormalizedArtifact(
+        artifact_id=aid, case_id="c1", app="discord", source_type=S.MEMORY_STRING,
+        source_file="memdump.raw", source_locator=f"pid1234:{aid}",
+        key="mem.string", value=f"value for {aid}", record_ts=None,
+        extracted_ts=datetime(2026, 9, 15, tzinfo=UTC),
+        classification=ClassificationResult(
+            category=category, confidence=0.9, classifier_version="test",
+            relevant=False, relevance_score=model_score,
+            relevance_model_score=model_score),
+    )
+
+
+@pytest.fixture
+def wh_sensitive(tmp_path):
+    w = Warehouse(tmp_path / "sens.duckdb")
+    w.load_artifacts([
+        _sensitive("cred", C.CREDENTIAL, 0.00001),
+        _sensitive("pay", C.PAYMENT_INFO, 0.00002),
+        _sensitive("loc", C.LOCATION_INFO, 0.00003),
+        # sensitive category but the model does NOT reject it: never vetoed,
+        # so it belongs in neither lane's suppressed population
+        _artifact("cred-high", relevant=True, model_score=0.99, relevance_score=1.0),
+        # ordinary unflagged noise: belongs to the likely-misses lane only
+        _artifact("noise2", relevant=False, model_score=0.000004),
+    ])
+    w.build_views()
+    yield w
+    w.close()
+
+
+def test_the_sensitive_lane_holds_only_vetoed_sensitive_artifacts(wh_sensitive):
+    ids = [r["artifact_id"] for r in
+           wh_sensitive.review_queue(lane="suppressed_sensitive")]
+    assert set(ids) == {"cred", "pay", "loc"}, ids
+    assert "noise2" not in ids, "ordinary unflagged noise is not sensitive"
+    assert "cred-high" not in ids, "a flagged artifact was never suppressed"
+
+
+def test_the_sensitive_lane_orders_by_how_much_a_miss_would_cost(wh_sensitive):
+    """Model score is near-zero across this whole lane by construction, so it
+    carries no information here; category sensitivity does."""
+    assert [r["artifact_id"] for r in
+            wh_sensitive.review_queue(lane="suppressed_sensitive")] == \
+        ["cred", "pay", "loc"]
+
+
+def test_the_two_lanes_are_different_populations(wh_sensitive):
+    misses = {r["artifact_id"] for r in wh_sensitive.review_queue(lane="likely_misses")}
+    assert "noise2" in misses, "the default lane still holds ordinary unflagged rows"
+    # The suppressed ones are unflagged too, so they appear in both — the lane
+    # exists to make them findable, not to hide them from the other queue.
+    assert {"cred", "pay", "loc"} <= misses
+
+
+def test_counts_report_the_sensitive_lane_separately(wh_sensitive):
+    assert wh_sensitive.review_counts()["suppressed_sensitive"] == 3
+
+
+def test_approving_from_the_sensitive_lane_works_like_any_other(wh_sensitive):
+    wh_sensitive.record_review("cred", "approved", "examiner-1")
+    row = wh_sensitive.query(
+        "SELECT relevant, relevant_auto FROM artifacts WHERE artifact_id='cred'")[0]
+    assert row["relevant"] is True and row["relevant_auto"] is False
+    assert "cred" not in [r["artifact_id"] for r in
+                          wh_sensitive.review_queue(lane="suppressed_sensitive")]
+
+
+def test_an_unknown_lane_is_rejected(wh_sensitive):
+    with pytest.raises(ValueError, match="lane must be one of"):
+        wh_sensitive.review_queue(lane="whatever")
+
+
+def test_the_lane_predicate_matches_the_classifier_that_creates_it():
+    """Anti-drift pin. etl/ does not import classify/, so the sensitive
+    category list and the veto threshold are written out in warehouse.py.
+    If the classifier's definition moves and this does not, the lane silently
+    stops holding what it claims to."""
+    from dd_lab.classify.ensemble import _MODEL_VETO_THRESHOLD, SENSITIVE_CATEGORIES
+
+    assert {c.value for c in SENSITIVE_CATEGORIES} == set(Warehouse._SENSITIVE)
+    assert Warehouse._VETO_THRESHOLD == _MODEL_VETO_THRESHOLD
+
+
+def test_the_classifier_no_longer_exempts_sensitive_categories():
+    """The lane only makes sense because the exemption is gone — if immunity
+    came back, these artifacts would be flagged relevant and the lane would be
+    permanently empty while the report carried them again."""
+    from dd_lab.classify.ensemble import _VETO_EXEMPT_CATEGORIES
+
+    assert frozenset() == _VETO_EXEMPT_CATEGORIES, (
+        "veto immunity is back; the suppressed-sensitive lane is now dead code")

@@ -1915,7 +1915,7 @@ async function vAudit(m){
 async function vReview(m){
   const id=state.arg;
   const PAGE=50;
-  let offset=0, showReviewed=false;
+  let offset=0, showReviewed=false, lane='likely_misses';
   m.innerHTML='';
   m.append(el('div',{class:'row',style:'margin-bottom:10px'},
     el('button',{class:'sec',onclick:()=>go('case',id)},'←  Back to case')));
@@ -1930,7 +1930,28 @@ async function vReview(m){
   const counts=el('div',{class:'panel',style:'display:flex;gap:26px;flex-wrap:wrap'});
   const list=el('div',{});
   const pager=el('div',{class:'row',style:'margin-top:10px'});
-  m.append(counts,list,pager);
+  const lanes=el('div',{class:'row',style:'margin-bottom:10px;gap:8px'});
+  m.append(counts,lanes,list,pager);
+
+  // Two lanes, because the unflagged population holds two different kinds of
+  // thing. "Likely misses" is everything, ranked by the model. "Suppressed
+  // sensitive" is the credential/payment/location artifacts the veto removed -
+  // those categories used to bypass the veto entirely, which put 903 false
+  // positives in the report to keep 18 real findings; they come here instead
+  // so the report stays clean and a human still decides.
+  function drawLanes(c){
+    lanes.innerHTML='';
+    [['likely_misses','Likely misses',c?c.pending:null,
+      'Everything the classifier did not flag, most likely first'],
+     ['suppressed_sensitive','Suppressed sensitive',c?c.suppressed_sensitive:null,
+      'Credential, payment and location artifacts the model veto removed - '+
+      'not asserted in the report, decided here']
+    ].forEach(([key,label,n,title])=>{
+      lanes.append(el('button',{class:lane===key?'primary':'sec',title,
+        onclick:()=>{ if(lane===key) return; lane=key; offset=0; load(); }},
+        label+(n==null?'':`  (${n.toLocaleString()})`)));
+    });
+  }
 
   function stat(label,value,tone){
     return el('div',{},
@@ -1964,20 +1985,24 @@ async function vReview(m){
       stat('approved',d.counts.approved.toLocaleString(),'var(--ok)'),
       stat('rejected',d.counts.rejected.toLocaleString()),
       stat('relevant in case',d.counts.relevant.toLocaleString(),'var(--accent2)'));
+    drawLanes(d.counts);
   }
 
   async function load(){
     list.innerHTML=''; list.append(loadingView('Loading queue…'));
     let d;
     try{ d=await api(`/cases/${encodeURIComponent(id)}/review-queue`+
-      `?limit=${PAGE}&offset=${offset}&include_reviewed=${showReviewed}`); }
+      `?limit=${PAGE}&offset=${offset}&include_reviewed=${showReviewed}&lane=${lane}`); }
     catch(e){ list.innerHTML=''; list.append(el('div',{class:'panel'},'Error: '+e.message)); return; }
 
     list.innerHTML='';
     if(!d.rows.length){
       list.append(el('div',{class:'panel muted'}, offset
-        ? 'Nothing further in the queue at this offset.'
-        : 'Nothing left to review — every unflagged artifact has had a decision.'));
+        ? 'Nothing further in this lane at this offset.'
+        : (lane==='suppressed_sensitive'
+           ? 'Nothing suppressed in the sensitive categories — the model did not '+
+             'veto any credential, payment or location artifact in this case.'
+           : 'Nothing left to review — every unflagged artifact has had a decision.')));
     }
     for(const r of d.rows){
       const score = r.relevance_model_score;

@@ -83,16 +83,34 @@ _RELEVANCE_THRESHOLD = 0.5
 # (~0.3-0.5) are nowhere near it and are never vetoed.
 _MODEL_VETO_THRESHOLD = 0.05
 
-# ...except here. The model has measured 0.86 recall on this data - it
-# misses ~14% of genuinely relevant artifacts - so it must NOT get the final
-# word on the categories where a false negative is a serious forensic error
-# (a missed credential is not the same kind of mistake as a retained CSS
-# header). These are exactly the top 3 of rules.py's own CATEGORY_PRIORITY
-# ranking, i.e. this project's existing definition of "most sensitive",
-# not a new list invented here. On the real case this preserves ~2,400
-# rule-detected credential/payment/location hits while still letting the
-# veto clear ~154,000 noise rows. Confirmed with the project owner.
-_VETO_PROOF_CATEGORIES = frozenset({C.CREDENTIAL, C.PAYMENT_INFO, C.LOCATION_INFO})
+# The categories where a false negative is a serious forensic error - a
+# missed credential is not the same kind of mistake as a retained CSS header.
+# These are exactly the top 3 of rules.py's own CATEGORY_PRIORITY ranking,
+# i.e. this project's existing definition of "most sensitive".
+#
+# These used to be IMMUNE from the veto: a confident model negative could not
+# suppress them. That was a policy, defended on principle, and measuring it
+# showed what the principle cost. Immunity rescued 921 artifacts from the
+# veto, of which 18 were genuinely relevant and 903 were not - about 50 false
+# positives retained per real finding kept, and it took deployment precision
+# from 0.619 down to 0.427 (paper §7.9).
+#
+# The policy is now implemented differently rather than abandoned. The veto
+# applies to every category, so the REPORT no longer carries those 903; but a
+# sensitive-category artifact the veto suppressed is not discarded either - it
+# is routed to a dedicated lane of the examiner review queue
+# (Warehouse.review_queue(lane="suppressed_sensitive")), where a human decides.
+# Nothing is lost (R3), the 18 remain one click away, and the automated output
+# stops asserting 903 things that are not true. Where a judgement about
+# sensitive evidence is genuinely uncertain, this system's answer is to put it
+# in front of a person, not to assert it.
+SENSITIVE_CATEGORIES = frozenset({C.CREDENTIAL, C.PAYMENT_INFO, C.LOCATION_INFO})
+
+#: Categories exempt from the veto. EMPTY by design - see above. Kept as a
+#: named seam rather than deleted so scripts/ablation.py can restore the
+#: historical behaviour and the paper can keep reporting what it cost; a
+#: measurement that can no longer be reproduced is not a measurement.
+_VETO_EXEMPT_CATEGORIES: frozenset = frozenset()
 
 # Per-source-type voter routing (classifier_backend_spec.md's "PER-SOURCE
 # ROUTING" finding): on the collaborator's own back-test, structured
@@ -460,7 +478,7 @@ class Classifier:
 
         category, confidence = p.category, p.confidence
 
-        # Model veto (see _MODEL_VETO_THRESHOLD / _VETO_PROOF_CATEGORIES).
+        # Model veto (see _MODEL_VETO_THRESHOLD / _VETO_EXEMPT_CATEGORIES).
         # Keyed on the final category OR the regex vote specifically: regex
         # is the deterministic, highest-trust voter, so a regex hit on a
         # credential/payment/location pattern protects the row even if the
@@ -468,10 +486,13 @@ class Classifier:
         # deliberately NOT consulted here - they're the voters that produced
         # the `content_type` -> CHAT_CONTENT style false fires this veto
         # exists to clear, so letting them confer immunity would defeat it.
+        # _VETO_EXEMPT_CATEGORIES is empty by default - no category is exempt.
+        # See SENSITIVE_CATEGORIES for why the exemption was removed and where
+        # those artifacts go instead.
         if (
             relevance_model_score is not None
             and relevance_model_score < _MODEL_VETO_THRESHOLD
-            and not ({category, p.regex_vote} & _VETO_PROOF_CATEGORIES)
+            and not ({category, p.regex_vote} & _VETO_EXEMPT_CATEGORIES)
         ):
             relevance_score = min(relevance_score, round(relevance_model_score, 3))
         # ID-in-plumbing carve-out (classifier_backend_spec.md): an id
