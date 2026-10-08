@@ -29,7 +29,21 @@ image = ["dissect.target>=3.20,<4", "dissect.fat>=3.10,<4"]
 # entirely (only manylinux/macosx arm64/win wheels remain). 1.23.x still
 # ships one; pin below it until a newer release restores x86_64 mac support
 # or this project drops x86_64 Mac from its supported dev platforms.
-classify = ["gliner>=0.2", "onnxruntime>=1.19,<1.24"]
+# Split from a single `classify` extra that bundled both. The relevance
+# model - which drives the veto, the ranking tie-break and the review queue -
+# needs onnxruntime ALONE. gliner is the optional NER voter and drags in
+# torch, which ships no macosx x86_64 wheel, so bundling them made the
+# relevance model uninstallable on an Intel Mac for a dependency it does not
+# use. ner_vote falls back to a regex path when gliner is absent, so the
+# split costs nothing.
+# `tokenizers` is a DIRECT requirement of classify/model.py, not an extra:
+# it was previously satisfied only transitively, via gliner -> transformers,
+# so splitting gliner out revealed that the relevance model had never
+# declared the tokenizer it loads. Without it the ONNX session opens and
+# every score silently returns None - the model appears configured and
+# does nothing.
+classify = ["onnxruntime>=1.19,<1.24", "tokenizers>=0.19"]
+ner = ["gliner>=0.2"]
 zeroshot = ["transformers>=4.44", "torch>=2.2"]
 anthropic = ["pydantic-ai-slim[anthropic]>=1.0"]
 google = ["pydantic-ai-slim[google]>=1.0"]

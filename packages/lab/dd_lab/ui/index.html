@@ -2225,7 +2225,19 @@ async function vSettings(m){
       'A DIFFERENT model from the one above - predicts relevant/not_relevant directly rather than '+
       'a category, feeding the primary relevant/relevance_score output. Point this at a trained '+
       'binary relevant/not_relevant ONNX model directory (model.onnx, tokenizer.json, labels.json) '+
-      'to improve relevance beyond the rule-based voters alone.'));
+      'to improve relevance beyond the rule-based voters alone.'),
+    // Whether that directory is actually USABLE, not merely set. A
+    // configured-but-unloadable model is otherwise invisible: classification
+    // still runs, every artifact still gets a category, and the relevance
+    // model silently contributes nothing to any of it.
+    (()=>{
+      const r=s.relevance_model||{};
+      if(!r.configured) return el('div',{class:'muted',style:'margin-top:8px'},
+        '● '+(r.reason||'no relevance model configured'));
+      return el('div',{style:'margin-top:8px;font-weight:600;color:'+
+        (r.usable?'var(--ok)':'var(--bad)')},
+        (r.usable?'● relevance model loaded':'● relevance model NOT usable — '+(r.reason||'')));
+    })());
   m.append(box);
 
   const jbox=el('div',{class:'panel'});

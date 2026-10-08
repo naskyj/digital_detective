@@ -31,6 +31,7 @@ from dd_lab.agent.tools import (
 from dd_lab.api.jobs import JobManager
 from dd_lab.api.settings import AppSettings, describe_llm
 from dd_lab.case import CaseMeta, CaseStatus, EvidenceSourceMeta, create_case, list_cases, parse_keywords
+from dd_lab.classify.model import model_status
 from dd_lab.verification import verify_cached
 
 log = logging.getLogger("dd_lab.api")
@@ -122,6 +123,11 @@ def get_settings() -> dict:
         "use_agent": s.use_agent,
         "classifier_model_dir": s.classifier_model_dir,
         "relevance_model_dir": s.relevance_model_dir,
+        # Whether that directory is actually USABLE, not merely set. A
+        # configured-but-unloadable model is otherwise invisible: every
+        # artifact still gets classified, by rules alone, with no error
+        # anywhere. See classify/model.py::model_status.
+        "relevance_model": model_status(s.relevance_model_dir),
         "use_zeroshot": s.use_zeroshot,
         "llm": describe_llm(s.agent_config()),
         "use_judge": s.use_judge,

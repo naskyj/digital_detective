@@ -447,8 +447,8 @@ chromium = [
     { name = "ccl-simplesnappy" },
 ]
 classify = [
-    { name = "gliner" },
     { name = "onnxruntime" },
+    { name = "tokenizers" },
 ]
 desktop = [
     { name = "pywebview" },
@@ -462,6 +462,9 @@ image = [
 ]
 memory = [
     { name = "volatility3" },
+]
+ner = [
+    { name = "gliner" },
 ]
 zeroshot = [
     { name = "torch" },
@@ -483,7 +486,7 @@ requires-dist = [
     { name = "dissect-target", marker = "extra == 'image'", specifier = ">=3.20,<4" },
     { name = "duckdb", specifier = ">=1.1" },
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "gliner", marker = "extra == 'classify'", specifier = ">=0.2" },
+    { name = "gliner", marker = "extra == 'ner'", specifier = ">=0.2" },
     { name = "jinja2", specifier = ">=3.1" },
     { name = "onnxruntime", marker = "extra == 'classify'", specifier = ">=1.19,<1.24" },
     { name = "pydantic-ai-slim", extras = ["anthropic"], marker = "extra == 'anthropic'", specifier = ">=1.0" },
@@ -491,12 +494,13 @@ requires-dist = [
     { name = "pydantic-ai-slim", extras = ["openai"], specifier = ">=1.0" },
     { name = "python-multipart", specifier = ">=0.0.12" },
     { name = "pywebview", marker = "extra == 'desktop'", specifier = ">=5.0" },
+    { name = "tokenizers", marker = "extra == 'classify'", specifier = ">=0.19" },
     { name = "torch", marker = "extra == 'zeroshot'", specifier = ">=2.2" },
     { name = "transformers", marker = "extra == 'zeroshot'", specifier = ">=4.44" },
     { name = "uvicorn", specifier = ">=0.32" },
     { name = "volatility3", marker = "extra == 'memory'", specifier = ">=2.7" },
 ]
-provides-extras = ["chromium", "memory", "image", "classify", "zeroshot", "anthropic", "google", "desktop"]
+provides-extras = ["chromium", "memory", "image", "classify", "ner", "zeroshot", "anthropic", "google", "desktop"]
 
 [package.metadata.requires-dev]
 dev = [

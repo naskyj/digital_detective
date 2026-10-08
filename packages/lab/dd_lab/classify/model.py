@@ -276,3 +276,48 @@ def load_relevance_voter(model_dir: str | Path | None):
         return None
     model = OnnxRelevanceModel(model_dir)
     return model if model.available else None
+
+
+def model_status(model_dir: str | Path | None) -> dict:
+    """Why a configured relevance model is or is not usable.
+
+    Both model classes above swallow every load failure and fall back to
+    returning None per artifact. That is the right runtime behaviour — a
+    missing model must never abort a case — but it is the wrong thing to show
+    an examiner, because a configured-but-broken model is then
+    indistinguishable from a working one: classification still runs, every
+    artifact still gets a category, and the relevance model silently
+    contributes nothing to any of it.
+
+    Two real failures this exists to surface, both hit in practice:
+
+    - `onnxruntime` absent. The `classify` extra does not install on every
+      platform (no macosx x86_64 wheel for some versions), so a user can
+      configure a model directory on a machine that cannot load it.
+    - `tokenizers` absent. It used to be satisfied only transitively, via
+      gliner, so installing the relevance model's own extra was not enough.
+      The ONNX session opens, the tokenizer does not, and every score is None.
+
+    Cheap by design — it checks preconditions rather than loading 256 MB, so
+    the settings endpoint can call it on every request.
+    """
+    if not model_dir:
+        return {"configured": False, "usable": False,
+                "reason": "no relevance model directory configured — "
+                          "classification runs on rules alone"}
+    d = Path(model_dir)
+    if not d.is_dir():
+        return {"configured": True, "usable": False,
+                "reason": f"directory not found: {d}"}
+    missing = [f for f in ("model.onnx", "tokenizer.json") if not (d / f).is_file()]
+    if missing:
+        return {"configured": True, "usable": False,
+                "reason": f"missing in {d}: {', '.join(missing)}"}
+    for mod, extra in (("onnxruntime", "classify"), ("tokenizers", "classify")):
+        try:
+            __import__(mod)
+        except ImportError:
+            return {"configured": True, "usable": False,
+                    "reason": f"{mod} is not installed — run "
+                              f"`uv sync --all-packages --extra {extra}`"}
+    return {"configured": True, "usable": True, "reason": "loaded"}
