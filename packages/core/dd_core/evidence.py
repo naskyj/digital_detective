@@ -41,12 +41,38 @@ PREFERENCES = "Preferences"
 LOCAL_STATE = "Local State"
 MEMORY = "memory"
 
-# Directories with no user-relevant content that can be large — never copied.
+# Directories excluded from acquisition.
+#
+# One admission test, and it is deliberately strict, because an acquisition
+# exclusion is the only loss in this system that is PERMANENT - a classifier
+# or parser mistake can be corrected by re-running against the evidence, but
+# a directory that was never copied is simply gone, and on a seized machine
+# there is usually no second chance to go back for it:
+#
+#     a directory may be excluded only if it holds machine-generated data
+#     whose source lies outside the profile and which records nothing the
+#     user did - i.e. a cache of vendor-published content, or a compiled
+#     form of code the vendor shipped. "It is large" is not a reason. "It
+#     is probably not interesting" is not a reason.
+#
+# Every entry below is a cache of something Chromium/Electron downloaded or
+# compiled: shader and GPU caches, V8 bytecode, vendor component and model
+# stores, marketplace extension packages. Each is reconstructible and none
+# contains a record of user activity.
+#
+# Measured on this project's own corpus the whole list removes 20.3 MB of a
+# 414 MB profile (4.9%), so the policy costs almost nothing to apply - which
+# is the point: an exclusion list that saved a lot of space would be removing
+# a lot of data, and that is precisely the thing to be suspicious of.
+# See EXCLUDED_UNTIL_2026_10 for what this list used to contain, and why
+# those entries failed the test above.
 DENYLIST = frozenset({
-    # GPU / shader / graphics caches
+    # GPU / shader / graphics caches — recompiled on demand from the app's
+    # own shaders; no user record.
     "GPUCache", "GrShaderCache", "ShaderCache", "GraphiteDawnCache",
     "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache",
-    # component / model / ML stores shipped by Chromium
+    # component / model / ML stores shipped by Chromium — vendor binaries
+    # fetched from Google's component updater, identical on every install.
     "component_crx_cache", "extensions_crx_cache",
     "optimization_guide_model_store", "optimization_guide_hint_cache_store",
     "OptimizationGuidePredictionModels", "segmentation_platform",
@@ -54,13 +80,45 @@ DENYLIST = frozenset({
     "TrustTokenKeyCommitments", "MEIPreload", "WidevineCdm",
     "CertificateRevocation", "SafetyTips", "Subresource Filter",
     "Safe Browsing", "AutofillStates", "hyphen-data", "OnDeviceHeadSuggestModel",
-    # crash / telemetry
-    "Crashpad", "Crash Reports", "crashDumps", "BrowserMetrics",
-    # VS Code / large-editor bloat (compiled data / editor UI state, not comms data)
-    "CachedData", "CachedExtensions", "CachedExtensionVSIXs", "CachedProfilesData",
-    "Dictionaries", "logs", "clp", "workspaceStorage",
-    # compiled scripts — bytecode, no user data
-    "ScriptCache",
+    # compiled code — V8 bytecode and extension packages as published by the
+    # marketplace. WHICH extensions are installed is user-relevant and is
+    # recorded elsewhere in the profile (extensions/, the extensions manifest);
+    # these directories hold only the compiled/packaged bodies.
+    "ScriptCache", "CachedData", "CachedExtensions", "CachedExtensionVSIXs",
+    "CachedProfilesData",
+})
+
+# Removed from DENYLIST on 2026-10-09. Kept named, with reasons, so the
+# change is auditable and so a future "this directory is just bloat" instinct
+# meets the counter-argument before it re-adds one of them. The test suite
+# asserts DENYLIST and this set stay disjoint.
+#
+#   logs              The original entry targeted VS Code's editor-log bloat,
+#                     but the name is generic and the rule is applied to
+#                     every profile: it was silently discarding Discord's
+#                     WebRTC voice-call logs (discord-webrtc_0) and Slack's
+#                     console logs - 16.5 MB of real comms evidence on this
+#                     project's own corpus. plan_native_root_copy had already
+#                     spotted this for Roblox and subtracted "logs" back out
+#                     for the native path only (_NATIVE_ROOT_DENYLIST), which
+#                     left the Chromium-profile path still dropping them.
+#   Crashpad          Crash minidumps are snapshots of process memory. This
+#   Crash Reports     tool spends most of its runtime carving strings out of
+#   crashDumps        process memory precisely because that memory carries
+#   BrowserMetrics    chat fragments, tokens and URLs; discarding a ready-made
+#                     dump of the same thing at acquisition time cannot be
+#                     reconciled with that.
+#   workspaceStorage  state.vscdb / main.jsonl / content.txt - per-workspace
+#                     editor state, search and terminal history, and in
+#                     current builds assistant chat transcripts. The largest
+#                     single entry on the old list (2.0 GB locally) and the
+#                     most user-authored.
+#   Dictionaries      Custom dictionaries are words the user added.
+#   clp               Undocumented; nothing established what it holds, and
+#                     "unknown" is not grounds for destroying it.
+EXCLUDED_UNTIL_2026_10 = frozenset({
+    "logs", "Crashpad", "Crash Reports", "crashDumps", "BrowserMetrics",
+    "workspaceStorage", "Dictionaries", "clp",
 })
 
 def safe_name(name: str) -> str:
@@ -412,14 +470,15 @@ MISC_EXTENSIONS = frozenset({".json", ".xml", ".log", ".txt", ".ini", ".cfg"})
 _NATIVE_ROOT_MAX_DEPTH = 6
 _NATIVE_ROOT_MAX_FILES = 500
 
-# DENYLIST minus "logs": that entry exists for VS Code's own editor-log
-# bloat (see DENYLIST's own comment), but here it would silently defeat the
-# entire point of this function for a native app like Roblox, whose OWN
-# game logs live in a directory literally named "logs" - real evidence,
-# not bloat, and already scoped down to MISC_EXTENSIONS regardless (the
-# huge-binary-bloat concern DENYLIST's other entries address doesn't apply
-# once extension-filtering is already doing that job).
-_NATIVE_ROOT_DENYLIST = DENYLIST - {"logs"}
+# Historically this was `DENYLIST - {"logs"}`: DENYLIST carried a "logs"
+# entry for VS Code's editor-log bloat, and this function had to subtract it
+# back out because a native app like Roblox keeps its OWN game logs in a
+# directory literally named "logs" - real evidence, not bloat. That local
+# fix was right and the general rule was wrong: the same entry was still
+# discarding Discord's and Slack's logs on the Chromium-profile path. "logs"
+# has now been removed from DENYLIST itself (see EXCLUDED_UNTIL_2026_10), so
+# there is nothing left to subtract and the two paths exclude the same names.
+_NATIVE_ROOT_DENYLIST = DENYLIST
 
 
 def plan_native_root_copy(

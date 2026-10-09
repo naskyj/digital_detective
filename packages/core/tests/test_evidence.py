@@ -10,11 +10,14 @@ import pytest
 
 from dd_core.evidence import (
     _MAX_COPY_DEPTH,
+    DENYLIST,
+    EXCLUDED_UNTIL_2026_10,
     CopySpec,
     execute_copy,
     find_webview2_profiles,
     iter_profiles_for_entry,
     plan_native_root_copy,
+    plan_profile_copy,
 )
 
 
@@ -230,18 +233,20 @@ def test_plan_native_root_copy_ignores_non_allowlisted_extensions(tmp_path):
 
 
 def test_plan_native_root_copy_skips_denylisted_dir_names(tmp_path):
-    # "logs" itself is NOT denylisted (that's the whole point - it's the one
-    # place Roblox keeps its own logs), but something like a Crashpad dump
-    # dir sitting alongside it should still be skipped.
+    # "logs" is NOT denylisted (Roblox's own game logs live there, and since
+    # 2026-10 neither are Discord's and Slack's on the profile path), but a
+    # shader cache sitting alongside it still is. Crashpad used to be this
+    # test's example and is now deliberately collected - see
+    # EXCLUDED_UNTIL_2026_10.
     root = tmp_path / "Roblox"
-    (root / "Crashpad").mkdir(parents=True)
-    (root / "Crashpad" / "settings.json").write_text("{}")
+    (root / "GPUCache").mkdir(parents=True)
+    (root / "GPUCache" / "settings.json").write_text("{}")
     (root / "logs").mkdir()
     (root / "logs" / "app.log").write_text("real log content")
     specs = plan_native_root_copy(root)
     rels = _rels(specs)
     assert "native/logs/app.log" in rels
-    assert not any("Crashpad" in r for r in rels)
+    assert not any("GPUCache" in r for r in rels)
 
 
 def test_plan_native_root_copy_skips_the_embedded_webview2_profile(tmp_path):
@@ -349,3 +354,85 @@ def test_walk_terminates_on_a_loop_that_is_not_a_symlink(tmp_path, monkeypatch):
     specs = plan_native_root_copy(root)
 
     assert [s.dest_rel for s in specs] == ["native/real.xml"]
+
+
+# --------------------------------------------------------------------------
+# Acquisition exclusion policy
+#
+# An acquisition exclusion is the one unrecoverable loss in this system: a
+# parser or classifier mistake can be fixed by re-running against the
+# evidence, but a directory that was never copied is gone, and the source
+# machine is usually unavailable by then. These tests pin the admission
+# rule so that re-adding a "this is just bloat" directory has to argue with
+# a failing test first.
+# --------------------------------------------------------------------------
+
+
+def test_the_denylist_does_not_contain_anything_previously_ruled_out():
+    """Each name in EXCLUDED_UNTIL_2026_10 was removed for a documented
+    reason - user-authored content, or a memory dump this very tool spends
+    hours carving strings out of. Re-adding one silently destroys evidence
+    at acquisition time."""
+    overlap = DENYLIST & EXCLUDED_UNTIL_2026_10
+    assert not overlap, (
+        f"{sorted(overlap)} was removed from DENYLIST on purpose - read the "
+        "reason next to it in evidence.py before re-adding it"
+    )
+
+
+def test_no_denylist_entry_names_a_user_data_directory():
+    """A coarse guard on the admission rule: the excluded set is caches of
+    vendor-published or compiled content, so no entry should carry a name
+    that announces user activity."""
+    forbidden = ("log", "history", "message", "chat", "crash", "dump",
+                 "dictionar", "workspace", "session", "profile" )
+    for name in DENYLIST:
+        low = name.lower()
+        # "CachedProfilesData" is VS Code's compiled extension-profile data,
+        # not a user profile; it is the one allowed hit and is asserted by
+        # name rather than waved through by a substring.
+        if name == "CachedProfilesData":
+            continue
+        for word in forbidden:
+            assert word not in low, (
+                f"DENYLIST entry {name!r} looks like user data ({word!r}); "
+                "acquisition exclusions must be vendor caches only"
+            )
+
+
+def test_a_profile_copy_now_collects_logs_and_crash_dumps(tmp_path):
+    """End to end on the real planner: the two categories that the old list
+    discarded must now appear in the copy plan, while a shader cache does
+    not."""
+    profile = tmp_path / "Default"
+    for d, f in (("logs", "discord-webrtc_0.log"),
+                 ("Crashpad", "a-b-c.dmp"),
+                 ("workspaceStorage", "state.vscdb"),
+                 ("GPUCache", "data_1")):
+        (profile / d).mkdir(parents=True)
+        (profile / d / f).write_text("x")
+    (profile / "Preferences").write_text("{}")
+
+    specs = plan_profile_copy(profile)
+    assert len(specs) == 1 and specs[0].is_dir, "expected one whole-profile spec"
+    excluded = specs[0].exclude_names
+    assert "logs" not in excluded
+    assert "Crashpad" not in excluded
+    assert "workspaceStorage" not in excluded
+    assert "GPUCache" in excluded
+
+    report = execute_copy(specs, tmp_path / "out")
+    written = {p.relative_to(tmp_path / "out").as_posix() for p in report.written}
+    assert "logs/discord-webrtc_0.log" in written
+    assert "Crashpad/a-b-c.dmp" in written
+    assert "workspaceStorage/state.vscdb" in written
+    assert not any(p.startswith("GPUCache") for p in written)
+
+
+def test_the_two_copy_paths_exclude_the_same_names():
+    """plan_native_root_copy used to subtract "logs" back out of DENYLIST
+    for itself, which meant the profile path and the native path disagreed
+    about what counts as bloat. They must not diverge again."""
+    from dd_core.evidence import _NATIVE_ROOT_DENYLIST
+
+    assert _NATIVE_ROOT_DENYLIST == DENYLIST
