@@ -53,3 +53,20 @@ docs/
 PLAN.md
 STATUS.md
 RUNNING.md
+
+# Paper-reproduction and docs-generating scripts — kept local only
+scripts/ablation.py
+scripts/audit_paper_sections.py
+scripts/baseline_tfidf.py
+scripts/operating_points.py
+scripts/render_paper.py
+scripts/schema_json.py
+scripts/paper_metrics.py
+scripts/apply_rule_change.py
+scripts/export_labelled.py
+scripts/tests/test_schema_json.py
+scripts/_bounded_tools.py
+scripts/eval_*.py
+scripts/export_classified.py
+scripts/make_label_sample.py
+scripts/transformer_figures.py
