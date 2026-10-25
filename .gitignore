@@ -47,3 +47,9 @@ docs/reference/*.mp4
 *.key
 config.local.*
 gcs.json
+
+# Private material — never tracked (paper drafts, working notes, handoffs)
+docs/
+PLAN.md
+STATUS.md
+RUNNING.md

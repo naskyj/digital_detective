@@ -12,24 +12,6 @@ produces a court-style HTML forensic report with an evidence timeline and a
 full chain of custody. Everything runs on one machine; no cloud, no network
 required. An optional local or hosted LLM can orchestrate the investigation.
 
-## Documentation
-
-In a hurry: **[docs/CHEATSHEET.md](docs/CHEATSHEET.md)**. Otherwise start with
-**[docs/README.md](docs/README.md)** — it indexes the doc set:
-
-| | |
-|---|---|
-| [docs/OVERVIEW.md](docs/OVERVIEW.md) | what it is, the shape of the system |
-| [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) | one investigation traced end to end |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | every component, data structure, schema |
-| [docs/AGENT.md](docs/AGENT.md) | the deterministic runner vs. the LLM agent — what, why, how |
-| [docs/HOW_TO_RUN.md](docs/HOW_TO_RUN.md) | install, collect, run a case, read the report |
-| [docs/FIELD_GUIDE.md](docs/FIELD_GUIDE.md) | examine a Windows PC from a Mac — concrete steps |
-| [docs/LLM_SETUP.md](docs/LLM_SETUP.md) | configure the agent's model (Ollama / API) |
-| [docs/MODEL_TRAINING.md](docs/MODEL_TRAINING.md) | the optional NLP classifier training track |
-| [docs/CLOUD_TO_LOCAL.md](docs/CLOUD_TO_LOCAL.md) | maps the earlier Google-Cloud build to this one |
-| [PLAN.md](PLAN.md) | the original build plan and technology rationale |
-
 ## Quick start
 
 Needs [`uv`](https://docs.astral.sh/uv/) and **Python 3.12 or 3.13** (not 3.14 —
